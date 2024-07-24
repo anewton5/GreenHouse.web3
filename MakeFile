@@ -1,0 +1,8 @@
+build:
+    go build -o bin/gonetwork
+
+run: build
+    ./bin/gonetwork
+
+test:
+    go test -v ./...
