@@ -61,7 +61,6 @@ func (s *Signature) Bytes() []byte {
 func (s *Signature) Verify(pubKey *PublicKey, msg []byte) bool {
 	return ed25519.Verify(pubKey.key, msg, s.value)
 }
-
 func PublicKeyFromString(pubKeyStr string) (*PublicKey, error) {
 	pubKeyBytes, err := base64.StdEncoding.DecodeString(pubKeyStr)
 	if err != nil {

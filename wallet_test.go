@@ -31,11 +31,17 @@ func TestCreateTransaction(t *testing.T) {
 }
 
 func TestVerifyTransaction(t *testing.T) {
-	sender, _ := gonetwork.NewWallet()
-	receiver, _ := gonetwork.NewWallet()
+	sender, err := gonetwork.NewWallet()
+	assert.NoError(t, err)
+
+	receiver, err := gonetwork.NewWallet()
+	assert.NoError(t, err)
+
 	receiverPublicKeyStr := base64.StdEncoding.EncodeToString(receiver.PublicKey.Bytes())
 
-	tx, _ := sender.CreateTransaction(receiverPublicKeyStr, 100.0)
-	isValid := tx.VerifyTransaction(sender.PublicKey)
+	tx, err := sender.CreateTransaction(receiverPublicKeyStr, 100.0)
+	assert.NoError(t, err)
+
+	isValid := tx.VerifyTransaction()
 	assert.True(t, isValid)
 }

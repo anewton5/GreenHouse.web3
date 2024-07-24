@@ -14,12 +14,22 @@ type Transaction struct {
 }
 
 // Verifies the transaction by checking the signature against the sender's public key
-func (t *Transaction) VerifyTransaction(senderPublicKey *PublicKey) bool {
+func (t *Transaction) VerifyTransaction() bool {
+	// Decode the sender's public key from base64
+	pubKey, err := PublicKeyFromString(t.Sender)
+	if err != nil {
+		fmt.Println("Error decoding sender's public key:", err)
+		return false
+	}
+
+	// Recompute the transaction hash
 	txHash := t.hash()
-	fmt.Printf("Debug: Transaction Hash: %x\n", txHash)
+
+	// Create a Signature object from the signature bytes
 	signature := &Signature{value: t.Signature}
-	fmt.Printf("Debug: Signature: %x\n", signature.Bytes())
-	return signature.Verify(senderPublicKey, txHash)
+
+	// Verify the signature
+	return signature.Verify(pubKey, txHash)
 }
 
 // Defines the structure of a block Lock in the BLockchain
@@ -41,7 +51,7 @@ func (bc *Blockchain) AddBlock(transactions []Transaction, prevHash string) {
 	bc.Blocks = append(bc.Blocks, block)
 }
 
-// Serializes the transaction and hashes it. Encodes the signature as a byte slice
+// SignTransaction signs the transaction with the given private key
 func (t *Transaction) SignTransaction(privateKey *PrivateKey) error {
 	txHash := t.hash()
 	signature := privateKey.Sign(txHash)
@@ -49,8 +59,11 @@ func (t *Transaction) SignTransaction(privateKey *PrivateKey) error {
 	return nil
 }
 
+// hash returns the SHA-256 hash of the transaction data (excluding the signature)
 func (t *Transaction) hash() []byte {
-	txBytes, _ := json.Marshal(t)
+	txCopy := *t
+	txCopy.Signature = nil
+	txBytes, _ := json.Marshal(txCopy)
 	hash := sha256.Sum256(txBytes)
 	return hash[:]
 }
