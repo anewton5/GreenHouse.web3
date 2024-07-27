@@ -13,7 +13,7 @@ func TestNewWallet(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, wallet.PrivateKey)
 	assert.NotNil(t, wallet.PublicKey)
-	assert.Equal(t, 0, wallet.Balance)
+	assert.Equal(t, float64(0), wallet.Balance)
 }
 
 func TestCreateTransaction(t *testing.T) {

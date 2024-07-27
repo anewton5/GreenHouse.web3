@@ -2,6 +2,8 @@ package gonetwork
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
+	"fmt"
 )
 
 // Simplified structures
@@ -14,9 +16,45 @@ type Node struct {
 	PublicKey  ed25519.PublicKey
 }
 
-// Voting for delegates based on stake
 func (bc *Blockchain) VoteForDelegates() {
-	// Simplified voting mechanism
+	votes := make(map[string]float64)
+
+	// Iterate over locked wallets to identify staked users
+	for _, lockedWallet := range bc.LockedWallets {
+		// Calculate voting power based on staked currency
+		votingPower := lockedWallet.Balance
+
+		// Get the voter's ID and their chosen delegate's ID
+		voterID := bc.getVoterID(lockedWallet.OwnerPublicKey)
+		delegateID := bc.getDelegateID(voterID)
+
+		// Add voting power to the chosen delegate
+		votes[delegateID] += votingPower
+	}
+
+	// Select delegates based on votes
+	for _, node := range bc.Nodes {
+		if votes[node.ID] > 0 {
+			node.Votes = int(votes[node.ID])
+			node.IsDelegate = true
+			bc.Delegates = append(bc.Delegates, node)
+		}
+	}
+
+	// Print voting results
+	for _, delegate := range bc.Delegates {
+		fmt.Printf("Delegate %s received %d votes\n", delegate.ID, delegate.Votes)
+	}
+}
+
+func (bc *Blockchain) getVoterID(publicKey [32]byte) string {
+	publicKeyStr := hex.EncodeToString(publicKey[:])
+	return bc.PublicKeyToID[publicKeyStr]
+}
+
+// Get the delegate ID from the voter ID
+func (bc *Blockchain) getDelegateID(voterID string) string {
+	return bc.UserIDToDelegateID[voterID]
 }
 
 // Selecting a delegate to propose the next block

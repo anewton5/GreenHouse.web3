@@ -15,20 +15,13 @@ type Transaction struct {
 
 // Verifies the transaction by checking the signature against the sender's public key
 func (t *Transaction) VerifyTransaction() bool {
-	// Decode the sender's public key from base64
 	pubKey, err := PublicKeyFromString(t.Sender)
 	if err != nil {
 		fmt.Println("Error decoding sender's public key:", err)
 		return false
 	}
-
-	// Recompute the transaction hash
 	txHash := t.hash()
-
-	// Create a Signature object from the signature bytes
 	signature := &Signature{value: t.Signature}
-
-	// Verify the signature
 	return signature.Verify(pubKey, txHash)
 }
 
@@ -41,8 +34,12 @@ type Block struct {
 }
 
 type Blockchain struct {
-	Blocks []Block
-	Nodes  []Node
+	Blocks             []Block
+	Nodes              []Node
+	LockedWallets      map[[32]byte]*LockedWallet
+	Delegates          []Node
+	PublicKeyToID      map[string]string
+	UserIDToDelegateID map[string]string
 }
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, prevHash string) {
