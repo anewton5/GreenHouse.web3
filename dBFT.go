@@ -7,6 +7,8 @@ import (
 	"fmt"
 )
 
+//Logic of this simplified dBFT implementation comes from Neo documentation as well as inspiration from IBM's Hyperledger Fabric.
+
 // Simplified structures
 type Node struct {
 	ID         string

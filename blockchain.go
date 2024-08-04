@@ -90,8 +90,8 @@ func (t *Transaction) hash() []byte {
 	return hash[:]
 }
 
+// This main function is not implemented correctly, for testing only.
 func main() {
-	// Example usage
 	bc := &Blockchain{
 		Blocks:             []Block{},
 		LockedWallets:      make(map[[32]byte]*LockedWallet),
@@ -106,13 +106,11 @@ func main() {
 	}
 	bc.AddBlock(genesisTransactions, nil)
 
-	// Add a new block
 	newTransactions := []Transaction{
 		{Sender: "user1", Receiver: "user2", Amount: 50},
 	}
 	bc.AddBlock(newTransactions, nil)
 
-	// Print the blockchain
 	for _, block := range bc.Blocks {
 		fmt.Printf("PrevHash: %s\n", block.PrevHash)
 		fmt.Printf("Transactions: %+v\n", block.Transactions)
