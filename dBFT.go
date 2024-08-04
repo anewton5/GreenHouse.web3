@@ -2,6 +2,7 @@ package gonetwork
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 )
@@ -16,6 +17,7 @@ type Node struct {
 	PublicKey  ed25519.PublicKey
 }
 
+// THis is a simplified version of voting process for consensus nodes in dBFT. For the purpose of GreenHouse.io we will simply select nodes from the pool of nodes that are staking a part of their currency on the network.
 func (bc *Blockchain) VoteForDelegates() {
 	votes := make(map[string]float64)
 
@@ -28,11 +30,9 @@ func (bc *Blockchain) VoteForDelegates() {
 		voterID := bc.getVoterID(lockedWallet.OwnerPublicKey)
 		delegateID := bc.getDelegateID(voterID)
 
-		// Add voting power to the chosen delegate
 		votes[delegateID] += votingPower
 	}
 
-	// Select delegates based on votes
 	for _, node := range bc.Nodes {
 		if votes[node.ID] > 0 {
 			node.Votes = int(votes[node.ID])
@@ -41,10 +41,11 @@ func (bc *Blockchain) VoteForDelegates() {
 		}
 	}
 
-	// Print voting results
 	for _, delegate := range bc.Delegates {
 		fmt.Printf("Delegate %s received %d votes\n", delegate.ID, delegate.Votes)
 	}
+
+	bc.startConsensus()
 }
 
 func (bc *Blockchain) getVoterID(publicKey [32]byte) string {
@@ -52,43 +53,72 @@ func (bc *Blockchain) getVoterID(publicKey [32]byte) string {
 	return bc.PublicKeyToID[publicKeyStr]
 }
 
-// Get the delegate ID from the voter ID
 func (bc *Blockchain) getDelegateID(voterID string) string {
 	return bc.UserIDToDelegateID[voterID]
 }
 
-// Selecting a delegate to propose the next block
-func (bc *Blockchain) SelectDelegate() Node {
-	// Simplified selection mechanism
-	return Node{} // Placeholder
+func (bc *Blockchain) startConsensus() {
+	bc.currentView = View{Number: 0}
+	bc.selectSpeaker()
+	bc.createBlock()
 }
 
-// Delegate creates and broadcasts a block
-func (delegate *Node) CreateBlock(transactions []Transaction, prevHash string) Block {
-	block := Block{Transactions: transactions, PrevHash: prevHash, Nonce: 0}
-	// Block creation logic
-	return block
+func (bc *Blockchain) selectSpeaker() {
+	bc.currentSpeaker = int(bc.currentView.Number) % len(bc.Delegates)
+	fmt.Printf("Speaker for view %d is %s\n", bc.currentView, bc.Delegates[bc.currentSpeaker].ID)
 }
 
-// Other delegates validate the block
-func (bc *Blockchain) ValidateBlock(block Block) bool {
-	// Simplified validation logic
-	return true // Placeholder
-}
-
-// Achieving consensus
 func (bc *Blockchain) AchieveConsensus(block Block) bool {
-	// Simplified consensus mechanism
-	return true // Placeholder
+	votes := 0
+	for _, delegate := range bc.Delegates {
+		if delegate.VoteOnBlock(block) {
+			votes++
+		}
+	}
+	consensusThreshold := (2 * len(bc.Delegates)) / 3
+	if votes > consensusThreshold {
+		fmt.Printf("Consensus achieved with %d votes out of %d\n", votes, len(bc.Delegates))
+		return true
+	}
+
+	fmt.Printf("Consensus not achieved, only %d votes out of %d\n", votes, len(bc.Delegates))
+	return false
 }
 
-// Adding the block to the blockchain
-func (bc *Blockchain) FinalizeBlock(block Block) {
-	bc.Blocks = append(bc.Blocks, block)
+// Method for a delegate to vote on a block. Simplified voting logic: always vote yes.
+func (n *Node) VoteOnBlock(block Block) bool {
+	return true
 }
 
-// Main function to simulate the dBFT process
-func dBFTmain() {
-	// Blockchain and nodes initialization
-	// Simulate the dBFT process
+func (bc *Blockchain) createBlock() {
+	signatures := [][]byte{}
+	for _, delegate := range bc.Delegates {
+		signatures = append(signatures, []byte(delegate.ID))
+	}
+
+	transactions := []Transaction{}
+	for _, wallet := range bc.Wallets {
+		for receiverPublicKeyStr := range bc.Wallets {
+			if receiverPublicKeyStr != base64.StdEncoding.EncodeToString(wallet.PublicKey.Bytes()) {
+				amount := 10.0
+				tx, err := wallet.CreateTransaction(receiverPublicKeyStr, amount)
+				if err != nil {
+					fmt.Println("Error creating transaction:", err)
+					continue
+				}
+				transactions = append(transactions, *tx)
+				break
+			}
+		}
+	}
+
+	bc.Nonce++
+
+	if bc.AchieveConsensus(Block{Signatures: signatures}) {
+		bc.AddBlock(transactions, signatures)
+		fmt.Printf("Block %d created with signatures: %v\n", len(bc.Blocks)-1, signatures)
+	}
+
+	bc.currentView = View{Number: bc.currentView.Number + 1}
+	bc.selectSpeaker()
 }
