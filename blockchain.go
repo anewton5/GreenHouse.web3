@@ -58,7 +58,9 @@ type Blockchain struct {
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
 	var prevHash string
-	if len(bc.Blocks) > 0 {
+	if len(signatures) > 0 {
+		prevHash = string(signatures[0])
+	} else if len(bc.Blocks) > 0 {
 		prevHash = bc.Blocks[len(bc.Blocks)-1].CalculateHash()
 	}
 

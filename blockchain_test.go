@@ -11,8 +11,9 @@ func TestAddBlock(t *testing.T) {
 		{Sender: "Alice", Receiver: "Bob", Amount: 10},
 	}
 	prevHash := "0000000000000000" // Example previous hash
+	prevHashBytes := [][]byte{[]byte(prevHash)}
 
-	bc.AddBlock(transactions, prevHash)
+	bc.AddBlock(transactions, prevHashBytes)
 
 	if len(bc.Blocks) != 1 {
 		t.Errorf("Expected 1 block, got %d", len(bc.Blocks))

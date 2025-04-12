@@ -3,13 +3,10 @@ package gonetwork
 import (
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 )
 
-//Logic of this simplified dBFT implementation comes from Neo documentation as well as inspiration from IBM's Hyperledger Fabric.
-
-// Simplified structures
+// Simplified Node structure
 type Node struct {
 	ID         string
 	IsDelegate bool
@@ -19,57 +16,76 @@ type Node struct {
 	PublicKey  ed25519.PublicKey
 }
 
-// THis is a simplified version of voting process for consensus nodes in dBFT. For the purpose of GreenHouse.io we will simply select nodes from the pool of nodes that are staking a part of their currency on the network.
+// VoteForDelegates selects delegates based on staked currency
 func (bc *Blockchain) VoteForDelegates() {
+	// Reset delegates
+	bc.Delegates = []Node{}
+
 	votes := make(map[string]float64)
 
-	// Iterate over locked wallets to identify staked users
+	// Calculate votes based on locked wallets
 	for _, lockedWallet := range bc.LockedWallets {
-		// Calculate voting power based on staked currency
-		votingPower := lockedWallet.Balance
-
 		// Get the voter's ID and their chosen delegate's ID
 		voterID := bc.getVoterID(lockedWallet.OwnerPublicKey)
 		delegateID := bc.getDelegateID(voterID)
 
-		votes[delegateID] += votingPower
-	}
-
-	for _, node := range bc.Nodes {
-		if votes[node.ID] > 0 {
-			node.Votes = int(votes[node.ID])
-			node.IsDelegate = true
-			bc.Delegates = append(bc.Delegates, node)
+		if delegateID != "" {
+			votes[delegateID] += lockedWallet.Balance
 		}
 	}
 
+	// Assign votes to nodes and select delegates
+	for i := range bc.Nodes {
+		node := &bc.Nodes[i]
+		if votes[node.ID] > 0 {
+			node.Votes = int(votes[node.ID])
+			node.IsDelegate = true
+			bc.Delegates = append(bc.Delegates, *node)
+		}
+	}
+
+	// Log the elected delegates
 	for _, delegate := range bc.Delegates {
 		fmt.Printf("Delegate %s received %d votes\n", delegate.ID, delegate.Votes)
 	}
 
-	bc.startConsensus()
+	// Start the consensus process
+	if len(bc.Delegates) > 0 {
+		bc.startConsensus()
+	} else {
+		fmt.Println("No delegates elected. Consensus cannot start.")
+	}
 }
 
+// Get voter ID from public key
 func (bc *Blockchain) getVoterID(publicKey [32]byte) string {
-	publicKeyStr := hex.EncodeToString(publicKey[:])
+	publicKeyStr := base64.StdEncoding.EncodeToString(publicKey[:])
 	return bc.PublicKeyToID[publicKeyStr]
 }
 
+// Get delegate ID from voter ID
 func (bc *Blockchain) getDelegateID(voterID string) string {
 	return bc.UserIDToDelegateID[voterID]
 }
 
+// Start the consensus process
 func (bc *Blockchain) startConsensus() {
 	bc.currentView = View{Number: 0}
 	bc.selectSpeaker()
 	bc.createBlock()
 }
 
+// Select the speaker (proposer) for the current view
 func (bc *Blockchain) selectSpeaker() {
+	if len(bc.Delegates) == 0 {
+		fmt.Println("No delegates available to select a speaker.")
+		return
+	}
 	bc.currentSpeaker = int(bc.currentView.Number) % len(bc.Delegates)
-	fmt.Printf("Speaker for view %d is %s\n", bc.currentView, bc.Delegates[bc.currentSpeaker].ID)
+	fmt.Printf("Speaker for view %d is %s\n", bc.currentView.Number, bc.Delegates[bc.currentSpeaker].ID)
 }
 
+// AchieveConsensus ensures consensus is reached among delegates
 func (bc *Blockchain) AchieveConsensus(block Block) bool {
 	votes := 0
 	for _, delegate := range bc.Delegates {
@@ -77,6 +93,7 @@ func (bc *Blockchain) AchieveConsensus(block Block) bool {
 			votes++
 		}
 	}
+
 	consensusThreshold := (2 * len(bc.Delegates)) / 3
 	if votes > consensusThreshold {
 		fmt.Printf("Consensus achieved with %d votes out of %d\n", votes, len(bc.Delegates))
@@ -87,17 +104,26 @@ func (bc *Blockchain) AchieveConsensus(block Block) bool {
 	return false
 }
 
-// Method for a delegate to vote on a block. Simplified voting logic: always vote yes.
+// Delegate votes on a block (simplified logic)
 func (n *Node) VoteOnBlock(block Block) bool {
+	// Add custom logic to validate the block if needed
 	return true
 }
 
+// Create a new block and add it to the blockchain
 func (bc *Blockchain) createBlock() {
+	if len(bc.Delegates) == 0 {
+		fmt.Println("No delegates available to create a block.")
+		return
+	}
+
+	// Collect signatures from delegates
 	signatures := [][]byte{}
 	for _, delegate := range bc.Delegates {
 		signatures = append(signatures, []byte(delegate.ID))
 	}
 
+	// Collect valid transactions
 	transactions := []Transaction{}
 	for _, wallet := range bc.Wallets {
 		for receiverPublicKeyStr := range bc.Wallets {
@@ -114,13 +140,18 @@ func (bc *Blockchain) createBlock() {
 		}
 	}
 
+	// Increment nonce
 	bc.Nonce++
 
+	// Attempt to achieve consensus
 	if bc.AchieveConsensus(Block{Signatures: signatures}) {
 		bc.AddBlock(transactions, signatures)
 		fmt.Printf("Block %d created with signatures: %v\n", len(bc.Blocks)-1, signatures)
+	} else {
+		fmt.Println("Failed to achieve consensus. Block not added.")
 	}
 
+	// Move to the next view
 	bc.currentView = View{Number: bc.currentView.Number + 1}
 	bc.selectSpeaker()
 }
