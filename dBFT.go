@@ -8,13 +8,14 @@ import (
 
 // Simplified Node structure
 type Node struct {
-	ID         string
-	IsDelegate bool
-	Stake      int
-	Votes      int
-	PrivateKey ed25519.PrivateKey
-	PublicKey  ed25519.PublicKey
-	Inbox      chan Message
+	ID             string
+	IsDelegate     bool
+	Stake          int
+	Votes          int
+	PrivateKey     ed25519.PrivateKey
+	PublicKey      ed25519.PublicKey
+	Inbox          chan Message
+	VotingStrategy func(block Block) bool
 }
 
 // VoteForDelegates selects delegates based on staked currency
@@ -81,6 +82,12 @@ func (bc *Blockchain) startConsensus(network *Network) {
 		PrevHash:     "",              // Add previous hash here
 	}
 
+	// Validate the block before broadcasting
+	if !bc.ValidateBlock(block) {
+		fmt.Println("Proposed block is invalid. Consensus cannot proceed.")
+		return
+	}
+
 	// Broadcast block proposal
 	proposalMsg := Message{
 		From:    speaker.ID,
@@ -131,33 +138,43 @@ func (bc *Blockchain) selectSpeaker() {
 
 // AchieveConsensus ensures consensus is reached among delegates
 func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
-	votes := 0
+	yesVotes := 0
+	noVotes := 0
 
 	// Simulate receiving votes via the network
 	for _, delegate := range bc.Delegates {
+		vote := delegate.VoteOnBlock(block)
 		voteMsg := Message{
 			From:    delegate.ID,
 			To:      "",
 			Type:    Vote,
-			Payload: true, // Simplified: all delegates vote "yes"
+			Payload: vote,
 		}
 		delegate.SendMessage(network, voteMsg)
-		votes++
+
+		if vote {
+			yesVotes++
+		} else {
+			noVotes++
+		}
 	}
 
 	consensusThreshold := (2 * len(bc.Delegates)) / 3
-	if votes > consensusThreshold {
-		fmt.Printf("Consensus achieved with %d votes out of %d\n", votes, len(bc.Delegates))
+	if yesVotes > consensusThreshold {
+		fmt.Printf("Consensus achieved with %d yes votes out of %d\n", yesVotes, len(bc.Delegates))
 		return true
 	}
 
-	fmt.Printf("Consensus not achieved, only %d votes out of %d\n", votes, len(bc.Delegates))
+	fmt.Printf("Consensus not achieved. Yes votes: %d, No votes: %d\n", yesVotes, noVotes)
 	return false
 }
 
 // Delegate votes on a block (simplified logic)
 func (n *Node) VoteOnBlock(block Block) bool {
-	// Add custom logic to validate the block if needed
+	if n.VotingStrategy != nil {
+		return n.VotingStrategy(block)
+	}
+	// Default to "yes" if no strategy is set
 	return true
 }
 

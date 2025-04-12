@@ -51,3 +51,73 @@ func TestSignTransaction(t *testing.T) {
 		t.Error("Signature verification failed")
 	}
 }
+
+func TestValidateBlock(t *testing.T) {
+	// Setup blockchain
+	bc := Blockchain{}
+
+	// Generate a key pair for the sender
+	privateKey, _ := GeneratePrivateKey()
+	publicKey := privateKey.Public()
+	senderPublicKey := base64.StdEncoding.EncodeToString(publicKey.Bytes())
+
+	// Add a valid block to the chain
+	validTransaction := Transaction{
+		Sender:   senderPublicKey,
+		Receiver: "receiver1",
+		Amount:   10,
+	}
+	validTransaction.SignTransaction(privateKey)
+
+	validBlock := Block{
+		Transactions: []Transaction{validTransaction},
+		PrevHash:     "",
+	}
+	bc.Blocks = append(bc.Blocks, validBlock)
+
+	// Test valid block
+	newTransaction := Transaction{
+		Sender:   senderPublicKey,
+		Receiver: "receiver2",
+		Amount:   20,
+	}
+	newTransaction.SignTransaction(privateKey)
+
+	newBlock := Block{
+		Transactions: []Transaction{newTransaction},
+		PrevHash:     validBlock.CalculateHash(),
+	}
+	if !bc.ValidateBlock(newBlock) {
+		t.Errorf("Expected block to be valid, but it was invalid")
+	}
+
+	// Test invalid block (missing transactions)
+	invalidBlock := Block{
+		Transactions: []Transaction{},
+		PrevHash:     validBlock.CalculateHash(),
+	}
+	if bc.ValidateBlock(invalidBlock) {
+		t.Errorf("Expected block to be invalid, but it was valid")
+	}
+
+	// Test invalid block (incorrect previous hash)
+	invalidBlock.PrevHash = "invalid_hash"
+	if bc.ValidateBlock(invalidBlock) {
+		t.Errorf("Expected block to be invalid, but it was valid")
+	}
+
+	// Test invalid block (invalid transaction)
+	invalidTransaction := Transaction{
+		Sender:    "invalid_sender",
+		Receiver:  "receiver3",
+		Amount:    30,
+		Signature: []byte("invalid_signature"),
+	}
+	invalidTransactionBlock := Block{
+		Transactions: []Transaction{invalidTransaction},
+		PrevHash:     validBlock.CalculateHash(),
+	}
+	if bc.ValidateBlock(invalidTransactionBlock) {
+		t.Errorf("Expected block to be invalid due to invalid transaction, but it was valid")
+	}
+}

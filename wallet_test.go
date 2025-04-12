@@ -42,6 +42,7 @@ func TestVerifyTransaction(t *testing.T) {
 	tx, err := sender.CreateTransaction(receiverPublicKeyStr, 100.0)
 	assert.NoError(t, err)
 
-	isValid := tx.VerifyTransaction()
+	isValid, err := tx.VerifyTransaction()
+	assert.NoError(t, err)
 	assert.True(t, isValid)
 }

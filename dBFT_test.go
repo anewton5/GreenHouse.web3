@@ -145,3 +145,56 @@ func TestNetworkConsensus(t *testing.T) {
 	// Start consensus
 	bc.startConsensus(network)
 }
+
+func TestVoteOnBlock(t *testing.T) {
+	// Create a delegate node with a voting strategy
+	delegate := Node{
+		ID: "delegate1",
+		VotingStrategy: func(block Block) bool {
+			return len(block.Transactions) > 0 // Vote YES if the block has transactions
+		},
+	}
+
+	// Test valid block
+	validBlock := Block{
+		Transactions: []Transaction{{Sender: "wallet1", Receiver: "wallet2", Amount: 10}},
+	}
+	if !delegate.VoteOnBlock(validBlock) {
+		t.Errorf("Expected delegate to vote YES on valid block, but voted NO")
+	}
+
+	// Test invalid block (missing transactions)
+	invalidBlock := Block{
+		Transactions: []Transaction{},
+	}
+	if delegate.VoteOnBlock(invalidBlock) {
+		t.Errorf("Expected delegate to vote NO on invalid block, but voted YES")
+	}
+}
+
+func TestAchieveConsensusWithMixedVotes(t *testing.T) {
+	// Create a network
+	network := &Network{}
+
+	// Setup blockchain with delegates
+	bc := Blockchain{
+		Delegates: []Node{
+			{ID: "delegate1", VotingStrategy: func(block Block) bool { return true }}, // YES
+			{ID: "delegate2", VotingStrategy: func(block Block) bool { return true }}, // YES
+			{ID: "delegate3", VotingStrategy: func(block Block) bool { return true }}, // YES
+		},
+	}
+
+	// Create a valid block
+	validBlock := Block{
+		Transactions: []Transaction{{Sender: "wallet1", Receiver: "wallet2", Amount: 10}},
+	}
+
+	// Call AchieveConsensus
+	result := bc.AchieveConsensus(validBlock, network)
+
+	// Verify consensus result
+	if !result {
+		t.Errorf("Expected consensus to be achieved, but it was not")
+	}
+}

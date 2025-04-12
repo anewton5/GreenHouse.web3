@@ -15,15 +15,32 @@ type Transaction struct {
 }
 
 // Verifies the transaction by checking the signature against the sender's public key
-func (t *Transaction) VerifyTransaction() bool {
+func (t *Transaction) VerifyTransaction() (bool, error) {
+	// Validate transaction fields
+	if t.Amount <= 0 {
+		return false, fmt.Errorf("invalid transaction: amount must be greater than zero")
+	}
+
+	if t.Sender == "" || t.Receiver == "" {
+		return false, fmt.Errorf("invalid transaction: sender and receiver must not be empty")
+	}
+
+	// Decode the sender's public key
 	pubKey, err := PublicKeyFromString(t.Sender)
 	if err != nil {
-		fmt.Println("Error decoding sender's public key:", err)
-		return false
+		return false, fmt.Errorf("error decoding sender's public key: %w", err)
 	}
+
+	// Calculate the transaction hash
 	txHash := t.hash()
+
+	// Verify the transaction signature
 	signature := &Signature{value: t.Signature}
-	return signature.Verify(pubKey, txHash)
+	if !signature.Verify(pubKey, txHash) {
+		return false, fmt.Errorf("transaction signature verification failed")
+	}
+
+	return true, nil
 }
 
 type Block struct {
@@ -90,6 +107,35 @@ func (t *Transaction) hash() []byte {
 	txBytes, _ := json.Marshal(txCopy)
 	hash := sha256.Sum256(txBytes)
 	return hash[:]
+}
+
+func (bc *Blockchain) ValidateBlock(block Block) bool {
+	// Check if the block's previous hash matches the hash of the last block in the chain
+	if len(bc.Blocks) > 0 {
+		lastBlock := bc.Blocks[len(bc.Blocks)-1]
+		if block.PrevHash != lastBlock.CalculateHash() {
+			fmt.Println("Invalid block: previous hash does not match")
+			return false
+		}
+	}
+
+	// Check if the block contains at least one transaction
+	if len(block.Transactions) == 0 {
+		fmt.Println("Invalid block: no transactions")
+		return false
+	}
+
+	// Verify all transactions in the block
+	for _, tx := range block.Transactions {
+		valid, err := tx.VerifyTransaction()
+		if !valid {
+			fmt.Printf("Invalid block: contains invalid transaction (%v)\n", err)
+			return false
+		}
+	}
+
+	// Additional validation rules can be added here
+	return true
 }
 
 // This main function is not implemented correctly, for testing only.
