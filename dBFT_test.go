@@ -45,8 +45,11 @@ func TestVoteForDelegates(t *testing.T) {
 		t.Fatalf("Failed to lock currency for wallet2: %v", err)
 	}
 
+	// Create a Network instance
+	network := &Network{}
+
 	// Call VoteForDelegates
-	bc.VoteForDelegates()
+	bc.VoteForDelegates(network)
 
 	// Verify delegates
 	if len(bc.Delegates) != 2 {
@@ -59,6 +62,8 @@ func TestVoteForDelegates(t *testing.T) {
 }
 
 func TestAchieveConsensus(t *testing.T) {
+
+	network := &Network{}
 	// Setup blockchain with delegates
 	bc := Blockchain{
 		Delegates: []Node{
@@ -72,7 +77,7 @@ func TestAchieveConsensus(t *testing.T) {
 	block := Block{}
 
 	// Call AchieveConsensus
-	result := bc.AchieveConsensus(block)
+	result := bc.AchieveConsensus(block, network)
 
 	// Verify consensus result
 	if !result {
@@ -88,6 +93,8 @@ func TestCreateBlock(t *testing.T) {
 	pubKey1 := privKey1.Public()
 	pubKey2 := privKey2.Public()
 
+	network := &Network{}
+
 	// Setup blockchain with wallets and delegates
 	bc := Blockchain{
 		Wallets: map[string]*Wallet{
@@ -101,7 +108,7 @@ func TestCreateBlock(t *testing.T) {
 	}
 
 	// Call createBlock
-	bc.createBlock()
+	bc.createBlock(network)
 
 	// Verify block creation
 	if len(bc.Blocks) != 1 {
@@ -111,4 +118,30 @@ func TestCreateBlock(t *testing.T) {
 	if len(bc.Blocks[0].Transactions) == 0 {
 		t.Errorf("Expected transactions in the block, but found none")
 	}
+}
+
+func TestNetworkConsensus(t *testing.T) {
+	network := NewNetwork()
+
+	// Create nodes
+	node1 := NewNode("node1")
+	node2 := NewNode("node2")
+	node3 := NewNode("node3")
+
+	// Register nodes to the network
+	network.RegisterNode(node1)
+	network.RegisterNode(node2)
+	network.RegisterNode(node3)
+
+	// Setup blockchain with delegates
+	bc := Blockchain{
+		Delegates: []Node{
+			*node1,
+			*node2,
+			*node3,
+		},
+	}
+
+	// Start consensus
+	bc.startConsensus(network)
 }

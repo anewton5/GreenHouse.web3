@@ -14,10 +14,11 @@ type Node struct {
 	Votes      int
 	PrivateKey ed25519.PrivateKey
 	PublicKey  ed25519.PublicKey
+	Inbox      chan Message
 }
 
 // VoteForDelegates selects delegates based on staked currency
-func (bc *Blockchain) VoteForDelegates() {
+func (bc *Blockchain) VoteForDelegates(network *Network) {
 	// Reset delegates
 	bc.Delegates = []Node{}
 
@@ -51,7 +52,7 @@ func (bc *Blockchain) VoteForDelegates() {
 
 	// Start the consensus process
 	if len(bc.Delegates) > 0 {
-		bc.startConsensus()
+		bc.startConsensus(network)
 	} else {
 		fmt.Println("No delegates elected. Consensus cannot start.")
 	}
@@ -69,10 +70,53 @@ func (bc *Blockchain) getDelegateID(voterID string) string {
 }
 
 // Start the consensus process
-func (bc *Blockchain) startConsensus() {
+func (bc *Blockchain) startConsensus(network *Network) {
 	bc.currentView = View{Number: 0}
 	bc.selectSpeaker()
-	bc.createBlock()
+
+	// Speaker proposes a block
+	speaker := bc.Delegates[bc.currentSpeaker]
+	block := Block{
+		Transactions: []Transaction{}, // Add transactions here
+		PrevHash:     "",              // Add previous hash here
+	}
+
+	// Broadcast block proposal
+	proposalMsg := Message{
+		From:    speaker.ID,
+		To:      "",
+		Type:    BlockProposal,
+		Payload: block,
+	}
+	speaker.SendMessage(network, proposalMsg)
+
+	// Collect votes from delegates
+	votes := 0
+	for _, delegate := range bc.Delegates {
+		voteMsg := Message{
+			From:    delegate.ID,
+			To:      speaker.ID,
+			Type:    Vote,
+			Payload: true, // Simplified: all delegates vote "yes"
+		}
+		delegate.SendMessage(network, voteMsg)
+		votes++
+	}
+
+	// Check if consensus is achieved
+	consensusThreshold := (2 * len(bc.Delegates)) / 3
+	if votes > consensusThreshold {
+		consensusMsg := Message{
+			From:    speaker.ID,
+			To:      "",
+			Type:    Consensus,
+			Payload: "Consensus achieved",
+		}
+		speaker.SendMessage(network, consensusMsg)
+		fmt.Println("Consensus achieved. Block added to the blockchain.")
+	} else {
+		fmt.Println("Consensus not achieved.")
+	}
 }
 
 // Select the speaker (proposer) for the current view
@@ -86,12 +130,19 @@ func (bc *Blockchain) selectSpeaker() {
 }
 
 // AchieveConsensus ensures consensus is reached among delegates
-func (bc *Blockchain) AchieveConsensus(block Block) bool {
+func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
 	votes := 0
+
+	// Simulate receiving votes via the network
 	for _, delegate := range bc.Delegates {
-		if delegate.VoteOnBlock(block) {
-			votes++
+		voteMsg := Message{
+			From:    delegate.ID,
+			To:      "",
+			Type:    Vote,
+			Payload: true, // Simplified: all delegates vote "yes"
 		}
+		delegate.SendMessage(network, voteMsg)
+		votes++
 	}
 
 	consensusThreshold := (2 * len(bc.Delegates)) / 3
@@ -111,7 +162,7 @@ func (n *Node) VoteOnBlock(block Block) bool {
 }
 
 // Create a new block and add it to the blockchain
-func (bc *Blockchain) createBlock() {
+func (bc *Blockchain) createBlock(network *Network) {
 	if len(bc.Delegates) == 0 {
 		fmt.Println("No delegates available to create a block.")
 		return
@@ -144,7 +195,7 @@ func (bc *Blockchain) createBlock() {
 	bc.Nonce++
 
 	// Attempt to achieve consensus
-	if bc.AchieveConsensus(Block{Signatures: signatures}) {
+	if bc.AchieveConsensus(Block{Signatures: signatures}, network) {
 		bc.AddBlock(transactions, signatures)
 		fmt.Printf("Block %d created with signatures: %v\n", len(bc.Blocks)-1, signatures)
 	} else {
@@ -154,4 +205,38 @@ func (bc *Blockchain) createBlock() {
 	// Move to the next view
 	bc.currentView = View{Number: bc.currentView.Number + 1}
 	bc.selectSpeaker()
+}
+
+// NewNode creates a new node
+func NewNode(id string) *Node {
+	return &Node{
+		ID:    id,
+		Inbox: make(chan Message, 10), // Buffered channel for messages
+	}
+}
+
+// SendMessage sends a message to the network
+func (n *Node) SendMessage(network *Network, msg Message) {
+	network.SendMessage(msg)
+}
+
+// ReceiveMessage handles incoming messages
+func (n *Node) ReceiveMessage(msg Message) {
+	go func() {
+		n.Inbox <- msg
+	}()
+}
+
+// ProcessMessages processes messages from the inbox
+func (n *Node) ProcessMessages() {
+	for msg := range n.Inbox {
+		switch msg.Type {
+		case BlockProposal:
+			fmt.Printf("Node %s received block proposal: %+v\n", n.ID, msg.Payload)
+		case Vote:
+			fmt.Printf("Node %s received vote: %+v\n", n.ID, msg.Payload)
+		case Consensus:
+			fmt.Printf("Node %s received consensus result: %+v\n", n.ID, msg.Payload)
+		}
+	}
 }
