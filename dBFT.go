@@ -15,7 +15,8 @@ type Node struct {
 	PrivateKey     ed25519.PrivateKey
 	PublicKey      ed25519.PublicKey
 	Inbox          chan Message
-	VotingStrategy func(block Block) bool
+	VotingStrategy VotingStrategy
+	Blockchain     *Blockchain
 }
 
 // VoteForDelegates selects delegates based on staked currency
@@ -75,11 +76,11 @@ func (bc *Blockchain) startConsensus(network *Network) {
 	bc.currentView = View{Number: 0}
 	bc.selectSpeaker()
 
-	// Speaker proposes a block
+	// Speaker proposes a block with transactions from the pool
 	speaker := bc.Delegates[bc.currentSpeaker]
 	block := Block{
-		Transactions: []Transaction{}, // Add transactions here
-		PrevHash:     "",              // Add previous hash here
+		Transactions: bc.TransactionPool, // Use transactions from the pool
+		PrevHash:     bc.GetLastBlockHash(),
 	}
 
 	// Validate the block before broadcasting
@@ -97,33 +98,27 @@ func (bc *Blockchain) startConsensus(network *Network) {
 	}
 	speaker.SendMessage(network, proposalMsg)
 
-	// Collect votes from delegates
-	votes := 0
-	for _, delegate := range bc.Delegates {
-		voteMsg := Message{
-			From:    delegate.ID,
-			To:      speaker.ID,
-			Type:    Vote,
-			Payload: true, // Simplified: all delegates vote "yes"
-		}
-		delegate.SendMessage(network, voteMsg)
-		votes++
-	}
+	// Clear the transaction pool after proposing the block
+	bc.TransactionPool = []Transaction{}
+}
 
-	// Check if consensus is achieved
-	consensusThreshold := (2 * len(bc.Delegates)) / 3
-	if votes > consensusThreshold {
-		consensusMsg := Message{
-			From:    speaker.ID,
-			To:      "",
-			Type:    Consensus,
-			Payload: "Consensus achieved",
-		}
-		speaker.SendMessage(network, consensusMsg)
-		fmt.Println("Consensus achieved. Block added to the blockchain.")
-	} else {
-		fmt.Println("Consensus not achieved.")
-	}
+type FuncVotingStrategy struct {
+	VoteFunc func(block Block) bool
+}
+
+func (f *FuncVotingStrategy) Vote(block Block) bool {
+	return f.VoteFunc(block)
+}
+
+type VotingStrategy interface {
+	Vote(block Block) bool
+}
+
+type DefaultVotingStrategy struct{}
+
+func (d *DefaultVotingStrategy) Vote(block Block) bool {
+	// Example: Vote "yes" if the block contains at least one transaction
+	return len(block.Transactions) > 0
 }
 
 // Select the speaker (proposer) for the current view
@@ -144,6 +139,7 @@ func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
 	// Simulate receiving votes via the network
 	for _, delegate := range bc.Delegates {
 		vote := delegate.VoteOnBlock(block)
+		fmt.Printf("Delegate %s voted %v on the block\n", delegate.ID, vote) // Log delegate votes
 		voteMsg := Message{
 			From:    delegate.ID,
 			To:      "",
@@ -160,8 +156,9 @@ func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
 	}
 
 	consensusThreshold := (2 * len(bc.Delegates)) / 3
-	if yesVotes > consensusThreshold {
+	if yesVotes >= consensusThreshold {
 		fmt.Printf("Consensus achieved with %d yes votes out of %d\n", yesVotes, len(bc.Delegates))
+		bc.finalizeBlock(block)
 		return true
 	}
 
@@ -169,13 +166,22 @@ func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
 	return false
 }
 
+func (bc *Blockchain) AddTransaction(tx Transaction) {
+	bc.TransactionPool = append(bc.TransactionPool, tx)
+	fmt.Printf("Transaction added to the pool: %+v\n", tx)
+}
+
 // Delegate votes on a block (simplified logic)
 func (n *Node) VoteOnBlock(block Block) bool {
 	if n.VotingStrategy != nil {
-		return n.VotingStrategy(block)
+		return n.VotingStrategy.Vote(block)
 	}
 	// Default to "yes" if no strategy is set
 	return true
+}
+func (bc *Blockchain) finalizeBlock(block Block) {
+	fmt.Printf("Finalizing block with hash: %s\n", block.CalculateHash())
+	bc.Blocks = append(bc.Blocks, block)
 }
 
 // Create a new block and add it to the blockchain
@@ -185,6 +191,9 @@ func (bc *Blockchain) createBlock(network *Network) {
 		return
 	}
 
+	// Log the transaction pool
+	fmt.Printf("Transaction pool before block creation: %+v\n", bc.TransactionPool)
+
 	// Collect signatures from delegates
 	signatures := [][]byte{}
 	for _, delegate := range bc.Delegates {
@@ -193,26 +202,15 @@ func (bc *Blockchain) createBlock(network *Network) {
 
 	// Collect valid transactions
 	transactions := []Transaction{}
-	for _, wallet := range bc.Wallets {
-		for receiverPublicKeyStr := range bc.Wallets {
-			if receiverPublicKeyStr != base64.StdEncoding.EncodeToString(wallet.PublicKey.Bytes()) {
-				amount := 10.0
-				tx, err := wallet.CreateTransaction(receiverPublicKeyStr, amount)
-				if err != nil {
-					fmt.Println("Error creating transaction:", err)
-					continue
-				}
-				transactions = append(transactions, *tx)
-				break
-			}
-		}
+	for _, tx := range bc.TransactionPool {
+		transactions = append(transactions, tx)
 	}
 
 	// Increment nonce
 	bc.Nonce++
 
 	// Attempt to achieve consensus
-	if bc.AchieveConsensus(Block{Signatures: signatures}, network) {
+	if bc.AchieveConsensus(Block{Transactions: transactions, Signatures: signatures}, network) {
 		bc.AddBlock(transactions, signatures)
 		fmt.Printf("Block %d created with signatures: %v\n", len(bc.Blocks)-1, signatures)
 	} else {
@@ -225,10 +223,11 @@ func (bc *Blockchain) createBlock(network *Network) {
 }
 
 // NewNode creates a new node
-func NewNode(id string) *Node {
+func NewNode(id string, blockchain *Blockchain) *Node {
 	return &Node{
-		ID:    id,
-		Inbox: make(chan Message, 10), // Buffered channel for messages
+		ID:         id,
+		Inbox:      make(chan Message, 10), // Buffered channel for messages
+		Blockchain: blockchain,             // Initialize the blockchain reference
 	}
 }
 
@@ -244,7 +243,6 @@ func (n *Node) ReceiveMessage(msg Message) {
 	}()
 }
 
-// ProcessMessages processes messages from the inbox
 func (n *Node) ProcessMessages() {
 	for msg := range n.Inbox {
 		switch msg.Type {
@@ -254,6 +252,11 @@ func (n *Node) ProcessMessages() {
 			fmt.Printf("Node %s received vote: %+v\n", n.ID, msg.Payload)
 		case Consensus:
 			fmt.Printf("Node %s received consensus result: %+v\n", n.ID, msg.Payload)
+		case "Transaction":
+			tx, ok := msg.Payload.(Transaction)
+			if ok {
+				n.Blockchain.AddTransaction(tx)
+			}
 		}
 	}
 }

@@ -34,6 +34,13 @@ func NewWallet() (*Wallet, error) {
 
 // CreateTransaction creates a new transaction and signs it
 func (w *Wallet) CreateTransaction(receiverPublicKeyStr string, amount float64) (*Transaction, error) {
+	if w.PrivateKey == nil {
+		return nil, fmt.Errorf("wallet private key is not initialized")
+	}
+	if amount <= 0 {
+		return nil, fmt.Errorf("transaction amount must be greater than zero")
+	}
+
 	senderPublicKeyStr := base64.StdEncoding.EncodeToString(w.PublicKey.Bytes())
 
 	tx := &Transaction{
@@ -44,7 +51,7 @@ func (w *Wallet) CreateTransaction(receiverPublicKeyStr string, amount float64) 
 
 	// Serialize and hash the transaction, then sign it
 	if err := tx.SignTransaction(w.PrivateKey); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to sign transaction: %v", err)
 	}
 
 	fmt.Printf("Created transaction from %s to %s for amount %f\n", senderPublicKeyStr, receiverPublicKeyStr, amount)

@@ -78,6 +78,14 @@ func PublicKeyFromString(pubKeyStr string) (*PublicKey, error) {
 	}
 	return &PublicKey{key: ed25519.PublicKey(pubKeyBytes)}, nil
 }
+func GeneratePublicKey(privateKey *PrivateKey) *PublicKey {
+	pubKey := privateKey.key.Public()
+	if pubKey == nil {
+		return nil
+	}
+	return &PublicKey{key: pubKey.(ed25519.PublicKey)}
+}
+
 func EncryptPrivateKey(key []byte, passphrase string) (string, error) {
 	block, err := aes.NewCipher([]byte(passphrase))
 	if err != nil {

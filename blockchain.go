@@ -116,14 +116,15 @@ type Blockchain struct {
 	currentSpeaker     int
 	Wallets            map[string]*Wallet
 	Nonce              int
+	TransactionPool    []Transaction
 }
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
 	var prevHash string
-	if len(signatures) > 0 {
-		prevHash = string(signatures[0])
-	} else if len(bc.Blocks) > 0 {
+	if len(bc.Blocks) > 0 {
 		prevHash = bc.Blocks[len(bc.Blocks)-1].CalculateHash()
+	} else {
+		prevHash = "0000000000000000" // Set genesis block's PrevHash
 	}
 
 	newBlock := Block{
@@ -159,7 +160,7 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 	if len(bc.Blocks) > 0 {
 		lastBlock := bc.Blocks[len(bc.Blocks)-1]
 		if block.PrevHash != lastBlock.CalculateHash() {
-			fmt.Println("Invalid block: previous hash does not match")
+			fmt.Printf("Invalid block: previous hash does not match (expected: %s, got: %s)\n", lastBlock.CalculateHash(), block.PrevHash)
 			return false
 		}
 	}
@@ -172,16 +173,14 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 
 	// Verify all transactions in the block
 	for _, tx := range block.Transactions {
-		// Decode public keys for multi-signature verification
-		pubKeys := []*PublicKey{}
-		for _, sender := range []string{tx.Sender} { // Extend this logic for multiple senders if needed
-			pubKey, err := PublicKeyFromString(sender)
-			if err != nil {
-				fmt.Printf("Invalid block: error decoding sender's public key (%v)\n", err)
-				return false
-			}
-			pubKeys = append(pubKeys, pubKey)
+		fmt.Printf("Decoding sender public key: %s\n", tx.Sender)
+		pubKey, err := PublicKeyFromString(tx.Sender)
+		if err != nil {
+			fmt.Printf("Invalid block: error decoding sender's public key (%v)\n", err)
+			return false
 		}
+
+		pubKeys := []*PublicKey{pubKey}
 
 		// Verify multi-signature
 		if !tx.VerifyMultiSignature(pubKeys) {
@@ -190,8 +189,14 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 		}
 	}
 
-	// Additional validation rules can be added here
 	return true
+}
+
+func (bc *Blockchain) GetLastBlockHash() string {
+	if len(bc.Blocks) == 0 {
+		return ""
+	}
+	return bc.Blocks[len(bc.Blocks)-1].CalculateHash()
 }
 
 // This main function is not implemented correctly, for testing only.
@@ -222,4 +227,26 @@ func main() {
 		fmt.Printf("Signatures: %x\n", block.Signatures)
 		fmt.Println()
 	}
+}
+
+func NewBlockchain() *Blockchain {
+	bc := &Blockchain{
+		Blocks:             []Block{},
+		TransactionPool:    []Transaction{},
+		LockedWallets:      make(map[[32]byte]*LockedWallet),
+		PublicKeyToID:      make(map[string]string),
+		UserIDToDelegateID: make(map[string]string),
+		Wallets:            make(map[string]*Wallet),
+	}
+
+	// Add the genesis block
+	genesisBlock := Block{
+		Transactions: []Transaction{},    // No transactions in the genesis block
+		PrevHash:     "0000000000000000", // Predefined hash for the genesis block
+		Nonce:        0,
+		Signatures:   [][]byte{},
+	}
+	bc.Blocks = append(bc.Blocks, genesisBlock)
+	fmt.Println("Genesis block added to the blockchain.")
+	return bc
 }

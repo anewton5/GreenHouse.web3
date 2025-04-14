@@ -1,5 +1,9 @@
 package gonetwork
 
+import (
+	"fmt"
+)
+
 type MessageType string
 
 const (
@@ -40,4 +44,14 @@ func (n *Network) SendMessage(msg Message) {
 	} else if recipient, exists := n.Nodes[msg.To]; exists {
 		recipient.ReceiveMessage(msg)
 	}
+}
+func (n *Network) BroadcastTransaction(tx Transaction) {
+	msg := Message{
+		From:    "",
+		To:      "",
+		Type:    "Transaction",
+		Payload: tx,
+	}
+	fmt.Printf("Broadcasting transaction: %+v\n", tx)
+	n.SendMessage(msg)
 }

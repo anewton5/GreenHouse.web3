@@ -2,6 +2,7 @@ package gonetwork
 
 import (
 	"encoding/base64"
+	"fmt"
 	"testing"
 )
 
@@ -65,6 +66,7 @@ func TestValidateBlock(t *testing.T) {
 	privateKey, _ := GeneratePrivateKey()
 	publicKey := privateKey.Public()
 	senderPublicKey := base64.StdEncoding.EncodeToString(publicKey.Bytes())
+	fmt.Printf("Generated sender public key (Base64): %s\n", senderPublicKey)
 
 	// Add a valid block to the chain
 	validTransaction := Transaction{
@@ -117,7 +119,7 @@ func TestValidateBlock(t *testing.T) {
 
 	// Test invalid block (invalid transaction)
 	invalidTransaction := Transaction{
-		Sender:       "invalid_sender",
+		Sender:       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", // Base64-encoded "invalid_sender"
 		Receiver:     "receiver3",
 		Amount:       30,
 		RequiredSigs: 1,

@@ -62,71 +62,101 @@ func TestVoteForDelegates(t *testing.T) {
 }
 
 func TestAchieveConsensus(t *testing.T) {
-
-	network := &Network{}
-	// Setup blockchain with delegates
-	bc := Blockchain{
+	blockchain := &Blockchain{
 		Delegates: []Node{
-			{ID: "delegate1"},
-			{ID: "delegate2"},
-			{ID: "delegate3"},
+			{ID: "delegate1", Stake: 100},
+			{ID: "delegate2", Stake: 100},
+			{ID: "delegate3", Stake: 100},
+		},
+	}
+	network := NewNetwork()
+
+	block := Block{
+		Transactions: []Transaction{
+			{Sender: "wallet1", Receiver: "wallet2", Amount: 10},
 		},
 	}
 
-	// Create a dummy block
-	block := Block{}
-
-	// Call AchieveConsensus
-	result := bc.AchieveConsensus(block, network)
-
-	// Verify consensus result
-	if !result {
+	achieved := blockchain.AchieveConsensus(block, network)
+	if !achieved {
 		t.Errorf("Expected consensus to be achieved, but it was not")
 	}
 }
 
 func TestCreateBlock(t *testing.T) {
-	// Generate keys for wallets
+	// Initialize the blockchain with a genesis block
+	blockchain := NewBlockchain()
+
+	// Create a network
+	network := NewNetwork()
+
+	// Add wallets with private keys
 	privKey1, _ := GeneratePrivateKey()
-	privKey2, _ := GeneratePrivateKey()
-
 	pubKey1 := privKey1.Public()
+	wallet1 := &Wallet{PublicKey: pubKey1, PrivateKey: privKey1, Balance: 100}
+
+	privKey2, _ := GeneratePrivateKey()
 	pubKey2 := privKey2.Public()
+	wallet2 := &Wallet{PublicKey: pubKey2, PrivateKey: privKey2, Balance: 100}
 
-	network := &Network{}
+	blockchain.Wallets["wallet1"] = wallet1
+	blockchain.Wallets["wallet2"] = wallet2
 
-	// Setup blockchain with wallets and delegates
-	bc := Blockchain{
-		Wallets: map[string]*Wallet{
-			"wallet1": {PublicKey: pubKey1, PrivateKey: privKey1, Balance: 100},
-			"wallet2": {PublicKey: pubKey2, PrivateKey: privKey2, Balance: 0},
-		},
-		Delegates: []Node{
-			{ID: "delegate1"},
-			{ID: "delegate2"},
-		},
+	// Add a transaction to the pool
+	tx := Transaction{Sender: "wallet1", Receiver: "wallet2", Amount: 10}
+	blockchain.AddTransaction(tx)
+	if len(blockchain.TransactionPool) == 0 {
+		t.Fatalf("Transaction pool is empty after adding a transaction")
 	}
+
+	// Setup delegates with voting strategies
+	blockchain.Delegates = []Node{
+		{ID: "delegate1", Blockchain: blockchain, VotingStrategy: &DefaultVotingStrategy{}},
+		{ID: "delegate2", Blockchain: blockchain, VotingStrategy: &DefaultVotingStrategy{}},
+	}
+
+	if len(blockchain.Delegates) == 0 {
+		t.Fatalf("No delegates were set up for the blockchain")
+	}
+
+	// Log the initial state of the blockchain
+	t.Logf("Initial blockchain state: %+v", blockchain)
 
 	// Call createBlock
-	bc.createBlock(network)
+	blockchain.createBlock(network)
 
-	// Verify block creation
-	if len(bc.Blocks) != 1 {
-		t.Errorf("Expected 1 block, got %d", len(bc.Blocks))
+	// Check if consensus was achieved
+	if len(blockchain.Blocks) <= 1 { // Genesis block + new block
+		t.Fatalf("Expected at least 2 blocks (including genesis), but got %d", len(blockchain.Blocks))
 	}
 
-	if len(bc.Blocks[0].Transactions) == 0 {
+	// Verify transactions in the block
+	if len(blockchain.Blocks[1].Transactions) == 0 {
 		t.Errorf("Expected transactions in the block, but found none")
 	}
+
+	// Log the final state of the blockchain
+	t.Logf("Final blockchain state: %+v", blockchain)
 }
 
 func TestNetworkConsensus(t *testing.T) {
+	// Create a blockchain
+	blockchain := &Blockchain{
+		Blocks:             []Block{},
+		LockedWallets:      make(map[[32]byte]*LockedWallet),
+		PublicKeyToID:      make(map[string]string),
+		UserIDToDelegateID: make(map[string]string),
+		Wallets:            make(map[string]*Wallet),
+		TransactionPool:    []Transaction{},
+	}
+
+	// Create a network
 	network := NewNetwork()
 
 	// Create nodes
-	node1 := NewNode("node1")
-	node2 := NewNode("node2")
-	node3 := NewNode("node3")
+	node1 := NewNode("node1", blockchain)
+	node2 := NewNode("node2", blockchain)
+	node3 := NewNode("node3", blockchain)
 
 	// Register nodes to the network
 	network.RegisterNode(node1)
@@ -134,24 +164,29 @@ func TestNetworkConsensus(t *testing.T) {
 	network.RegisterNode(node3)
 
 	// Setup blockchain with delegates
-	bc := Blockchain{
-		Delegates: []Node{
-			*node1,
-			*node2,
-			*node3,
-		},
+	blockchain.Delegates = []Node{
+		*node1,
+		*node2,
+		*node3,
 	}
 
 	// Start consensus
-	bc.startConsensus(network)
+	blockchain.startConsensus(network)
 }
 
 func TestVoteOnBlock(t *testing.T) {
+	// Create a blockchain
+	blockchain := &Blockchain{
+		Blocks:          []Block{},
+		TransactionPool: []Transaction{},
+	}
+
 	// Create a delegate node with a voting strategy
 	delegate := Node{
-		ID: "delegate1",
-		VotingStrategy: func(block Block) bool {
-			return len(block.Transactions) > 0 // Vote YES if the block has transactions
+		ID:         "delegate1",
+		Blockchain: blockchain,
+		VotingStrategy: &FuncVotingStrategy{
+			VoteFunc: func(block Block) bool { return len(block.Transactions) > 0 }, // Vote YES if the block has transactions
 		},
 	}
 
@@ -173,16 +208,20 @@ func TestVoteOnBlock(t *testing.T) {
 }
 
 func TestAchieveConsensusWithMixedVotes(t *testing.T) {
+	// Create a blockchain
+	blockchain := &Blockchain{
+		Blocks:          []Block{},
+		TransactionPool: []Transaction{},
+	}
+
 	// Create a network
-	network := &Network{}
+	network := NewNetwork()
 
 	// Setup blockchain with delegates
-	bc := Blockchain{
-		Delegates: []Node{
-			{ID: "delegate1", VotingStrategy: func(block Block) bool { return true }}, // YES
-			{ID: "delegate2", VotingStrategy: func(block Block) bool { return true }}, // YES
-			{ID: "delegate3", VotingStrategy: func(block Block) bool { return true }}, // YES
-		},
+	blockchain.Delegates = []Node{
+		{ID: "delegate1", Blockchain: blockchain, VotingStrategy: &FuncVotingStrategy{VoteFunc: func(block Block) bool { return true }}},  // YES
+		{ID: "delegate2", Blockchain: blockchain, VotingStrategy: &FuncVotingStrategy{VoteFunc: func(block Block) bool { return true }}},  // YES
+		{ID: "delegate3", Blockchain: blockchain, VotingStrategy: &FuncVotingStrategy{VoteFunc: func(block Block) bool { return false }}}, // NO
 	}
 
 	// Create a valid block
@@ -191,10 +230,17 @@ func TestAchieveConsensusWithMixedVotes(t *testing.T) {
 	}
 
 	// Call AchieveConsensus
-	result := bc.AchieveConsensus(validBlock, network)
+	result := blockchain.AchieveConsensus(validBlock, network)
 
 	// Verify consensus result
 	if !result {
 		t.Errorf("Expected consensus to be achieved, but it was not")
+	}
+
+	// Test with insufficient votes
+	blockchain.Delegates[1].VotingStrategy = &FuncVotingStrategy{VoteFunc: func(block Block) bool { return false }} // Change to NO
+	result = blockchain.AchieveConsensus(validBlock, network)
+	if result {
+		t.Errorf("Expected consensus to fail, but it was achieved")
 	}
 }
