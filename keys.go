@@ -1,9 +1,12 @@
 package gonetwork
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 )
@@ -74,4 +77,37 @@ func PublicKeyFromString(pubKeyStr string) (*PublicKey, error) {
 		return nil, fmt.Errorf("invalid public key length: expected %d bytes, got %d bytes", pubKeyLen, len(pubKeyBytes))
 	}
 	return &PublicKey{key: ed25519.PublicKey(pubKeyBytes)}, nil
+}
+func EncryptPrivateKey(key []byte, passphrase string) (string, error) {
+	block, err := aes.NewCipher([]byte(passphrase))
+	if err != nil {
+		return "", err
+	}
+
+	ciphertext := make([]byte, aes.BlockSize+len(key))
+	iv := ciphertext[:aes.BlockSize]
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return "", err
+	}
+
+	stream := cipher.NewCFBEncrypter(block, iv)
+	stream.XORKeyStream(ciphertext[aes.BlockSize:], key)
+
+	return hex.EncodeToString(ciphertext), nil
+}
+
+func DecryptPrivateKey(encryptedKey string, passphrase string) ([]byte, error) {
+	ciphertext, _ := hex.DecodeString(encryptedKey)
+	block, err := aes.NewCipher([]byte(passphrase))
+	if err != nil {
+		return nil, err
+	}
+
+	iv := ciphertext[:aes.BlockSize]
+	ciphertext = ciphertext[aes.BlockSize:]
+
+	stream := cipher.NewCFBDecrypter(block, iv)
+	stream.XORKeyStream(ciphertext, ciphertext)
+
+	return ciphertext, nil
 }

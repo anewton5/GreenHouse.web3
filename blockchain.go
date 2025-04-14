@@ -1,21 +1,57 @@
 package gonetwork
 
 import (
-	"crypto/sha256"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
+
+	"golang.org/x/crypto/sha3"
 )
 
 type Transaction struct {
-	Sender    string
-	Receiver  string
-	Amount    float64
-	Signature []byte
+	Sender       string
+	Receiver     string
+	Amount       float64
+	Signatures   [][]byte
+	RequiredSigs int
+	Nonce        int64
+}
+
+func (t *Transaction) GenerateNonce() {
+	t.Nonce = time.Now().UnixNano()
+}
+
+func (t *Transaction) AddSignature(signature []byte) {
+	t.Signatures = append(t.Signatures, signature)
+}
+
+func (t *Transaction) VerifyMultiSignature(pubKeys []*PublicKey) bool {
+	// Ensure the number of signatures meets the required threshold
+	if len(t.Signatures) < t.RequiredSigs {
+		return false
+	}
+
+	validSigs := 0
+	txHash := t.hash()
+
+	// Verify each signature against the corresponding public key
+	for i, sig := range t.Signatures {
+		if i >= len(pubKeys) {
+			break
+		}
+		if ed25519.Verify(pubKeys[i].key, txHash, sig) {
+			validSigs++
+		}
+	}
+
+	// Check if the number of valid signatures meets the required threshold
+	return validSigs >= t.RequiredSigs
 }
 
 // Verifies the transaction by checking the signature against the sender's public key
-func (t *Transaction) VerifyTransaction() (bool, error) {
+func (t *Transaction) VerifyTransaction(pubKeys []*PublicKey) (bool, error) {
 	// Validate transaction fields
 	if t.Amount <= 0 {
 		return false, fmt.Errorf("invalid transaction: amount must be greater than zero")
@@ -25,19 +61,28 @@ func (t *Transaction) VerifyTransaction() (bool, error) {
 		return false, fmt.Errorf("invalid transaction: sender and receiver must not be empty")
 	}
 
-	// Decode the sender's public key
-	pubKey, err := PublicKeyFromString(t.Sender)
-	if err != nil {
-		return false, fmt.Errorf("error decoding sender's public key: %w", err)
+	// Ensure the number of signatures meets the required threshold
+	if len(t.Signatures) < t.RequiredSigs {
+		return false, fmt.Errorf("insufficient signatures: required %d, got %d", t.RequiredSigs, len(t.Signatures))
 	}
 
 	// Calculate the transaction hash
 	txHash := t.hash()
 
-	// Verify the transaction signature
-	signature := &Signature{value: t.Signature}
-	if !signature.Verify(pubKey, txHash) {
-		return false, fmt.Errorf("transaction signature verification failed")
+	// Verify each signature against the corresponding public key
+	validSigs := 0
+	for i, sig := range t.Signatures {
+		if i >= len(pubKeys) {
+			break
+		}
+		if ed25519.Verify(pubKeys[i].key, txHash, sig) {
+			validSigs++
+		}
+	}
+
+	// Check if the number of valid signatures meets the required threshold
+	if validSigs < t.RequiredSigs {
+		return false, fmt.Errorf("insufficient valid signatures: required %d, got %d", t.RequiredSigs, validSigs)
 	}
 
 	return true, nil
@@ -52,7 +97,7 @@ type Block struct {
 
 func (b *Block) CalculateHash() string {
 	blockData, _ := json.Marshal(b)
-	hash := sha256.Sum256(blockData)
+	hash := sha3.Sum256(blockData)
 	return hex.EncodeToString(hash[:])
 }
 
@@ -96,16 +141,16 @@ func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) 
 func (t *Transaction) SignTransaction(privateKey *PrivateKey) error {
 	txHash := t.hash()
 	signature := privateKey.Sign(txHash)
-	t.Signature = signature.Bytes()
+	t.AddSignature(signature.Bytes())
 	return nil
 }
 
 // hash returns the SHA-256 hash of the transaction data (excluding the signature)
 func (t *Transaction) hash() []byte {
 	txCopy := *t
-	txCopy.Signature = nil
+	txCopy.Signatures = nil
 	txBytes, _ := json.Marshal(txCopy)
-	hash := sha256.Sum256(txBytes)
+	hash := sha3.Sum256(txBytes)
 	return hash[:]
 }
 
@@ -127,9 +172,20 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 
 	// Verify all transactions in the block
 	for _, tx := range block.Transactions {
-		valid, err := tx.VerifyTransaction()
-		if !valid {
-			fmt.Printf("Invalid block: contains invalid transaction (%v)\n", err)
+		// Decode public keys for multi-signature verification
+		pubKeys := []*PublicKey{}
+		for _, sender := range []string{tx.Sender} { // Extend this logic for multiple senders if needed
+			pubKey, err := PublicKeyFromString(sender)
+			if err != nil {
+				fmt.Printf("Invalid block: error decoding sender's public key (%v)\n", err)
+				return false
+			}
+			pubKeys = append(pubKeys, pubKey)
+		}
+
+		// Verify multi-signature
+		if !tx.VerifyMultiSignature(pubKeys) {
+			fmt.Println("Invalid block: contains invalid multi-signature transaction")
 			return false
 		}
 	}
