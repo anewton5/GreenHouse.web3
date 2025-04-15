@@ -140,6 +140,9 @@ func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) 
 
 // SignTransaction signs the transaction with the given private key
 func (t *Transaction) SignTransaction(privateKey *PrivateKey) error {
+	if privateKey == nil {
+		return fmt.Errorf("private key is not initialized")
+	}
 	txHash := t.hash()
 	signature := privateKey.Sign(txHash)
 	t.AddSignature(signature.Bytes())
@@ -173,7 +176,9 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 
 	// Verify all transactions in the block
 	for _, tx := range block.Transactions {
-		fmt.Printf("Decoding sender public key: %s\n", tx.Sender)
+		fmt.Printf("Validating transaction from %s to %s\n", tx.Sender, tx.Receiver)
+
+		// Decode sender's public key
 		pubKey, err := PublicKeyFromString(tx.Sender)
 		if err != nil {
 			fmt.Printf("Invalid block: error decoding sender's public key (%v)\n", err)
@@ -182,9 +187,19 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 
 		pubKeys := []*PublicKey{pubKey}
 
-		// Verify multi-signature
+		// Verify transaction signatures
 		if !tx.VerifyMultiSignature(pubKeys) {
 			fmt.Println("Invalid block: contains invalid multi-signature transaction")
+			return false
+		}
+
+		// Verify transaction fields
+		if tx.Amount <= 0 {
+			fmt.Println("Invalid block: transaction amount must be greater than zero")
+			return false
+		}
+		if tx.Sender == "" || tx.Receiver == "" {
+			fmt.Println("Invalid block: transaction sender or receiver is empty")
 			return false
 		}
 	}

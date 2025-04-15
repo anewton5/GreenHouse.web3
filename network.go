@@ -20,11 +20,13 @@ type Message struct {
 }
 
 type Network struct {
+	ID    string           // Unique identifier for the network
 	Nodes map[string]*Node // Map of node IDs to nodes
 }
 
-func NewNetwork() *Network {
+func NewNetwork(id string) *Network {
 	return &Network{
+		ID:    id,
 		Nodes: make(map[string]*Node),
 	}
 }
@@ -35,13 +37,17 @@ func (n *Network) RegisterNode(node *Node) {
 }
 
 // SendMessage sends a message to a specific node or broadcasts it
-func (n *Network) SendMessage(msg Message) {
+func (n *Network) SendMessage(network *Network, msg Message) {
 	if msg.To == "" {
-		// Broadcast to all nodes
-		for _, node := range n.Nodes {
-			node.ReceiveMessage(msg)
+		// Gossip-based broadcasting
+		for _, node := range network.Nodes {
+			if node.ID != n.ID { // Avoid sending to self
+				go func(targetNode *Node) {
+					targetNode.ReceiveMessage(msg)
+				}(node)
+			}
 		}
-	} else if recipient, exists := n.Nodes[msg.To]; exists {
+	} else if recipient, exists := network.Nodes[msg.To]; exists {
 		recipient.ReceiveMessage(msg)
 	}
 }
@@ -53,5 +59,5 @@ func (n *Network) BroadcastTransaction(tx Transaction) {
 		Payload: tx,
 	}
 	fmt.Printf("Broadcasting transaction: %+v\n", tx)
-	n.SendMessage(msg)
+	n.SendMessage(n, msg)
 }

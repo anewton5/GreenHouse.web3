@@ -1,6 +1,7 @@
 package gonetwork
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"testing"
@@ -58,6 +59,102 @@ func TestSignTransaction(t *testing.T) {
 	}
 }
 
+func TestInvalidTransactionPublicKey(t *testing.T) {
+	blockchain := NewBlockchain()
+
+	// Create a transaction with an invalid sender public key
+	tx := Transaction{
+		Sender:   "invalid_base64_key",
+		Receiver: "receiverPublicKey",
+		Amount:   10,
+	}
+
+	blockchain.AddTransaction(tx)
+
+	if len(blockchain.TransactionPool) != 0 {
+		t.Fatalf("Invalid transaction was added to the pool")
+	}
+
+	t.Logf("Invalid transaction was correctly rejected")
+}
+func TestBlockValidationWithSignatures(t *testing.T) {
+	blockchain := NewBlockchain()
+
+	// Generate private and public keys for delegates
+	privKey1, _ := GeneratePrivateKey()
+	privKey2, _ := GeneratePrivateKey()
+
+	// Extract the ed25519.PrivateKey and ed25519.PublicKey from the custom PrivateKey type
+	edPrivKey1 := privKey1.key // Assuming `key` is the underlying ed25519.PrivateKey
+	edPubKey1 := privKey1.Public().key
+	edPrivKey2 := privKey2.key
+	edPubKey2 := privKey2.Public().key
+
+	// Create delegates with both private and public keys
+	delegate1 := Node{ID: "delegate1", PrivateKey: edPrivKey1, PublicKey: edPubKey1}
+	delegate2 := Node{ID: "delegate2", PrivateKey: edPrivKey2, PublicKey: edPubKey2}
+	blockchain.Delegates = []Node{delegate1, delegate2}
+
+	// Generate a valid key pair for the sender
+	senderPrivKey, _ := GeneratePrivateKey()
+	senderPubKey := senderPrivKey.Public()
+	senderPubKeyBase64 := base64.StdEncoding.EncodeToString(senderPubKey.Bytes())
+	// Create a block with a valid transaction
+	block := Block{
+		Transactions: []Transaction{
+			{Sender: senderPubKeyBase64, Receiver: "receiver", Amount: 10},
+		},
+		PrevHash: blockchain.GetLastBlockHash(),
+	}
+
+	// Sign the block using the delegates' private keys
+	block.Signatures = [][]byte{
+		ed25519.Sign(delegate1.PrivateKey, []byte(block.CalculateHash())),
+		ed25519.Sign(delegate2.PrivateKey, []byte(block.CalculateHash())),
+	}
+
+	// Validate the block
+	if !blockchain.ValidateBlock(block) {
+		t.Fatalf("Block validation failed")
+	}
+
+	t.Logf("Block validated successfully")
+}
+func TestSignedTransaction(t *testing.T) {
+	wallet, _ := NewWallet()
+	receiverPublicKey := "receiverPublicKeyBase64"
+
+	tx, err := wallet.CreateTransaction(receiverPublicKey, 10)
+	if err != nil {
+		t.Fatalf("Failed to create transaction: %v", err)
+	}
+
+	if len(tx.Signatures) == 0 {
+		t.Fatalf("Transaction is not signed")
+	}
+
+	t.Logf("Transaction signed successfully: %+v", tx)
+}
+
+func TestSortTransactionPool(t *testing.T) {
+	blockchain := NewBlockchain()
+
+	// Add transactions with different timestamps and amounts
+	blockchain.TransactionPool = []Transaction{
+		{Sender: "A", Receiver: "B", Amount: 50, Nonce: 2},
+		{Sender: "C", Receiver: "D", Amount: 100, Nonce: 1},
+		{Sender: "E", Receiver: "F", Amount: 75, Nonce: 1},
+	}
+
+	blockchain.SortTransactionPool()
+
+	// Verify the order of transactions
+	if blockchain.TransactionPool[0].Amount != 100 || blockchain.TransactionPool[1].Amount != 75 {
+		t.Fatalf("Transaction pool not sorted correctly: %+v", blockchain.TransactionPool)
+	}
+
+	t.Logf("Transaction pool sorted correctly: %+v", blockchain.TransactionPool)
+}
 func TestValidateBlock(t *testing.T) {
 	// Setup blockchain
 	bc := Blockchain{}
@@ -169,4 +266,29 @@ func TestMultiSignatureTransaction(t *testing.T) {
 	if tx.VerifyMultiSignature(pubKeys) {
 		t.Errorf("Expected transaction to be invalid due to insufficient signatures, but it was valid")
 	}
+}
+func TestAchieveConsensusBasic(t *testing.T) {
+	blockchain := NewBlockchain()
+
+	// Add delegates
+	blockchain.Delegates = []Node{
+		{ID: "delegate1", VotingStrategy: &DefaultVotingStrategy{}},
+		{ID: "delegate2", VotingStrategy: &DefaultVotingStrategy{}},
+		{ID: "delegate3", VotingStrategy: &DefaultVotingStrategy{}},
+	}
+
+	// Create a block
+	block := Block{
+		Transactions: []Transaction{
+			{Sender: "A", Receiver: "B", Amount: 10},
+		},
+	}
+
+	// Achieve consensus
+	network := NewNetwork("test-network")
+	if !blockchain.AchieveConsensus(block, network) {
+		t.Fatalf("Failed to achieve consensus")
+	}
+
+	t.Logf("Consensus achieved successfully")
 }

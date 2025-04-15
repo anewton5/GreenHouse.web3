@@ -69,7 +69,7 @@ func TestAchieveConsensus(t *testing.T) {
 			{ID: "delegate3", Stake: 100},
 		},
 	}
-	network := NewNetwork()
+	network := NewNetwork("default-network")
 
 	block := Block{
 		Transactions: []Transaction{
@@ -88,7 +88,7 @@ func TestCreateBlock(t *testing.T) {
 	blockchain := NewBlockchain()
 
 	// Create a network
-	network := NewNetwork()
+	network := NewNetwork("default-network")
 
 	// Add wallets with private keys
 	privKey1, _ := GeneratePrivateKey()
@@ -103,7 +103,8 @@ func TestCreateBlock(t *testing.T) {
 	blockchain.Wallets["wallet2"] = wallet2
 
 	// Add a transaction to the pool
-	tx := Transaction{Sender: "wallet1", Receiver: "wallet2", Amount: 10}
+	senderPubKeyBase64 := base64.StdEncoding.EncodeToString(wallet1.PublicKey.Bytes())
+	tx := Transaction{Sender: senderPubKeyBase64, Receiver: "wallet2", Amount: 10}
 	blockchain.AddTransaction(tx)
 	if len(blockchain.TransactionPool) == 0 {
 		t.Fatalf("Transaction pool is empty after adding a transaction")
@@ -151,7 +152,7 @@ func TestNetworkConsensus(t *testing.T) {
 	}
 
 	// Create a network
-	network := NewNetwork()
+	network := NewNetwork("default-network")
 
 	// Create nodes
 	node1 := NewNode("node1", blockchain)
@@ -215,7 +216,7 @@ func TestAchieveConsensusWithMixedVotes(t *testing.T) {
 	}
 
 	// Create a network
-	network := NewNetwork()
+	network := NewNetwork("default-network")
 
 	// Setup blockchain with delegates
 	blockchain.Delegates = []Node{

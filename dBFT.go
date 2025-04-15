@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"sort"
 )
 
 // Simplified Node structure
@@ -136,17 +137,10 @@ func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
 	yesVotes := 0
 	noVotes := 0
 
-	// Simulate receiving votes via the network
+	// Aggregate votes from delegates
 	for _, delegate := range bc.Delegates {
 		vote := delegate.VoteOnBlock(block)
-		fmt.Printf("Delegate %s voted %v on the block\n", delegate.ID, vote) // Log delegate votes
-		voteMsg := Message{
-			From:    delegate.ID,
-			To:      "",
-			Type:    Vote,
-			Payload: vote,
-		}
-		delegate.SendMessage(network, voteMsg)
+		fmt.Printf("Delegate %s voted %v on the block\n", delegate.ID, vote)
 
 		if vote {
 			yesVotes++
@@ -167,8 +161,45 @@ func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
 }
 
 func (bc *Blockchain) AddTransaction(tx Transaction) {
+	// Decode sender's public key
+	pubKey, err := PublicKeyFromString(tx.Sender)
+	if err != nil {
+		fmt.Printf("Invalid transaction: error decoding sender's public key (%v)\n", err)
+		return
+	}
+
+	pubKeys := []*PublicKey{pubKey}
+
+	// Verify transaction signatures
+	if !tx.VerifyMultiSignature(pubKeys) {
+		fmt.Println("Invalid transaction: contains invalid multi-signature")
+		return
+	}
+
+	// Verify transaction fields
+	if tx.Amount <= 0 {
+		fmt.Println("Invalid transaction: amount must be greater than zero")
+		return
+	}
+	if tx.Sender == "" || tx.Receiver == "" {
+		fmt.Println("Invalid transaction: sender or receiver is empty")
+		return
+	}
+
+	// Add the transaction to the pool
 	bc.TransactionPool = append(bc.TransactionPool, tx)
 	fmt.Printf("Transaction added to the pool: %+v\n", tx)
+}
+
+// SortTransactionPool sorts the transaction pool by priority (timestamp and amount)
+func (bc *Blockchain) SortTransactionPool() {
+	sort.SliceStable(bc.TransactionPool, func(i, j int) bool {
+		// Higher priority for older transactions and higher amounts
+		if bc.TransactionPool[i].Nonce == bc.TransactionPool[j].Nonce {
+			return bc.TransactionPool[i].Amount > bc.TransactionPool[j].Amount
+		}
+		return bc.TransactionPool[i].Nonce < bc.TransactionPool[j].Nonce
+	})
 }
 
 // Delegate votes on a block (simplified logic)
@@ -191,6 +222,9 @@ func (bc *Blockchain) createBlock(network *Network) {
 		return
 	}
 
+	// Sort the transaction pool by priority
+	bc.SortTransactionPool()
+
 	// Log the transaction pool
 	fmt.Printf("Transaction pool before block creation: %+v\n", bc.TransactionPool)
 
@@ -202,9 +236,7 @@ func (bc *Blockchain) createBlock(network *Network) {
 
 	// Collect valid transactions
 	transactions := []Transaction{}
-	for _, tx := range bc.TransactionPool {
-		transactions = append(transactions, tx)
-	}
+	transactions = append(transactions, bc.TransactionPool...)
 
 	// Increment nonce
 	bc.Nonce++
@@ -233,7 +265,7 @@ func NewNode(id string, blockchain *Blockchain) *Node {
 
 // SendMessage sends a message to the network
 func (n *Node) SendMessage(network *Network, msg Message) {
-	network.SendMessage(msg)
+	network.SendMessage(network, msg)
 }
 
 // ReceiveMessage handles incoming messages
