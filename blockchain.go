@@ -117,6 +117,7 @@ type Blockchain struct {
 	Wallets            map[string]*Wallet
 	Nonce              int
 	TransactionPool    []Transaction
+	Shards             []*Shard
 }
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
@@ -203,6 +204,13 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			return false
 		}
 	}
+	// Verify block signatures
+	if len(block.Signatures) < len(bc.Delegates)/2+1 { // Majority required
+		fmt.Println("Invalid block: insufficient delegate signatures")
+		return false
+	}
+
+	fmt.Println("Block validated successfully")
 
 	return true
 }
@@ -212,6 +220,90 @@ func (bc *Blockchain) GetLastBlockHash() string {
 		return ""
 	}
 	return bc.Blocks[len(bc.Blocks)-1].CalculateHash()
+}
+
+type Shard struct {
+	ID              int
+	TransactionPool []Transaction
+	Blocks          []Block
+}
+
+func NewShard(id int) *Shard {
+	return &Shard{
+		ID:              id,
+		TransactionPool: []Transaction{},
+		Blocks:          []Block{},
+	}
+}
+
+func (bc *Blockchain) InitializeShards(numShards int) {
+	for i := 0; i < numShards; i++ {
+		bc.Shards = append(bc.Shards, NewShard(i))
+	}
+	fmt.Printf("Initialized %d shards\n", numShards)
+}
+
+func (bc *Blockchain) AssignTransactionToShard(tx Transaction) {
+	// Use a hash of the sender's public key to determine the shard
+	shardID := int(sha3.Sum256([]byte(tx.Sender))[0]) % len(bc.Shards)
+	bc.Shards[shardID].TransactionPool = append(bc.Shards[shardID].TransactionPool, tx)
+	fmt.Printf("Assigned transaction %+v to shard %d\n", tx, shardID)
+}
+
+func (shard *Shard) ValidateShardTransactions() {
+	for _, tx := range shard.TransactionPool {
+		// Perform transaction validation (reuse existing logic)
+		pubKey, err := PublicKeyFromString(tx.Sender)
+		if err != nil || !tx.VerifyMultiSignature([]*PublicKey{pubKey}) {
+			fmt.Printf("Invalid transaction in shard %d: %+v\n", shard.ID, tx)
+			continue
+		}
+		fmt.Printf("Valid transaction in shard %d: %+v\n", shard.ID, tx)
+	}
+}
+
+func (bc *Blockchain) ValidateTransactionsInParallel() {
+	if len(bc.TransactionPool) == 0 {
+		fmt.Println("No transactions to validate.")
+		return
+	}
+
+	numWorkers := 4                                                      // Number of goroutines
+	chunkSize := (len(bc.TransactionPool) + numWorkers - 1) / numWorkers // Ensure chunkSize is valid
+
+	results := make(chan bool, len(bc.TransactionPool))
+
+	for i := 0; i < numWorkers; i++ {
+		start := i * chunkSize
+		if start >= len(bc.TransactionPool) { // Prevent out-of-bounds access
+			break
+		}
+		end := start + chunkSize
+		if end > len(bc.TransactionPool) {
+			end = len(bc.TransactionPool)
+		}
+
+		go func(transactions []Transaction) {
+			for _, tx := range transactions {
+				pubKey, err := PublicKeyFromString(tx.Sender)
+				if err != nil || !tx.VerifyMultiSignature([]*PublicKey{pubKey}) {
+					results <- false
+					continue
+				}
+				results <- true
+			}
+		}(bc.TransactionPool[start:end])
+	}
+
+	// Collect results
+	validCount := 0
+	for i := 0; i < len(bc.TransactionPool); i++ {
+		if <-results {
+			validCount++
+		}
+	}
+
+	fmt.Printf("%d/%d transactions are valid\n", validCount, len(bc.TransactionPool))
 }
 
 // This main function is not implemented correctly, for testing only.

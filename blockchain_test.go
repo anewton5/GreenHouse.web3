@@ -165,6 +165,17 @@ func TestValidateBlock(t *testing.T) {
 	senderPublicKey := base64.StdEncoding.EncodeToString(publicKey.Bytes())
 	fmt.Printf("Generated sender public key (Base64): %s\n", senderPublicKey)
 
+	// Add delegates to the blockchain
+	delegatePrivKey1, _ := GeneratePrivateKey()
+	delegatePubKey1 := delegatePrivKey1.Public()
+	delegatePrivKey2, _ := GeneratePrivateKey()
+	delegatePubKey2 := delegatePrivKey2.Public()
+
+	bc.Delegates = []Node{
+		{ID: "delegate1", PrivateKey: delegatePrivKey1.key, PublicKey: delegatePubKey1.key},
+		{ID: "delegate2", PrivateKey: delegatePrivKey2.key, PublicKey: delegatePubKey2.key},
+	}
+
 	// Add a valid block to the chain
 	validTransaction := Transaction{
 		Sender:       senderPublicKey,
@@ -195,6 +206,13 @@ func TestValidateBlock(t *testing.T) {
 		Transactions: []Transaction{newTransaction},
 		PrevHash:     validBlock.CalculateHash(),
 	}
+
+	// Sign the block with delegate private keys
+	newBlock.Signatures = [][]byte{
+		ed25519.Sign(delegatePrivKey1.key, []byte(newBlock.CalculateHash())),
+		ed25519.Sign(delegatePrivKey2.key, []byte(newBlock.CalculateHash())),
+	}
+
 	if !bc.ValidateBlock(newBlock) {
 		t.Errorf("Expected block to be valid, but it was invalid")
 	}
@@ -291,4 +309,37 @@ func TestAchieveConsensusBasic(t *testing.T) {
 	}
 
 	t.Logf("Consensus achieved successfully")
+}
+
+func TestSharding(t *testing.T) {
+	bc := NewBlockchain()
+	bc.InitializeShards(3)
+
+	tx1 := Transaction{Sender: "A", Receiver: "B", Amount: 10}
+	tx2 := Transaction{Sender: "C", Receiver: "D", Amount: 20}
+	tx3 := Transaction{Sender: "E", Receiver: "F", Amount: 30}
+
+	bc.AssignTransactionToShard(tx1)
+	bc.AssignTransactionToShard(tx2)
+	bc.AssignTransactionToShard(tx3)
+
+	for _, shard := range bc.Shards {
+		fmt.Printf("Shard %d transactions: %+v\n", shard.ID, shard.TransactionPool)
+	}
+}
+
+func TestParallelTransactionValidation(t *testing.T) {
+	bc := NewBlockchain()
+	// Add transactions to the pool
+	for i := 0; i < 100; i++ {
+		tx := Transaction{
+			Sender:   fmt.Sprintf("Sender%d", i),
+			Receiver: fmt.Sprintf("Receiver%d", i),
+			Amount:   float64(i + 1),
+		}
+		tx.GenerateNonce()
+		bc.TransactionPool = append(bc.TransactionPool, tx)
+	}
+
+	bc.ValidateTransactionsInParallel()
 }

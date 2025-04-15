@@ -87,6 +87,9 @@ func TestCreateBlock(t *testing.T) {
 	// Initialize the blockchain with a genesis block
 	blockchain := NewBlockchain()
 
+	// Initialize shards
+	blockchain.InitializeShards(3) // Create 3 shards
+
 	// Create a network
 	network := NewNetwork("default-network")
 
@@ -102,12 +105,23 @@ func TestCreateBlock(t *testing.T) {
 	blockchain.Wallets["wallet1"] = wallet1
 	blockchain.Wallets["wallet2"] = wallet2
 
-	// Add a transaction to the pool
+	// Add transactions to the blockchain
 	senderPubKeyBase64 := base64.StdEncoding.EncodeToString(wallet1.PublicKey.Bytes())
-	tx := Transaction{Sender: senderPubKeyBase64, Receiver: "wallet2", Amount: 10}
-	blockchain.AddTransaction(tx)
-	if len(blockchain.TransactionPool) == 0 {
-		t.Fatalf("Transaction pool is empty after adding a transaction")
+	tx1 := Transaction{Sender: senderPubKeyBase64, Receiver: "wallet2", Amount: 10}
+	tx1.GenerateNonce()
+	blockchain.AddTransaction(tx1)
+
+	tx2 := Transaction{Sender: senderPubKeyBase64, Receiver: "wallet2", Amount: 20}
+	tx2.GenerateNonce()
+	blockchain.AddTransaction(tx2)
+
+	// Verify that transactions are assigned to shards
+	totalTransactions := 0
+	for _, shard := range blockchain.Shards {
+		totalTransactions += len(shard.TransactionPool)
+	}
+	if totalTransactions != 2 {
+		t.Fatalf("Expected 2 transactions across shards, but found %d", totalTransactions)
 	}
 
 	// Setup delegates with voting strategies
@@ -132,8 +146,15 @@ func TestCreateBlock(t *testing.T) {
 	}
 
 	// Verify transactions in the block
-	if len(blockchain.Blocks[1].Transactions) == 0 {
-		t.Errorf("Expected transactions in the block, but found none")
+	if len(blockchain.Blocks[1].Transactions) != 2 {
+		t.Errorf("Expected 2 transactions in the block, but found %d", len(blockchain.Blocks[1].Transactions))
+	}
+
+	// Verify that transactions were cleared from shards
+	for _, shard := range blockchain.Shards {
+		if len(shard.TransactionPool) != 0 {
+			t.Errorf("Expected shard %d transaction pool to be empty, but found %d transactions", shard.ID, len(shard.TransactionPool))
+		}
 	}
 
 	// Log the final state of the blockchain

@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sort"
+
+	"golang.org/x/crypto/sha3"
 )
 
 // Simplified Node structure
@@ -161,6 +163,8 @@ func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
 }
 
 func (bc *Blockchain) AddTransaction(tx Transaction) {
+	fmt.Printf("Attempting to add transaction: %+v\n", tx)
+
 	// Decode sender's public key
 	pubKey, err := PublicKeyFromString(tx.Sender)
 	if err != nil {
@@ -186,9 +190,20 @@ func (bc *Blockchain) AddTransaction(tx Transaction) {
 		return
 	}
 
-	// Add the transaction to the pool
-	bc.TransactionPool = append(bc.TransactionPool, tx)
-	fmt.Printf("Transaction added to the pool: %+v\n", tx)
+	// Check for duplicate nonce (replay protection)
+	for _, shard := range bc.Shards {
+		for _, existingTx := range shard.TransactionPool {
+			if existingTx.Nonce == tx.Nonce && existingTx.Sender == tx.Sender {
+				fmt.Println("Invalid transaction: duplicate nonce detected")
+				return
+			}
+		}
+	}
+
+	// Assign the transaction to a shard
+	shardID := int(sha3.Sum256([]byte(tx.Sender))[0]) % len(bc.Shards)
+	bc.Shards[shardID].TransactionPool = append(bc.Shards[shardID].TransactionPool, tx)
+	fmt.Printf("Transaction assigned to shard %d: %+v\n", shardID, tx)
 }
 
 // SortTransactionPool sorts the transaction pool by priority (timestamp and amount)
@@ -222,8 +237,21 @@ func (bc *Blockchain) createBlock(network *Network) {
 		return
 	}
 
-	// Sort the transaction pool by priority
-	bc.SortTransactionPool()
+	// Collect transactions from all shards
+	collectedTransactions := []Transaction{}
+	for _, shard := range bc.Shards {
+		collectedTransactions = append(collectedTransactions, shard.TransactionPool...)
+	}
+
+	// Check if there are transactions to validate
+	if len(collectedTransactions) == 0 {
+		fmt.Println("No transactions to include in the block.")
+		return
+	}
+
+	// Validate transactions in parallel
+	bc.TransactionPool = collectedTransactions // Temporarily set the transaction pool
+	bc.ValidateTransactionsInParallel()
 
 	// Log the transaction pool
 	fmt.Printf("Transaction pool before block creation: %+v\n", bc.TransactionPool)
@@ -234,16 +262,20 @@ func (bc *Blockchain) createBlock(network *Network) {
 		signatures = append(signatures, []byte(delegate.ID))
 	}
 
-	// Collect valid transactions
-	transactions := []Transaction{}
-	transactions = append(transactions, bc.TransactionPool...)
-
-	// Increment nonce
-	bc.Nonce++
-
 	// Attempt to achieve consensus
-	if bc.AchieveConsensus(Block{Transactions: transactions, Signatures: signatures}, network) {
-		bc.AddBlock(transactions, signatures)
+	block := Block{
+		Transactions: bc.TransactionPool,
+		PrevHash:     bc.GetLastBlockHash(),
+		Signatures:   signatures,
+	}
+	if bc.AchieveConsensus(block, network) {
+		bc.AddBlock(block.Transactions, signatures)
+
+		// Clear transaction pools in all shards
+		for _, shard := range bc.Shards {
+			shard.TransactionPool = []Transaction{}
+		}
+
 		fmt.Printf("Block %d created with signatures: %v\n", len(bc.Blocks)-1, signatures)
 	} else {
 		fmt.Println("Failed to achieve consensus. Block not added.")
