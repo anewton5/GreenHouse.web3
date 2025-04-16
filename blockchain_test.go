@@ -343,3 +343,46 @@ func TestParallelTransactionValidation(t *testing.T) {
 
 	bc.ValidateTransactionsInParallel()
 }
+
+func TestNodeRecovery(t *testing.T) {
+	// Create two nodes
+	node1 := NewNode("node1", NewBlockchain())
+	node2 := NewNode("node2", NewBlockchain())
+
+	// Add a block to node1's blockchain
+	tx := Transaction{Sender: "A", Receiver: "B", Amount: 10}
+	node1.Blockchain.AddBlock([]Transaction{tx}, nil)
+
+	// Sync node2 with node1
+	node2.SyncBlockchain(node1)
+
+	// Verify that node2's blockchain matches node1's
+	if len(node2.Blockchain.Blocks) != len(node1.Blockchain.Blocks) {
+		t.Fatalf("Node2 failed to sync blockchain with Node1")
+	}
+}
+
+func TestForkResolution(t *testing.T) {
+	// Create two blockchains
+	bc1 := NewBlockchain()
+	bc2 := NewBlockchain()
+
+	// Add blocks to bc1
+	tx1 := Transaction{Sender: "A", Receiver: "B", Amount: 10}
+	bc1.AddBlock([]Transaction{tx1}, nil)
+
+	// Add more blocks to bc2
+	tx2 := Transaction{Sender: "C", Receiver: "D", Amount: 20}
+	bc2.AddBlock([]Transaction{tx1}, nil)
+	bc2.AddBlock([]Transaction{tx2}, nil)
+
+	// Resolve fork
+	if !bc1.ResolveFork(bc2.Blocks) {
+		t.Fatalf("Failed to resolve fork")
+	}
+
+	// Verify that bc1 now matches bc2
+	if len(bc1.Blocks) != len(bc2.Blocks) {
+		t.Fatalf("Fork resolution failed: chains do not match")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -304,6 +305,48 @@ func (bc *Blockchain) ValidateTransactionsInParallel() {
 	}
 
 	fmt.Printf("%d/%d transactions are valid\n", validCount, len(bc.TransactionPool))
+}
+
+// SaveBlockchain saves the blockchain state to a file
+func (bc *Blockchain) SaveBlockchain(filename string) error {
+	data, err := json.Marshal(bc)
+	if err != nil {
+		return fmt.Errorf("failed to serialize blockchain: %v", err)
+	}
+	return os.WriteFile(filename, data, 0644)
+}
+
+// LoadBlockchain loads the blockchain state from a file
+func LoadBlockchain(filename string) (*Blockchain, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read blockchain file: %v", err)
+	}
+	var bc Blockchain
+	if err := json.Unmarshal(data, &bc); err != nil {
+		return nil, fmt.Errorf("failed to deserialize blockchain: %v", err)
+	}
+	return &bc, nil
+}
+
+func (bc *Blockchain) ResolveFork(newChain []Block) bool {
+	// Validate the new chain
+	for i := 1; i < len(newChain); i++ {
+		if newChain[i].PrevHash != newChain[i-1].CalculateHash() {
+			fmt.Println("Invalid chain: hashes do not match")
+			return false
+		}
+	}
+
+	// Check if the new chain is longer
+	if len(newChain) > len(bc.Blocks) {
+		fmt.Println("Replacing current chain with the longer valid chain")
+		bc.Blocks = newChain
+		return true
+	}
+
+	fmt.Println("New chain is not longer. No replacement made.")
+	return false
 }
 
 // This main function is not implemented correctly, for testing only.

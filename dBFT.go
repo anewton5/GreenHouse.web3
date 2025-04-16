@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sort"
+	"time"
 
 	"golang.org/x/crypto/sha3"
 )
@@ -17,7 +18,7 @@ type Node struct {
 	Votes          int
 	PrivateKey     ed25519.PrivateKey
 	PublicKey      ed25519.PublicKey
-	Inbox          chan Message
+	Inbox          chan Message `json:"-"`
 	VotingStrategy VotingStrategy
 	Blockchain     *Blockchain
 }
@@ -292,6 +293,37 @@ func NewNode(id string, blockchain *Blockchain) *Node {
 		ID:         id,
 		Inbox:      make(chan Message, 10), // Buffered channel for messages
 		Blockchain: blockchain,             // Initialize the blockchain reference
+	}
+}
+
+func (n *Node) SyncBlockchain(peer *Node) {
+	fmt.Printf("Node %s syncing blockchain from peer %s\n", n.ID, peer.ID)
+	n.Blockchain = peer.Blockchain
+	fmt.Printf("Node %s successfully synced blockchain\n", n.ID)
+}
+
+func (n *Node) PeriodicStateSaving(filename string) {
+	go func() {
+		for {
+			err := n.Blockchain.SaveBlockchain(filename)
+			if err != nil {
+				fmt.Printf("Node %s failed to save blockchain: %v\n", n.ID, err)
+			} else {
+				fmt.Printf("Node %s successfully saved blockchain state\n", n.ID)
+			}
+			time.Sleep(10 * time.Second)
+		}
+	}()
+}
+
+func (n *Node) HandleFork(peer *Node) {
+	fmt.Printf("Node %s checking for fork with peer %s\n", n.ID, peer.ID)
+	if len(peer.Blockchain.Blocks) > len(n.Blockchain.Blocks) {
+		if n.Blockchain.ResolveFork(peer.Blockchain.Blocks) {
+			fmt.Printf("Node %s resolved fork and updated its blockchain\n", n.ID)
+		} else {
+			fmt.Printf("Node %s detected invalid chain from peer %s\n", n.ID, peer.ID)
+		}
 	}
 }
 
