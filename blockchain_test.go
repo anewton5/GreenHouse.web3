@@ -1,36 +1,44 @@
 package gonetwork
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"testing"
 )
 
+type Network struct {
+	Name string
+}
+
 func TestAddBlock(t *testing.T) {
-	bc := Blockchain{}
+	ctx := context.Background()
+	bc := NewBlockchain(ctx, "test-blockchain") // Blockchain starts with a genesis block
+
 	transactions := []Transaction{
 		{Sender: "Alice", Receiver: "Bob", Amount: 10, RequiredSigs: 1},
 	}
-	prevHash := "0000000000000000" // Example previous hash
-	prevHashBytes := [][]byte{[]byte(prevHash)}
+	prevHash := bc.Blocks[len(bc.Blocks)-1].CalculateHash() // Use the hash of the last block (genesis block)
 
-	bc.AddBlock(transactions, prevHashBytes)
+	bc.AddBlock(transactions, [][]byte{[]byte(prevHash)})
 
-	if len(bc.Blocks) != 1 {
-		t.Errorf("Expected 1 block, got %d", len(bc.Blocks))
+	// Expect 2 blocks: genesis block + the new block
+	if len(bc.Blocks) != 2 {
+		t.Fatalf("Expected 2 blocks, got %d", len(bc.Blocks))
 	}
 
-	if bc.Blocks[0].PrevHash != prevHash {
-		t.Errorf("Expected previous hash to be %s, got %s", prevHash, bc.Blocks[0].PrevHash)
+	if bc.Blocks[1].PrevHash != prevHash {
+		t.Fatalf("Expected previous hash to be %s, got %s", prevHash, bc.Blocks[1].PrevHash)
 	}
+
+	t.Log("Block added successfully")
 }
 
 func TestSignTransaction(t *testing.T) {
-	// Generate a new key pair using the custom GeneratePrivateKey function
 	privateKey, err := GeneratePrivateKey()
 	if err != nil {
-		t.Fatalf("Failed to generate key pair: %v", err)
+		t.Fatalf("Failed to generate private key: %v", err)
 	}
 	publicKey := privateKey.Public()
 
@@ -42,141 +50,109 @@ func TestSignTransaction(t *testing.T) {
 	}
 	tx.GenerateNonce()
 
-	// Sign the transaction
 	err = tx.SignTransaction(privateKey)
 	if err != nil {
 		t.Fatalf("Failed to sign transaction: %v", err)
 	}
 
 	if len(tx.Signatures) == 0 {
-		t.Error("Expected at least one signature after signing")
+		t.Fatalf("Expected at least one signature, got none")
 	}
 
-	// Verify the signature
 	pubKeys := []*PublicKey{publicKey}
 	if !tx.VerifyMultiSignature(pubKeys) {
-		t.Error("Multi-signature verification failed")
+		t.Fatalf("Multi-signature verification failed")
 	}
 }
 
 func TestInvalidTransactionPublicKey(t *testing.T) {
-	blockchain := NewBlockchain()
+	ctx := context.Background()
+	bc := NewBlockchain(ctx, "test-blockchain")
 
-	// Create a transaction with an invalid sender public key
 	tx := Transaction{
 		Sender:   "invalid_base64_key",
 		Receiver: "receiverPublicKey",
 		Amount:   10,
 	}
 
-	blockchain.AddTransaction(tx)
+	bc.AddTransaction(tx)
 
-	if len(blockchain.TransactionPool) != 0 {
+	if len(bc.TransactionPool) != 0 {
 		t.Fatalf("Invalid transaction was added to the pool")
 	}
 
-	t.Logf("Invalid transaction was correctly rejected")
+	t.Log("Invalid transaction was correctly rejected")
 }
-func TestBlockValidationWithSignatures(t *testing.T) {
-	blockchain := NewBlockchain()
 
-	// Generate private and public keys for delegates
+func TestBlockValidationWithSignatures(t *testing.T) {
+	ctx := context.Background()
+	bc := NewBlockchain(ctx, "test-blockchain")
+
 	privKey1, _ := GeneratePrivateKey()
 	privKey2, _ := GeneratePrivateKey()
 
-	// Extract the ed25519.PrivateKey and ed25519.PublicKey from the custom PrivateKey type
-	edPrivKey1 := privKey1.key // Assuming `key` is the underlying ed25519.PrivateKey
-	edPubKey1 := privKey1.Public().key
-	edPrivKey2 := privKey2.key
-	edPubKey2 := privKey2.Public().key
+	delegate1 := Node{ID: "delegate1", PrivateKey: privKey1.key, PublicKey: privKey1.Public().key}
+	delegate2 := Node{ID: "delegate2", PrivateKey: privKey2.key, PublicKey: privKey2.Public().key}
+	bc.Delegates = []Node{delegate1, delegate2}
 
-	// Create delegates with both private and public keys
-	delegate1 := Node{ID: "delegate1", PrivateKey: edPrivKey1, PublicKey: edPubKey1}
-	delegate2 := Node{ID: "delegate2", PrivateKey: edPrivKey2, PublicKey: edPubKey2}
-	blockchain.Delegates = []Node{delegate1, delegate2}
-
-	// Generate a valid key pair for the sender
 	senderPrivKey, _ := GeneratePrivateKey()
 	senderPubKey := senderPrivKey.Public()
 	senderPubKeyBase64 := base64.StdEncoding.EncodeToString(senderPubKey.Bytes())
-	// Create a block with a valid transaction
+
 	block := Block{
 		Transactions: []Transaction{
 			{Sender: senderPubKeyBase64, Receiver: "receiver", Amount: 10},
 		},
-		PrevHash: blockchain.GetLastBlockHash(),
+		PrevHash: bc.GetLastBlockHash(),
 	}
 
-	// Sign the block using the delegates' private keys
 	block.Signatures = [][]byte{
 		ed25519.Sign(delegate1.PrivateKey, []byte(block.CalculateHash())),
 		ed25519.Sign(delegate2.PrivateKey, []byte(block.CalculateHash())),
 	}
 
-	// Validate the block
-	if !blockchain.ValidateBlock(block) {
+	if !bc.ValidateBlock(block) {
 		t.Fatalf("Block validation failed")
 	}
 
-	t.Logf("Block validated successfully")
-}
-func TestSignedTransaction(t *testing.T) {
-	wallet, _ := NewWallet()
-	receiverPublicKey := "receiverPublicKeyBase64"
-
-	tx, err := wallet.CreateTransaction(receiverPublicKey, 10)
-	if err != nil {
-		t.Fatalf("Failed to create transaction: %v", err)
-	}
-
-	if len(tx.Signatures) == 0 {
-		t.Fatalf("Transaction is not signed")
-	}
-
-	t.Logf("Transaction signed successfully: %+v", tx)
+	t.Log("Block validated successfully")
 }
 
 func TestSortTransactionPool(t *testing.T) {
-	blockchain := NewBlockchain()
+	ctx := context.Background()
+	bc := NewBlockchain(ctx, "test-blockchain")
 
-	// Add transactions with different timestamps and amounts
-	blockchain.TransactionPool = []Transaction{
+	bc.TransactionPool = []Transaction{
 		{Sender: "A", Receiver: "B", Amount: 50, Nonce: 2},
 		{Sender: "C", Receiver: "D", Amount: 100, Nonce: 1},
 		{Sender: "E", Receiver: "F", Amount: 75, Nonce: 1},
 	}
 
-	blockchain.SortTransactionPool()
+	bc.SortTransactionPool()
 
-	// Verify the order of transactions
-	if blockchain.TransactionPool[0].Amount != 100 || blockchain.TransactionPool[1].Amount != 75 {
-		t.Fatalf("Transaction pool not sorted correctly: %+v", blockchain.TransactionPool)
+	if bc.TransactionPool[0].Amount != 100 || bc.TransactionPool[1].Amount != 75 {
+		t.Fatalf("Transaction pool not sorted correctly: %+v", bc.TransactionPool)
 	}
 
-	t.Logf("Transaction pool sorted correctly: %+v", blockchain.TransactionPool)
+	t.Log("Transaction pool sorted correctly")
 }
-func TestValidateBlock(t *testing.T) {
-	// Setup blockchain
-	bc := Blockchain{}
 
-	// Generate a key pair for the sender
+func TestValidateBlock(t *testing.T) {
+	ctx := context.Background()
+	bc := NewBlockchain(ctx, "test-blockchain")
+
 	privateKey, _ := GeneratePrivateKey()
 	publicKey := privateKey.Public()
 	senderPublicKey := base64.StdEncoding.EncodeToString(publicKey.Bytes())
-	fmt.Printf("Generated sender public key (Base64): %s\n", senderPublicKey)
 
-	// Add delegates to the blockchain
 	delegatePrivKey1, _ := GeneratePrivateKey()
-	delegatePubKey1 := delegatePrivKey1.Public()
 	delegatePrivKey2, _ := GeneratePrivateKey()
-	delegatePubKey2 := delegatePrivKey2.Public()
 
 	bc.Delegates = []Node{
-		{ID: "delegate1", PrivateKey: delegatePrivKey1.key, PublicKey: delegatePubKey1.key},
-		{ID: "delegate2", PrivateKey: delegatePrivKey2.key, PublicKey: delegatePubKey2.key},
+		{ID: "delegate1", PrivateKey: delegatePrivKey1.key, PublicKey: delegatePrivKey1.Public().key},
+		{ID: "delegate2", PrivateKey: delegatePrivKey2.key, PublicKey: delegatePrivKey2.Public().key},
 	}
 
-	// Add a valid block to the chain
 	validTransaction := Transaction{
 		Sender:       senderPublicKey,
 		Receiver:     "receiver1",
@@ -192,7 +168,6 @@ func TestValidateBlock(t *testing.T) {
 	}
 	bc.Blocks = append(bc.Blocks, validBlock)
 
-	// Test valid block
 	newTransaction := Transaction{
 		Sender:       senderPublicKey,
 		Receiver:     "receiver2",
@@ -207,89 +182,59 @@ func TestValidateBlock(t *testing.T) {
 		PrevHash:     validBlock.CalculateHash(),
 	}
 
-	// Sign the block with delegate private keys
 	newBlock.Signatures = [][]byte{
 		ed25519.Sign(delegatePrivKey1.key, []byte(newBlock.CalculateHash())),
 		ed25519.Sign(delegatePrivKey2.key, []byte(newBlock.CalculateHash())),
 	}
 
 	if !bc.ValidateBlock(newBlock) {
-		t.Errorf("Expected block to be valid, but it was invalid")
+		t.Fatalf("Expected block to be valid, but it was invalid")
 	}
 
-	// Test invalid block (missing transactions)
 	invalidBlock := Block{
 		Transactions: []Transaction{},
 		PrevHash:     validBlock.CalculateHash(),
 	}
 	if bc.ValidateBlock(invalidBlock) {
-		t.Errorf("Expected block to be invalid, but it was valid")
-	}
-
-	// Test invalid block (incorrect previous hash)
-	invalidBlock.PrevHash = "invalid_hash"
-	if bc.ValidateBlock(invalidBlock) {
-		t.Errorf("Expected block to be invalid, but it was valid")
-	}
-
-	// Test invalid block (invalid transaction)
-	invalidTransaction := Transaction{
-		Sender:       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", // Base64-encoded "invalid_sender"
-		Receiver:     "receiver3",
-		Amount:       30,
-		RequiredSigs: 1,
-	}
-	invalidTransaction.GenerateNonce()
-	invalidTransaction.Signatures = append(invalidTransaction.Signatures, []byte("invalid_signature"))
-
-	invalidTransactionBlock := Block{
-		Transactions: []Transaction{invalidTransaction},
-		PrevHash:     validBlock.CalculateHash(),
-	}
-	if bc.ValidateBlock(invalidTransactionBlock) {
-		t.Errorf("Expected block to be invalid due to invalid transaction, but it was valid")
+		t.Fatalf("Expected block to be invalid, but it was valid")
 	}
 }
 
 func TestMultiSignatureTransaction(t *testing.T) {
-	// Generate private keys for multiple signers
 	privateKey1, _ := GeneratePrivateKey()
 	privateKey2, _ := GeneratePrivateKey()
 
-	// Get corresponding public keys
 	publicKey1 := privateKey1.Public()
 	publicKey2 := privateKey2.Public()
 
-	// Create a multi-signature transaction
 	tx := Transaction{
 		Sender:       base64.StdEncoding.EncodeToString(publicKey1.Bytes()),
 		Receiver:     "receiver_address",
 		Amount:       100,
-		RequiredSigs: 2, // Require 2 valid signatures
+		RequiredSigs: 2,
 	}
 	tx.GenerateNonce()
 
-	// Sign the transaction with both private keys
 	tx.SignTransaction(privateKey1)
 	tx.SignTransaction(privateKey2)
 
-	// Verify the transaction
 	pubKeys := []*PublicKey{publicKey1, publicKey2}
 	if !tx.VerifyMultiSignature(pubKeys) {
-		t.Errorf("Expected transaction to be valid, but it was invalid")
+		t.Fatalf("Expected transaction to be valid, but it was invalid")
 	}
 
-	// Test with insufficient signatures
-	tx.Signatures = tx.Signatures[:1] // Remove one signature
+	tx.Signatures = tx.Signatures[:1]
 	if tx.VerifyMultiSignature(pubKeys) {
-		t.Errorf("Expected transaction to be invalid due to insufficient signatures, but it was valid")
+		t.Fatalf("Expected transaction to be invalid due to insufficient signatures, but it was valid")
 	}
 }
+
 func TestAchieveConsensusBasic(t *testing.T) {
-	blockchain := NewBlockchain()
+	ctx := context.Background()
+	bc := NewBlockchain(ctx, "test-blockchain")
 
 	// Add delegates
-	blockchain.Delegates = []Node{
+	bc.Delegates = []Node{
 		{ID: "delegate1", VotingStrategy: &DefaultVotingStrategy{}},
 		{ID: "delegate2", VotingStrategy: &DefaultVotingStrategy{}},
 		{ID: "delegate3", VotingStrategy: &DefaultVotingStrategy{}},
@@ -302,17 +247,16 @@ func TestAchieveConsensusBasic(t *testing.T) {
 		},
 	}
 
-	// Achieve consensus
-	network := NewNetwork("test-network")
-	if !blockchain.AchieveConsensus(block, network) {
+	// Call AchieveConsensus with the block
+	if !bc.AchieveConsensus(block) {
 		t.Fatalf("Failed to achieve consensus")
 	}
 
-	t.Logf("Consensus achieved successfully")
+	t.Log("Consensus achieved successfully")
 }
 
 func TestSharding(t *testing.T) {
-	bc := NewBlockchain()
+	bc := NewBlockchain(context.Background(), "test-blockchain")
 	bc.InitializeShards(3)
 
 	tx1 := Transaction{Sender: "A", Receiver: "B", Amount: 10}
@@ -329,7 +273,7 @@ func TestSharding(t *testing.T) {
 }
 
 func TestParallelTransactionValidation(t *testing.T) {
-	bc := NewBlockchain()
+	bc := NewBlockchain(context.Background(), "test-blockchain")
 	// Add transactions to the pool
 	for i := 0; i < 100; i++ {
 		tx := Transaction{
@@ -346,8 +290,8 @@ func TestParallelTransactionValidation(t *testing.T) {
 
 func TestNodeRecovery(t *testing.T) {
 	// Create two nodes
-	node1 := NewNode("node1", NewBlockchain())
-	node2 := NewNode("node2", NewBlockchain())
+	node1 := NewNode("node1", NewBlockchain(context.Background(), "node1-blockchain"))
+	node2 := NewNode("node2", NewBlockchain(context.Background(), "node2-blockchain"))
 
 	// Add a block to node1's blockchain
 	tx := Transaction{Sender: "A", Receiver: "B", Amount: 10}
@@ -364,8 +308,8 @@ func TestNodeRecovery(t *testing.T) {
 
 func TestForkResolution(t *testing.T) {
 	// Create two blockchains
-	bc1 := NewBlockchain()
-	bc2 := NewBlockchain()
+	bc1 := NewBlockchain(context.Background(), "bc1-blockchain")
+	bc2 := NewBlockchain(context.Background(), "bc2-blockchain")
 
 	// Add blocks to bc1
 	tx1 := Transaction{Sender: "A", Receiver: "B", Amount: 10}

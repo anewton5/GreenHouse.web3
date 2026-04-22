@@ -1,6 +1,7 @@
 package gonetwork
 
 import (
+	"context"
 	"encoding/base64"
 	"testing"
 )
@@ -45,11 +46,15 @@ func TestVoteForDelegates(t *testing.T) {
 		t.Fatalf("Failed to lock currency for wallet2: %v", err)
 	}
 
-	// Create a Network instance
-	network := &Network{}
+	// Create a P2PNode instance
+	ctx := context.Background()
+	p2pNode, err := NewP2PNode(ctx, &bc, "test-topic", []string{})
+	if err != nil {
+		t.Fatalf("Failed to create P2PNode: %v", err)
+	}
 
 	// Call VoteForDelegates
-	bc.VoteForDelegates(network)
+	bc.VoteForDelegates(p2pNode)
 
 	// Verify delegates
 	if len(bc.Delegates) != 2 {
@@ -69,7 +74,6 @@ func TestAchieveConsensus(t *testing.T) {
 			{ID: "delegate3", Stake: 100},
 		},
 	}
-	network := NewNetwork("default-network")
 
 	block := Block{
 		Transactions: []Transaction{
@@ -77,7 +81,7 @@ func TestAchieveConsensus(t *testing.T) {
 		},
 	}
 
-	achieved := blockchain.AchieveConsensus(block, network)
+	achieved := blockchain.AchieveConsensus(block)
 	if !achieved {
 		t.Errorf("Expected consensus to be achieved, but it was not")
 	}
@@ -85,13 +89,10 @@ func TestAchieveConsensus(t *testing.T) {
 
 func TestCreateBlock(t *testing.T) {
 	// Initialize the blockchain with a genesis block
-	blockchain := NewBlockchain()
+	blockchain := NewBlockchain(context.Background(), "test-topic")
 
 	// Initialize shards
 	blockchain.InitializeShards(3) // Create 3 shards
-
-	// Create a network
-	network := NewNetwork("default-network")
 
 	// Add wallets with private keys
 	privKey1, _ := GeneratePrivateKey()
@@ -138,7 +139,7 @@ func TestCreateBlock(t *testing.T) {
 	t.Logf("Initial blockchain state: %+v", blockchain)
 
 	// Call createBlock
-	blockchain.createBlock(network)
+	blockchain.createBlock(blockchain.P2PNode)
 
 	// Check if consensus was achieved
 	if len(blockchain.Blocks) <= 1 { // Genesis block + new block
@@ -172,18 +173,17 @@ func TestNetworkConsensus(t *testing.T) {
 		TransactionPool:    []Transaction{},
 	}
 
-	// Create a network
-	network := NewNetwork("default-network")
+	// Create a P2PNode instance
+	ctx := context.Background()
+	p2pNode, err := NewP2PNode(ctx, blockchain, "test-topic", []string{})
+	if err != nil {
+		t.Fatalf("Failed to create P2PNode: %v", err)
+	}
 
 	// Create nodes
 	node1 := NewNode("node1", blockchain)
 	node2 := NewNode("node2", blockchain)
 	node3 := NewNode("node3", blockchain)
-
-	// Register nodes to the network
-	network.RegisterNode(node1)
-	network.RegisterNode(node2)
-	network.RegisterNode(node3)
 
 	// Setup blockchain with delegates
 	blockchain.Delegates = []Node{
@@ -193,7 +193,7 @@ func TestNetworkConsensus(t *testing.T) {
 	}
 
 	// Start consensus
-	blockchain.startConsensus(network)
+	blockchain.startConsensus(p2pNode)
 }
 
 func TestVoteOnBlock(t *testing.T) {
@@ -236,9 +236,6 @@ func TestAchieveConsensusWithMixedVotes(t *testing.T) {
 		TransactionPool: []Transaction{},
 	}
 
-	// Create a network
-	network := NewNetwork("default-network")
-
 	// Setup blockchain with delegates
 	blockchain.Delegates = []Node{
 		{ID: "delegate1", Blockchain: blockchain, VotingStrategy: &FuncVotingStrategy{VoteFunc: func(block Block) bool { return true }}},  // YES
@@ -252,7 +249,7 @@ func TestAchieveConsensusWithMixedVotes(t *testing.T) {
 	}
 
 	// Call AchieveConsensus
-	result := blockchain.AchieveConsensus(validBlock, network)
+	result := blockchain.AchieveConsensus(validBlock)
 
 	// Verify consensus result
 	if !result {
@@ -261,7 +258,7 @@ func TestAchieveConsensusWithMixedVotes(t *testing.T) {
 
 	// Test with insufficient votes
 	blockchain.Delegates[1].VotingStrategy = &FuncVotingStrategy{VoteFunc: func(block Block) bool { return false }} // Change to NO
-	result = blockchain.AchieveConsensus(validBlock, network)
+	result = blockchain.AchieveConsensus(validBlock)
 	if result {
 		t.Errorf("Expected consensus to fail, but it was achieved")
 	}

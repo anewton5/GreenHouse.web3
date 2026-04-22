@@ -1,8 +1,10 @@
 package gonetwork
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -24,7 +26,7 @@ type Node struct {
 }
 
 // VoteForDelegates selects delegates based on staked currency
-func (bc *Blockchain) VoteForDelegates(network *Network) {
+func (bc *Blockchain) VoteForDelegates(p2pNode *P2PNode) {
 	// Reset delegates
 	bc.Delegates = []Node{}
 
@@ -58,7 +60,7 @@ func (bc *Blockchain) VoteForDelegates(network *Network) {
 
 	// Start the consensus process
 	if len(bc.Delegates) > 0 {
-		bc.startConsensus(network)
+		bc.startConsensus(p2pNode)
 	} else {
 		fmt.Println("No delegates elected. Consensus cannot start.")
 	}
@@ -76,12 +78,11 @@ func (bc *Blockchain) getDelegateID(voterID string) string {
 }
 
 // Start the consensus process
-func (bc *Blockchain) startConsensus(network *Network) {
+func (bc *Blockchain) startConsensus(p2pNode *P2PNode) {
 	bc.currentView = View{Number: 0}
 	bc.selectSpeaker()
 
-	// Speaker proposes a block with transactions from the pool
-	speaker := bc.Delegates[bc.currentSpeaker]
+	// Access the speaker directly
 	block := Block{
 		Transactions: bc.TransactionPool, // Use transactions from the pool
 		PrevHash:     bc.GetLastBlockHash(),
@@ -94,13 +95,10 @@ func (bc *Blockchain) startConsensus(network *Network) {
 	}
 
 	// Broadcast block proposal
-	proposalMsg := Message{
-		From:    speaker.ID,
-		To:      "",
-		Type:    BlockProposal,
-		Payload: block,
+	if err := p2pNode.BroadcastBlock(block); err != nil {
+		fmt.Printf("Failed to broadcast block proposal: %v\n", err)
+		return
 	}
-	speaker.SendMessage(network, proposalMsg)
 
 	// Clear the transaction pool after proposing the block
 	bc.TransactionPool = []Transaction{}
@@ -136,7 +134,7 @@ func (bc *Blockchain) selectSpeaker() {
 }
 
 // AchieveConsensus ensures consensus is reached among delegates
-func (bc *Blockchain) AchieveConsensus(block Block, network *Network) bool {
+func (bc *Blockchain) AchieveConsensus(block Block) bool {
 	yesVotes := 0
 	noVotes := 0
 
@@ -205,6 +203,13 @@ func (bc *Blockchain) AddTransaction(tx Transaction) {
 	shardID := int(sha3.Sum256([]byte(tx.Sender))[0]) % len(bc.Shards)
 	bc.Shards[shardID].TransactionPool = append(bc.Shards[shardID].TransactionPool, tx)
 	fmt.Printf("Transaction assigned to shard %d: %+v\n", shardID, tx)
+
+	// Broadcast the transaction
+	if bc.P2PNode != nil {
+		if err := bc.P2PNode.BroadcastTransaction(tx); err != nil {
+			fmt.Printf("Failed to broadcast transaction: %v\n", err)
+		}
+	}
 }
 
 // SortTransactionPool sorts the transaction pool by priority (timestamp and amount)
@@ -232,7 +237,7 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 }
 
 // Create a new block and add it to the blockchain
-func (bc *Blockchain) createBlock(network *Network) {
+func (bc *Blockchain) createBlock(p2pNode *P2PNode) {
 	if len(bc.Delegates) == 0 {
 		fmt.Println("No delegates available to create a block.")
 		return
@@ -269,7 +274,7 @@ func (bc *Blockchain) createBlock(network *Network) {
 		PrevHash:     bc.GetLastBlockHash(),
 		Signatures:   signatures,
 	}
-	if bc.AchieveConsensus(block, network) {
+	if bc.AchieveConsensus(block) {
 		bc.AddBlock(block.Transactions, signatures)
 
 		// Clear transaction pools in all shards
@@ -328,8 +333,16 @@ func (n *Node) HandleFork(peer *Node) {
 }
 
 // SendMessage sends a message to the network
-func (n *Node) SendMessage(network *Network, msg Message) {
-	network.SendMessage(network, msg)
+func (n *Node) SendMessage(p2pNode *P2PNode, msg Message) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		fmt.Printf("Failed to serialize message: %v\n", err)
+		return
+	}
+
+	if err := p2pNode.Topic.Publish(context.Background(), data); err != nil {
+		fmt.Printf("Failed to send message: %v\n", err)
+	}
 }
 
 // ReceiveMessage handles incoming messages

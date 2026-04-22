@@ -1,10 +1,12 @@
 package gonetwork
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -119,6 +121,7 @@ type Blockchain struct {
 	Nonce              int
 	TransactionPool    []Transaction
 	Shards             []*Shard
+	P2PNode            *P2PNode
 }
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
@@ -138,6 +141,13 @@ func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) 
 
 	bc.Blocks = append(bc.Blocks, newBlock)
 	bc.Nonce++
+
+	// Broadcast the block
+	if bc.P2PNode != nil {
+		if err := bc.P2PNode.BroadcastBlock(newBlock); err != nil {
+			fmt.Printf("Failed to broadcast block: %v\n", err)
+		}
+	}
 }
 
 // SignTransaction signs the transaction with the given private key
@@ -379,7 +389,7 @@ func main() {
 	}
 }
 
-func NewBlockchain() *Blockchain {
+func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc := &Blockchain{
 		Blocks:             []Block{},
 		TransactionPool:    []Transaction{},
@@ -398,5 +408,17 @@ func NewBlockchain() *Blockchain {
 	}
 	bc.Blocks = append(bc.Blocks, genesisBlock)
 	fmt.Println("Genesis block added to the blockchain.")
+
+	bootstrapPeers := []string{
+		"/ip4/206.189.29.191/tcp/4001/p2p/12D3KooWAuhPZUUFjaMhEqF3WdvQUJ7SM91nnrQbzULwCyoY8F37",
+	}
+
+	// Initialize the P2PNode
+	p2pNode, err := NewP2PNode(ctx, bc, topicName, bootstrapPeers)
+	if err != nil {
+		log.Fatalf("Failed to initialize P2PNode: %v", err)
+	}
+	bc.P2PNode = p2pNode
+
 	return bc
 }
