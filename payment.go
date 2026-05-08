@@ -32,26 +32,26 @@ const (
 // It instructs the buyer to transfer a specific fiat amount.
 // The oracle signs it to prevent forgery; any mutation is detectable.
 type PaymentInstruction struct {
-	TradeID          string           // matches Trade.ID
+	TradeID          string // matches Trade.ID
 	AssetID          string
 	Quantity         float64
 	PricePerUnit     float64
-	TotalAmount      float64          // Quantity * PricePerUnit
-	Currency         string           // "GBP", "EUR", "USD", "CHF"
+	TotalAmount      float64 // Quantity * PricePerUnit
+	Currency         string  // "GBP", "EUR", "USD", "CHF"
 	Method           SettlementMethod
-	PayerWalletID    string           // buyer's base64-encoded public key
-	PayeeWalletID    string           // seller's base64-encoded public key
-	PayerVirtualIBAN string           // virtual IBAN assigned to buyer by payment provider
-	Reference        string           // unique reference for payment matching
-	ExpiresAt        int64            // Unix timestamp — trade reverts if unpaid
-	OracleSignature  []byte           // Ed25519 sig from OracleService
+	PayerWalletID    string // buyer's base64-encoded public key
+	PayeeWalletID    string // seller's base64-encoded public key
+	PayerVirtualIBAN string // virtual IBAN assigned to buyer by payment provider
+	Reference        string // unique reference for payment matching
+	ExpiresAt        int64  // Unix timestamp — trade reverts if unpaid
+	OracleSignature  []byte // Ed25519 sig from OracleService
 }
 
 // PaymentConfirmation is broadcast on-chain when fiat payment is confirmed.
 // In production this is triggered by a payment provider webhook received by
 // the oracle service. In simulation it is emitted immediately by MockPaymentProvider.
 type PaymentConfirmation struct {
-	InstructionID   string  // matches PaymentInstruction.TradeID
+	InstructionID   string // matches PaymentInstruction.TradeID
 	Reference       string
 	ConfirmedAmount float64
 	Currency        string
@@ -101,8 +101,3 @@ type OracleService interface {
 }
 
 // ---------------------------------------------------------------------------
-// P2P message type constants (used in p2p.go Week 5)
-// ---------------------------------------------------------------------------
-
-const MessageTypePaymentInstruction = "payment_instruction"
-const MessageTypePaymentConfirmation = "payment_confirmation"

@@ -92,10 +92,13 @@ func (t *Transaction) VerifyTransaction(pubKeys []*PublicKey) (bool, error) {
 }
 
 type Block struct {
-	Transactions []Transaction
-	PrevHash     string
-	Nonce        int
-	Signatures   [][]byte
+	Transactions           []Transaction           `json:"Transactions"`
+	AssetTransactions      []AssetTransaction      `json:"AssetTransactions,omitempty"`
+	OrderTransactions      []OrderTransaction      `json:"OrderTransactions,omitempty"`
+	CredentialTransactions []CredentialTransaction `json:"CredentialTransactions,omitempty"`
+	PrevHash               string
+	Nonce                  int
+	Signatures             [][]byte
 }
 
 func (b *Block) CalculateHash() string {
@@ -122,6 +125,27 @@ type Blockchain struct {
 	TransactionPool    []Transaction
 	Shards             []*Shard
 	P2PNode            *P2PNode
+
+	// Asset layer
+	Assets   map[string]*Asset        // assetID → Asset
+	Holdings map[string]*AssetHolding // HoldingKey(holderID, assetID) → AssetHolding
+
+	// Order book layer
+	OrderBooks map[string]*OrderBook // assetID → OrderBook
+	Trades     []Trade               // append-only trade history
+
+	// Identity layer
+	Credentials map[string]*CredentialAttestation // walletKey → attestation
+
+	// Payment layer
+	PendingInstructions      map[string]*PaymentInstruction  // tradeID → instruction
+	ConfirmedPayments        map[string]*PaymentConfirmation // tradeID → confirmation
+	PendingAssetTransactions []AssetTransaction              // received via P2P, awaiting block inclusion
+
+	// Services (interfaces — swappable for live implementations)
+	PaymentProvider  PaymentProvider
+	IdentityRegistry IdentityRegistry
+	OracleService    OracleService
 }
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
@@ -389,6 +413,13 @@ func main() {
 	}
 }
 
+// CommitBlock is the public entry point for finalising a pre-built block.
+// It is used by the simulation and integration tests; the normal production
+// path is AchieveConsensus → finalizeBlock.
+func (bc *Blockchain) CommitBlock(block Block) {
+	bc.finalizeBlock(block)
+}
+
 func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc := &Blockchain{
 		Blocks:             []Block{},
@@ -408,6 +439,27 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	}
 	bc.Blocks = append(bc.Blocks, genesisBlock)
 	fmt.Println("Genesis block added to the blockchain.")
+
+	// Initialise DVP state maps
+	bc.Assets = make(map[string]*Asset)
+	bc.Holdings = make(map[string]*AssetHolding)
+	bc.OrderBooks = make(map[string]*OrderBook)
+	bc.Trades = []Trade{}
+	bc.Credentials = make(map[string]*CredentialAttestation)
+	bc.PendingInstructions = make(map[string]*PaymentInstruction)
+	bc.ConfirmedPayments = make(map[string]*PaymentConfirmation)
+	bc.PendingAssetTransactions = []AssetTransaction{}
+
+	// Default to mock service implementations so existing tests need no changes
+	if bc.PaymentProvider == nil {
+		bc.PaymentProvider = NewMockPaymentProvider()
+	}
+	if bc.IdentityRegistry == nil {
+		bc.IdentityRegistry, _ = NewMockIdentityRegistry()
+	}
+	if bc.OracleService == nil {
+		bc.OracleService, _ = NewMockOracleService()
+	}
 
 	bootstrapPeers := []string{
 		"/ip4/206.189.29.191/tcp/4001/p2p/12D3KooWAuhPZUUFjaMhEqF3WdvQUJ7SM91nnrQbzULwCyoY8F37",

@@ -21,18 +21,18 @@ func makeOracle(t *testing.T) *MockOracleService {
 
 func makeInstruction(tradeID string) *PaymentInstruction {
 	return &PaymentInstruction{
-		TradeID:         tradeID,
-		AssetID:         "asset-001",
-		Quantity:        100,
-		PricePerUnit:    10.50,
-		TotalAmount:     1050.00,
-		Currency:        "GBP",
-		Method:          SettlementFasterPay,
-		PayerWalletID:   "buyer-wallet-key",
-		PayeeWalletID:   "seller-wallet-key",
+		TradeID:          tradeID,
+		AssetID:          "asset-001",
+		Quantity:         100,
+		PricePerUnit:     10.50,
+		TotalAmount:      1050.00,
+		Currency:         "GBP",
+		Method:           SettlementFasterPay,
+		PayerWalletID:    "buyer-wallet-key",
+		PayeeWalletID:    "seller-wallet-key",
 		PayerVirtualIBAN: "GB01MOCK0000000000001234",
-		Reference:       "GH-" + tradeID[:8],
-		ExpiresAt:       time.Now().Add(24 * time.Hour).Unix(),
+		Reference:        "GH-" + tradeID[:8],
+		ExpiresAt:        time.Now().Add(24 * time.Hour).Unix(),
 	}
 }
 

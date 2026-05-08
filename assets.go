@@ -100,9 +100,6 @@ type AssetTransaction struct {
 	TxType  AssetTxType
 }
 
-// P2P message type constant for asset transactions (used in p2p.go Week 5).
-const MessageTypeAssetTransaction = "asset_transaction"
-
 // ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------

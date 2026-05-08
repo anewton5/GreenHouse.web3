@@ -68,9 +68,6 @@ type CredentialTransaction struct {
 	Attestation CredentialAttestation
 }
 
-// P2P message type constant for credential transactions (used in p2p.go Week 5).
-const MessageTypeCredential = "credential"
-
 // ---------------------------------------------------------------------------
 // IdentityRegistry interface
 // ---------------------------------------------------------------------------

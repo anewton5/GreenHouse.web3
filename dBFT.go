@@ -233,7 +233,109 @@ func (n *Node) VoteOnBlock(block Block) bool {
 }
 func (bc *Blockchain) finalizeBlock(block Block) {
 	fmt.Printf("Finalizing block with hash: %s\n", block.CalculateHash())
+
+	// 1. Append to chain
 	bc.Blocks = append(bc.Blocks, block)
+
+	// 2. Apply asset transactions from this block
+	for _, tx := range block.AssetTransactions {
+		if err := tx.Validate(bc.Assets, bc.Holdings, bc.Credentials); err != nil {
+			fmt.Printf("Skipping invalid asset tx: %v\n", err)
+			continue
+		}
+		if err := ApplyAssetTransaction(&tx, bc.Assets, bc.Holdings); err != nil {
+			fmt.Printf("Failed to apply asset tx: %v\n", err)
+		}
+	}
+
+	// 3. Apply credential transactions
+	for _, ct := range block.CredentialTransactions {
+		bc.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
+	}
+
+	// 4. Apply new orders to order books
+	for _, ot := range block.OrderTransactions {
+		if ot.IsCancellation {
+			if ob, ok := bc.OrderBooks[ot.Order.AssetID]; ok {
+				if err := ob.CancelOrder(ot.Order.ID, ot.Tx.Sender); err != nil {
+					fmt.Printf("Failed to cancel order %s: %v\n", ot.Order.ID, err)
+				}
+			}
+			continue
+		}
+		if _, ok := bc.OrderBooks[ot.Order.AssetID]; !ok {
+			bc.OrderBooks[ot.Order.AssetID] = NewOrderBook(ot.Order.AssetID)
+		}
+		pubKey, err := PublicKeyFromString(ot.Tx.Sender)
+		if err != nil {
+			fmt.Printf("Failed to decode order placer key: %v\n", err)
+			continue
+		}
+		if err := bc.OrderBooks[ot.Order.AssetID].AddOrder(&ot.Order, pubKey); err != nil {
+			fmt.Printf("Failed to add order to book: %v\n", err)
+		}
+	}
+
+	// 5. Run matching engine for all order books
+	for assetID, ob := range bc.OrderBooks {
+		asset, ok := bc.Assets[assetID]
+		if !ok {
+			continue
+		}
+		trades, assetTxs, err := ob.MatchOrders(assetID, asset.Currency)
+		if err != nil {
+			fmt.Printf("MatchOrders error for asset %s: %v\n", assetID, err)
+			continue
+		}
+
+		for i, trade := range trades {
+			bc.Trades = append(bc.Trades, trade)
+
+			// 6. Issue PaymentInstruction for each trade
+			instruction := &PaymentInstruction{
+				TradeID:       trade.ID,
+				AssetID:       trade.AssetID,
+				Quantity:      trade.Quantity,
+				PricePerUnit:  trade.Price,
+				TotalAmount:   trade.Price * trade.Quantity,
+				Currency:      trade.Currency,
+				Method:        SettlementSEPA,
+				PayerWalletID: trade.BuyerID,
+				PayeeWalletID: trade.SellerID,
+				Reference:     fmt.Sprintf("GH-%s", trade.ID[:8]),
+				ExpiresAt:     time.Now().Unix() + 86400, // 24 h to pay
+			}
+			instruction, _ = bc.OracleService.SignInstruction(instruction)
+			bc.PendingInstructions[trade.ID] = instruction
+
+			// 7. Simulate payment confirmation (MockPaymentProvider confirms instantly)
+			_ = bc.PaymentProvider.ConfirmPayment(
+				instruction.Reference,
+				instruction.TotalAmount,
+				instruction.Currency,
+			)
+			status, _ := bc.PaymentProvider.GetPaymentStatus(instruction.Reference)
+			if status == PaymentStatusConfirmed {
+				confirmation := &PaymentConfirmation{
+					InstructionID:   trade.ID,
+					Reference:       instruction.Reference,
+					ConfirmedAmount: instruction.TotalAmount,
+					Currency:        instruction.Currency,
+					ConfirmedAt:     time.Now().Unix(),
+				}
+				confirmation, _ = bc.OracleService.SignConfirmation(confirmation)
+				bc.ConfirmedPayments[trade.ID] = confirmation
+
+				// 8. DVP: apply asset transfer now that payment is confirmed
+				// AssetTransactions from MatchOrders are unsigned (seller key not in scope here).
+				// ApplyAssetTransaction is called directly, bypassing Validate's signature check.
+				atx := assetTxs[i]
+				if err := ApplyAssetTransaction(atx, bc.Assets, bc.Holdings); err != nil {
+					fmt.Printf("DVP apply failed for trade %s: %v\n", trade.ID, err)
+				}
+			}
+		}
+	}
 }
 
 // Create a new block and add it to the blockchain

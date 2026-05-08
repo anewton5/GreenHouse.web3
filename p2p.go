@@ -42,10 +42,15 @@ type mdnsNotifee struct {
 }
 
 const (
-	MessageTypeTransaction = "transaction"
-	MessageTypeBlock       = "block"
-	MessageTypeAck         = "ack"
-	MessageTypePing        = "ping"
+	MessageTypeTransaction         = "transaction"
+	MessageTypeBlock               = "block"
+	MessageTypeAck                 = "ack"
+	MessageTypePing                = "ping"
+	MessageTypeAssetTransaction    = "asset_transaction"
+	MessageTypeCredential          = "credential"
+	MessageTypePaymentInstruction  = "payment_instruction"
+	MessageTypePaymentConfirmation = "payment_confirmation"
+	MessageTypeOrderTransaction    = "order_transaction"
 )
 
 type P2PMessage struct {
@@ -264,6 +269,54 @@ func (n *P2PNode) BroadcastBlock(block Block) error {
 	return n.Topic.Publish(context.Background(), data)
 }
 
+func (n *P2PNode) BroadcastAssetTransaction(at AssetTransaction) error {
+	if n == nil || n.Topic == nil {
+		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	payload, err := json.Marshal(at)
+	if err != nil {
+		return fmt.Errorf("failed to serialize asset transaction: %w", err)
+	}
+	message := P2PMessage{Type: MessageTypeAssetTransaction, Payload: payload}
+	data, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize P2PMessage: %w", err)
+	}
+	return n.Topic.Publish(context.Background(), data)
+}
+
+func (n *P2PNode) BroadcastCredential(ct CredentialTransaction) error {
+	if n == nil || n.Topic == nil {
+		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	payload, err := json.Marshal(ct)
+	if err != nil {
+		return fmt.Errorf("failed to serialize credential transaction: %w", err)
+	}
+	message := P2PMessage{Type: MessageTypeCredential, Payload: payload}
+	data, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize P2PMessage: %w", err)
+	}
+	return n.Topic.Publish(context.Background(), data)
+}
+
+func (n *P2PNode) BroadcastPaymentConfirmation(pc PaymentConfirmation) error {
+	if n == nil || n.Topic == nil {
+		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	payload, err := json.Marshal(pc)
+	if err != nil {
+		return fmt.Errorf("failed to serialize payment confirmation: %w", err)
+	}
+	message := P2PMessage{Type: MessageTypePaymentConfirmation, Payload: payload}
+	data, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize P2PMessage: %w", err)
+	}
+	return n.Topic.Publish(context.Background(), data)
+}
+
 func (n *P2PNode) HandleMessages(ctx context.Context) {
 	for {
 		select {
@@ -315,13 +368,45 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 
 			case MessageTypePing:
 				log.Println("Received ping message")
-				// Optionally, send an acknowledgment back
 				ackMessage := P2PMessage{
 					Type:    MessageTypeAck,
 					Payload: []byte("pong"),
 				}
 				data, _ := json.Marshal(ackMessage)
 				n.Topic.Publish(ctx, data)
+
+			case MessageTypeAssetTransaction:
+				var at AssetTransaction
+				if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
+					log.Printf("Failed to deserialize asset transaction: %v", err)
+					continue
+				}
+				if err := at.Validate(n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials); err == nil {
+					n.Blockchain.PendingAssetTransactions = append(n.Blockchain.PendingAssetTransactions, at)
+				} else {
+					log.Printf("Received invalid asset transaction: %v", err)
+				}
+
+			case MessageTypeCredential:
+				var ct CredentialTransaction
+				if err := json.Unmarshal(p2pMessage.Payload, &ct); err != nil {
+					log.Printf("Failed to deserialize credential transaction: %v", err)
+					continue
+				}
+				// Credentials are registry-signed — apply directly on receipt
+				if ct.Attestation.IsValid() {
+					n.Blockchain.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
+				}
+
+			case MessageTypePaymentConfirmation:
+				var pc PaymentConfirmation
+				if err := json.Unmarshal(p2pMessage.Payload, &pc); err != nil {
+					log.Printf("Failed to deserialize payment confirmation: %v", err)
+					continue
+				}
+				if n.Blockchain.OracleService.VerifyConfirmation(&pc) {
+					n.Blockchain.ConfirmedPayments[pc.InstructionID] = &pc
+				}
 
 			default:
 				log.Printf("Unknown message type: %s", p2pMessage.Type)
