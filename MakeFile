@@ -1,8 +1,27 @@
 build:
-    go build -o bin/gonetwork
+	go build -o bin/gonetwork ./cmd/node/
 
 run: build
-    ./bin/gonetwork
+	./bin/gonetwork
 
 test:
-    go test -v ./...
+	go test -v ./...
+
+# Build the bootstrap node for local use (macOS/current platform)
+bootstrap:
+	go build -o bin/bootstrap ./cmd/bootstrap/
+
+# Cross-compile the bootstrap node for Linux amd64 (DigitalOcean / VPS)
+bootstrap-linux:
+	GOOS=linux GOARCH=amd64 go build -o bin/bootstrap-linux ./cmd/bootstrap/
+
+# Deploy the bootstrap binary to the DigitalOcean server.
+# Usage: make deploy-bootstrap SSH_USER=root
+SSH_USER ?= root
+DO_HOST   = 206.189.29.191
+deploy-bootstrap: bootstrap-linux
+	scp bin/bootstrap-linux $(SSH_USER)@$(DO_HOST):~/bootstrap
+	@echo ""
+	@echo "Binary uploaded. Now SSH in and run:"
+	@echo "  ssh $(SSH_USER)@$(DO_HOST)"
+	@echo "  chmod +x ~/bootstrap && ~/bootstrap"

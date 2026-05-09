@@ -72,13 +72,16 @@ func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 }
 
-func setupMdnsDiscovery(h host.Host) error {
+func setupMdnsDiscovery(h host.Host) (mdns.Service, error) {
 	service := mdns.NewMdnsService(h, "greenhouse-mdns", &mdnsNotifee{host: h})
 	if service == nil {
-		return fmt.Errorf("failed to start mDNS discovery: service is nil")
+		return nil, fmt.Errorf("failed to create mDNS service")
+	}
+	if err := service.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start mDNS service: %v", err)
 	}
 	log.Println("mDNS discovery service started")
-	return nil
+	return service, nil
 }
 
 // NewP2PNode initializes a new libp2p node with mDNS and DHT-based peer discovery
@@ -204,6 +207,13 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	}
 	logger.Infof("Subscribed to topic")
 
+	// Enable mDNS for same-machine / LAN peer discovery before creating the
+	// node so the service reference can be stored (prevents GC and keeps it live).
+	mdnsSvc, err := setupMdnsDiscovery(h)
+	if err != nil {
+		logger.Warnf("mDNS discovery unavailable: %v", err)
+	}
+
 	// Create and return the P2PNode
 	node := &P2PNode{
 		Host:        h,
@@ -211,7 +221,7 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 		Topic:       topic,
 		Sub:         sub,
 		Blockchain:  blockchain,
-		MdnsService: nil, // mDNS is removed, no service is provided
+		MdnsService: mdnsSvc,
 	}
 
 	// Set a stream handler for direct messaging
@@ -219,6 +229,18 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	logger.Infof("Stream handler set for direct messaging")
 
 	return node, nil
+}
+
+func (n *P2PNode) BroadcastPing(ctx context.Context) error {
+	if n == nil || n.Topic == nil {
+		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	message := P2PMessage{Type: MessageTypePing, Payload: []byte("ping")}
+	data, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize ping: %v", err)
+	}
+	return n.Topic.Publish(ctx, data)
 }
 
 func (n *P2PNode) BroadcastTransaction(tx Transaction) error {

@@ -506,7 +506,7 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	}
 
 	bootstrapPeers := []string{
-		"/ip4/206.189.29.191/tcp/4001/p2p/12D3KooWAuhPZUUFjaMhEqF3WdvQUJ7SM91nnrQbzULwCyoY8F37",
+		"/ip4/206.189.29.191/tcp/4001/p2p/12D3KooWSCqgUhaTxKM9qB32q2hdv5vwKV8XmTALKh4n5SwKbRoq",
 	}
 
 	// Initialize the P2PNode
