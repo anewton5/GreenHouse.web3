@@ -51,6 +51,8 @@ const (
 	MessageTypePaymentInstruction  = "payment_instruction"
 	MessageTypePaymentConfirmation = "payment_confirmation"
 	MessageTypeOrderTransaction    = "order_transaction"
+	MessageTypeLiquidityWindow     = "liquidity_window"
+	MessageTypeSPVTransaction      = "spv_transaction"
 )
 
 type P2PMessage struct {

@@ -146,6 +146,13 @@ type Blockchain struct {
 	PaymentProvider  PaymentProvider
 	IdentityRegistry IdentityRegistry
 	OracleService    OracleService
+
+	// Phase 2: Liquidity Windows
+	WindowManager *WindowManager
+	WindowResults []WindowResult
+
+	// Phase 2: SPV / Participation Notes
+	SPVs map[string]*SPVWrapper // spvID → SPVWrapper
 }
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
@@ -449,6 +456,13 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc.PendingInstructions = make(map[string]*PaymentInstruction)
 	bc.ConfirmedPayments = make(map[string]*PaymentConfirmation)
 	bc.PendingAssetTransactions = []AssetTransaction{}
+
+	// Phase 2: Liquidity Windows
+	bc.WindowManager = NewWindowManager()
+	bc.WindowResults = []WindowResult{}
+
+	// Phase 2: SPV / Participation Notes
+	bc.SPVs = make(map[string]*SPVWrapper)
 
 	// Default to mock service implementations so existing tests need no changes
 	if bc.PaymentProvider == nil {

@@ -1209,3 +1209,1191 @@ when external onboarding is complete:
 | Local Ed25519 key | AWS KMS asymmetric key | Same as above |
 | `SettlementSEPA` hardcoded | Participant-selected method | UX layer build |
 | Simulation auto-signing | Off-chain seller co-signing flow | Mobile/web client build |
+
+---
+
+# GreenHouse — Phase 2 Implementation Plan
+
+## Strategic Context
+
+Phase 0 delivered the core private placement engine: tokenised assets, KYC credentials,
+price-time priority order matching, and atomic DVP settlement. Phase 2 extends this
+foundation to meet the specific demands of the **European Capital Market Union** agenda.
+
+The European Commission's 2026 consultations on Intermittent Multilateral Trading Platforms,
+the DLT Pilot Regime (Regulation EU 2022/858), and the Financial Data Access (FiDA)
+Regulation collectively define the regulatory envelope GreenHouse must operate within and
+can exploit as a structural advantage over legacy incumbents.
+
+Five strategic themes drive Phase 2:
+
+| Theme | Problem solved | Regulatory hook |
+|---|---|---|
+| Intermittent Liquidity Windows | Founders want controlled liquidity, not 24/7 price discovery | IMTP consultation |
+| SPV / Participation Notes | German notary bottleneck blocks cross-border equity transfers | Prospectus Regulation Art 1(4) |
+| Corporate Actions Engine | ROFR, drag-along, tag-along are manual legal nightmares | Company law automation |
+| FiDA Reporting Layer | Family offices hold 15+ placements with no unified view | FiDA open finance mandate |
+| API Gateway + KMS | Production keys, client auth, WebSocket feeds | DLT Pilot Regime pre-authorisation |
+
+---
+
+## Codebase Conventions — Phase 2 additions
+
+All Phase 0 conventions continue unchanged. Additional conventions for Phase 2:
+
+| Convention | Detail |
+|---|---|
+| New packages | `liquidity`, `corporate`, `reporting`, `api` — separate packages under module root |
+| Time windows | All window boundaries are Unix timestamps; `time.Now().UTC()` throughout |
+| Corporate actions | All proposals signed by proposer; execution requires threshold signatures |
+| Reporting | All report types are JSON-serialisable and schema-versioned with `SchemaVersion string` |
+| API auth | Ed25519 challenge-response; JWT issued post-auth; short-lived (15 min) |
+| KMS interface | New `KeyProvider` interface in `keys.go`; local `LocalKeyProvider` + stub `KMSKeyProvider` |
+
+---
+
+## Week 1–2: Liquidity Windows
+
+### Purpose
+
+Replace the always-on order book with time-gated **Liquidity Windows** — quarterly
+trading periods during which the order book opens, matches, and then closes. Between
+windows, orders can be submitted but not matched. This is precisely the Intermittent
+Multilateral Trading Platform model being consulted on by the European Commission.
+
+### Files to create
+- `liquidity.go`
+- `liquidity_test.go`
+
+---
+
+### `liquidity.go` — Complete Specification
+
+#### Types
+
+```go
+package gonetwork
+
+type WindowStatus string
+
+const (
+    WindowStatusScheduled WindowStatus = "scheduled" // defined, not yet open
+    WindowStatusOpen      WindowStatus = "open"       // accepting and matching orders
+    WindowStatusClosed    WindowStatus = "closed"     // matching complete, book frozen
+    WindowStatusCancelled WindowStatus = "cancelled"  // cancelled before open
+)
+
+// LiquidityWindow defines a time-bounded trading period for a single asset.
+// Outside a window the order book accepts submissions but MatchOrders is a no-op.
+type LiquidityWindow struct {
+    ID          string
+    AssetID     string
+    OpenAt      int64        // Unix timestamp — window opens
+    CloseAt     int64        // Unix timestamp — window closes; matching runs at CloseAt
+    MaxVolume   float64      // 0 = unlimited volume in this window
+    Currency    string
+    Status      WindowStatus
+    ProposerKey string       // issuer or platform operator public key
+    Signature   []byte       // Sign(SHA3-256(window with Signature=nil))
+}
+
+// WindowResult is the settlement output of a completed Liquidity Window.
+// It is committed to a block as part of window finalisation.
+type WindowResult struct {
+    WindowID       string
+    AssetID        string
+    TotalVolume    float64
+    TotalValue     float64
+    TradeCount     int
+    ClearingPrice  float64  // volume-weighted average price across all matched trades
+    ClosedAt       int64
+}
+```
+
+#### Functions
+
+```go
+func NewLiquidityWindow(
+    proposerKey *PrivateKey,
+    assetID string,
+    openAt, closeAt int64,
+    maxVolume float64,
+    currency string,
+) (*LiquidityWindow, error)
+// - validates: assetID not empty, openAt < closeAt, openAt > time.Now().Unix()
+// - generates ID: hex(sha3.Sum256(proposerKey+assetID+openAt))
+// - signs: marshal with Signature=nil, sha3.Sum256, Sign(proposerKey)
+
+func (w *LiquidityWindow) IsOpen() bool
+// - w.Status == WindowStatusOpen
+
+func (w *LiquidityWindow) ShouldOpen() bool
+// - w.Status == WindowStatusScheduled && time.Now().Unix() >= w.OpenAt
+
+func (w *LiquidityWindow) ShouldClose() bool
+// - w.Status == WindowStatusOpen && time.Now().Unix() >= w.CloseAt
+
+func (w *LiquidityWindow) VerifySignature(proposerPubKey *PublicKey) bool
+// - standard: marshal with Signature=nil, sha3.Sum256, verify
+
+// WindowManager manages all windows for all assets on this blockchain.
+// It is embedded in Blockchain in Week 1-2 integration.
+
+type WindowManager struct {
+    Windows  map[string]*LiquidityWindow  // windowID → window
+    Schedule map[string][]*LiquidityWindow // assetID → ordered list of upcoming windows
+}
+
+func NewWindowManager() *WindowManager
+
+func (wm *WindowManager) ScheduleWindow(w *LiquidityWindow) error
+// - validates no overlapping window exists for the same asset
+// - adds to Windows and Schedule
+
+func (wm *WindowManager) Tick(bc *Blockchain) []WindowResult
+// Called at the start of each finalizeBlock pass.
+// - Transitions ShouldOpen windows → WindowStatusOpen
+// - Transitions ShouldClose windows → WindowStatusClosed; runs MatchOrders for that asset
+// - Returns WindowResult for each window just closed
+// - Outside an open window, MatchOrders is suppressed for that asset in finalizeBlock
+```
+
+#### Integration with `Blockchain`
+
+Add to `Blockchain` struct in `blockchain.go`:
+
+```go
+WindowManager *WindowManager
+```
+
+Initialise in `NewBlockchain`:
+
+```go
+bc.WindowManager = NewWindowManager()
+```
+
+Modify `finalizeBlock` step 5 (MatchOrders loop): before calling `ob.MatchOrders`,
+check that the asset has an open window via `bc.WindowManager`. If no open window
+exists for that asset, skip matching. The match runs only when the window closes.
+
+#### P2P message type constant
+
+```go
+const MessageTypeLiquidityWindow = "liquidity_window"
+```
+
+---
+
+### `liquidity_test.go` — Required Test Cases
+
+| Test name | What it tests |
+|---|---|
+| `TestNewLiquidityWindow_Valid` | Creates window, verifies signature, fields correct |
+| `TestNewLiquidityWindow_InvalidDates` | Rejects openAt >= closeAt |
+| `TestNewLiquidityWindow_PastOpen` | Rejects openAt in the past |
+| `TestWindowManager_ScheduleWindow` | Window scheduled, appears in asset schedule |
+| `TestWindowManager_NoOverlap` | Rejects window overlapping existing scheduled window |
+| `TestWindowManager_Tick_Opens` | Tick transitions scheduled → open when time reached |
+| `TestWindowManager_Tick_Closes` | Tick transitions open → closed, returns WindowResult |
+| `TestMatchingSuppressedOutsideWindow` | Orders submitted outside window are not matched |
+| `TestMatchingRunsOnWindowClose` | Matching runs exactly when window closes |
+| `TestWindowResult_VWAP` | ClearingPrice is volume-weighted average across all trades |
+| `TestMultipleAssets_IndependentWindows` | Windows for different assets are independent |
+
+---
+
+## Week 2–3: SPV / Participation Notes
+
+### Purpose
+
+The German notary bottleneck makes direct equity token transfers legally impossible for
+GmbH shares without a notarial act. Luxembourg RAIFs and Irish ICAVs provide a
+well-established SPV wrapper: the SPV holds the underlying legal shares; investors hold
+**Participation Notes** — on-chain instruments representing a proportional economic claim
+on the SPV. This structure is cross-border clean, avoids notary requirements, and is
+familiar to European family offices and institutional investors.
+
+### Files to create
+- `spv.go`
+- `spv_test.go`
+
+---
+
+### `spv.go` — Complete Specification
+
+#### Types
+
+```go
+package gonetwork
+
+type SPVJurisdiction string
+
+const (
+    SPVJurisdictionLuxembourg SPVJurisdiction = "LU" // RAIF / SCSp
+    SPVJurisdictionIreland    SPVJurisdiction = "IE" // ICAV / DAC
+    SPVJurisdictionNetherlands SPVJurisdiction = "NL" // BV / Coöperatie
+    SPVJurisdictionCayman     SPVJurisdiction = "KY" // used for APAC / US investors
+)
+
+// SPVWrapper represents the legal vehicle that holds underlying company shares.
+// The SPV admin key is held by the fund administrator (e.g., Aztec Group, Intertrust).
+type SPVWrapper struct {
+    ID                      string
+    Name                    string
+    Jurisdiction            SPVJurisdiction
+    UnderlyingCompanyID     string  // the company whose shares the SPV holds
+    UnderlyingShareClass    string  // e.g. "Series B Preferred"
+    SPVAdminKey             string  // public key of the licensed fund administrator
+    NAV                     float64 // Net Asset Value per unit — updated by oracle
+    NAVUpdatedAt            int64
+    LegalDocHash            string  // SHA3-256 of SPV formation document
+    Signature               []byte  // signed by SPVAdminKey
+}
+
+// ParticipationNote is an AssetType extension.
+// When AssetType == AssetTypeParticipationNote, Asset.Metadata.ISIN
+// holds the SPV's ISIN and the asset maps 1:1 to an SPVWrapper.ID.
+// Add to AssetType constants:
+const AssetTypeParticipationNote AssetType = "participation_note"
+const AssetTypeDepositoryReceipt AssetType = "depositary_receipt"
+
+// SPVTransaction records a corporate event at the SPV level that affects
+// all note holders proportionally (e.g., a dividend from the underlying company).
+type SPVTransaction struct {
+    ID          string
+    SPVID       string
+    Type        SPVTxType
+    AmountPerUnit float64
+    Currency    string
+    EffectiveAt int64
+    AdminKey    string  // SPV admin who authorised this
+    Signature   []byte
+}
+
+type SPVTxType string
+
+const (
+    SPVTxTypeDividendDistribution SPVTxType = "dividend"
+    SPVTxTypeNAVUpdate            SPVTxType = "nav_update"
+    SPVTxTypeCapitalCall          SPVTxType = "capital_call"
+    SPVTxTypeWindingUp            SPVTxType = "winding_up"
+)
+```
+
+#### Functions
+
+```go
+func NewSPVWrapper(
+    adminKey *PrivateKey,
+    name string,
+    jurisdiction SPVJurisdiction,
+    underlyingCompanyID string,
+    underlyingShareClass string,
+    legalDocHash string,
+) (*SPVWrapper, error)
+// - validates all required fields non-empty
+// - generates ID: hex(sha3.Sum256(adminKey+name+jurisdiction+underlyingCompanyID))
+// - signs the wrapper
+
+func (s *SPVWrapper) VerifySignature(adminPubKey *PublicKey) bool
+
+func (s *SPVWrapper) UpdateNAV(
+    newNAV float64,
+    adminKey *PrivateKey,
+) (*SPVTransaction, error)
+// - creates an SPVTransaction of type NAVUpdate
+// - updates s.NAV and s.NAVUpdatedAt
+// - returns signed SPVTransaction for broadcast
+
+func NewSPVTransaction(
+    adminKey *PrivateKey,
+    spvID string,
+    txType SPVTxType,
+    amountPerUnit float64,
+    currency string,
+    effectiveAt int64,
+) (*SPVTransaction, error)
+
+// ApplySPVTransaction distributes a dividend or capital call across all
+// note holders proportionally, creating AssetTransactions for each holder.
+func ApplySPVTransaction(
+    spvTx *SPVTransaction,
+    spv *SPVWrapper,
+    asset *Asset,
+    holdings map[string]*AssetHolding,
+    paymentProvider PaymentProvider,
+) ([]PaymentInstruction, error)
+// For SPVTxTypeDividendDistribution:
+//   For each holder: instruction = PaymentInstruction{
+//     TotalAmount: holding.Balance * spvTx.AmountPerUnit,
+//     PayeeWalletID: holderID,
+//     PayerWalletID: spv.SPVAdminKey,
+//   }
+// Returns all instructions for signing by oracle before broadcast.
+```
+
+#### Integration with `Blockchain`
+
+Add to `Blockchain` struct:
+
+```go
+SPVs map[string]*SPVWrapper  // spvID → SPVWrapper
+```
+
+Initialise in `NewBlockchain`: `bc.SPVs = make(map[string]*SPVWrapper)`
+
+#### P2P message type constants
+
+```go
+const MessageTypeSPVTransaction = "spv_transaction"
+```
+
+---
+
+### `spv_test.go` — Required Test Cases
+
+| Test name | What it tests |
+|---|---|
+| `TestNewSPVWrapper_Valid` | Creates SPV, verifies admin signature |
+| `TestNewSPVWrapper_MissingFields` | Rejects empty required fields |
+| `TestSPVWrapper_UpdateNAV` | NAV and timestamp update; returns signed SPVTransaction |
+| `TestApplySPVTransaction_Dividend` | Three note holders, correct proportional instructions |
+| `TestApplySPVTransaction_ZeroBalance` | Holders with zero balance receive no instruction |
+| `TestSPVAssetLink` | ParticipationNote asset correctly references SPV ID via ISIN |
+| `TestSPVSignatureTampering` | Mutated SPVWrapper fails VerifySignature |
+
+---
+
+## Week 3–4: Corporate Actions Engine
+
+### Purpose
+
+Right of First Refusal, drag-along, and tag-along rights are the three most common
+contractual constraints on private company share transfers. Today these are enforced via
+manual legal processes taking weeks and costing thousands in legal fees. GreenHouse encodes
+them as on-chain rules: any transfer that triggers a ROFR is automatically paused,
+existing holders are notified (via P2P broadcast), and their response is recorded
+on-chain with a deadline enforced by block timestamp.
+
+### Files to create
+- `corporate.go`
+- `corporate_test.go`
+
+---
+
+### `corporate.go` — Complete Specification
+
+#### Types
+
+```go
+package gonetwork
+
+type CorporateActionType string
+
+const (
+    CorporateActionROFR      CorporateActionType = "rofr"       // right of first refusal
+    CorporateActionDragAlong CorporateActionType = "drag_along" // majority forces minority to sell
+    CorporateActionTagAlong  CorporateActionType = "tag_along"  // minority joins majority sale
+    CorporateActionDividend  CorporateActionType = "dividend"   // cash distribution to holders
+)
+
+type CorporateActionStatus string
+
+const (
+    CorporateActionPending   CorporateActionStatus = "pending"   // awaiting responses
+    CorporateActionApproved  CorporateActionStatus = "approved"  // threshold met
+    CorporateActionRejected  CorporateActionStatus = "rejected"  // threshold not met or lapsed
+    CorporateActionExecuted  CorporateActionStatus = "executed"  // transfer completed
+    CorporateActionLapsed    CorporateActionStatus = "lapsed"    // deadline passed without action
+)
+
+// CorporateAction is created automatically when a transfer triggers a ROFR
+// or when an issuer initiates a drag-along/tag-along event.
+type CorporateAction struct {
+    ID              string
+    AssetID         string
+    Type            CorporateActionType
+    Status          CorporateActionStatus
+    ProposerKey     string   // wallet initiating the action
+    TargetTransfer  *AssetTransaction // the transfer being evaluated (nil for drag/tag)
+    PricePerUnit    float64
+    TotalUnits      float64
+    DeadlineAt      int64   // Unix timestamp — action lapses after this
+    Responses       map[string]bool // holderKey → exercised (true) / waived (false)
+    RequiredThreshold float64       // 0-1 fraction of circulating supply needed
+    ProposerSignature []byte
+}
+
+// CorporateActionResponse is broadcast by a holder exercising or waiving a right.
+type CorporateActionResponse struct {
+    ActionID    string
+    HolderKey   string
+    Exercised   bool    // true = exercising right; false = waiving
+    Signature   []byte  // Sign(SHA3-256(ActionID+HolderKey+Exercised))
+}
+```
+
+#### Functions
+
+```go
+func NewCorporateAction(
+    proposerKey *PrivateKey,
+    assetID string,
+    actionType CorporateActionType,
+    targetTransfer *AssetTransaction,
+    pricePerUnit float64,
+    totalUnits float64,
+    deadlineDays int,
+    requiredThreshold float64,
+) (*CorporateAction, error)
+// - generates ID from sha3 of proposerKey+assetID+actionType+time
+// - sets DeadlineAt = time.Now().Unix() + int64(deadlineDays*86400)
+// - initialises Responses as empty map
+// - signs with proposerKey
+
+func (ca *CorporateAction) RecordResponse(
+    resp *CorporateActionResponse,
+    holderPubKey *PublicKey,
+) error
+// - verifies resp.Signature
+// - verifies resp.HolderKey matches holderPubKey
+// - records in ca.Responses[resp.HolderKey]
+// - returns error if action is not Pending or if deadline has passed
+
+func (ca *CorporateAction) IsLapsed() bool
+// return time.Now().Unix() > ca.DeadlineAt
+
+func (ca *CorporateAction) TallyROFR(
+    holdings map[string]*AssetHolding,
+) (exercisedFraction float64, totalCirculating float64)
+// Sums Balance of all holders who Exercised == true
+// Returns that sum as a fraction of totalCirculating supply
+
+// CheckROFR is called from AssetTransaction.Validate before allowing a transfer.
+// If the asset has ROFR terms (TransferRestrictions.HasROFR — add this field to
+// TransferRestrictions in assets.go), it creates a CorporateAction and returns
+// a sentinel error ErrROFRTriggered. The transfer is suspended until the action
+// resolves. If all holders waive or the deadline lapses, the transfer proceeds.
+func CheckROFR(
+    at *AssetTransaction,
+    asset *Asset,
+    holdings map[string]*AssetHolding,
+    pendingActions map[string]*CorporateAction,
+) (triggered bool, action *CorporateAction, err error)
+
+// ExecuteDragAlong is called by the issuer when threshold holders have agreed to sell.
+// It generates AssetTransactions for all minority holders on the same terms.
+func ExecuteDragAlong(
+    action *CorporateAction,
+    holdings map[string]*AssetHolding,
+    buyerKey string,
+) ([]*AssetTransaction, error)
+```
+
+#### Add to `TransferRestrictions` in `assets.go`
+
+```go
+HasROFR       bool    // triggers CorporateAction on every transfer
+ROFRDays      int     // notice period in days (default 30)
+DragThreshold float64 // 0-1 fraction required to trigger drag-along (0 = disabled)
+TagAlongRight bool    // minority holders may join any majority sale on same terms
+```
+
+#### Add to `Blockchain` struct
+
+```go
+PendingCorporateActions map[string]*CorporateAction // actionID → action
+```
+
+#### P2P message type constants
+
+```go
+const MessageTypeCorporateAction         = "corporate_action"
+const MessageTypeCorporateActionResponse = "corporate_action_response"
+```
+
+---
+
+### `corporate_test.go` — Required Test Cases
+
+| Test name | What it tests |
+|---|---|
+| `TestNewCorporateAction_Valid` | Creates ROFR action, signature valid |
+| `TestRecordResponse_Exercise` | Holder exercises ROFR; recorded correctly |
+| `TestRecordResponse_Waive` | Holder waives ROFR; recorded correctly |
+| `TestRecordResponse_Expired` | Response after deadline rejected |
+| `TestTallyROFR_AllWaive` | All holders waive; exercisedFraction = 0 |
+| `TestTallyROFR_Partial` | Some holders exercise; fraction calculated correctly |
+| `TestCheckROFR_Triggered` | Transfer on ROFR-flagged asset returns ErrROFRTriggered |
+| `TestCheckROFR_NotApplicable` | Transfer on non-ROFR asset proceeds normally |
+| `TestExecuteDragAlong_ProducesTransactions` | Minority holders get AssetTransactions on drag terms |
+| `TestCorporateAction_Lapsed` | IsLapsed returns true after DeadlineAt |
+| `TestTagAlong_MinorityJoins` | Tag-along holder can attach to majority sale |
+
+---
+
+## Week 4–5: Multi-Jurisdiction Compliance Engine
+
+### Purpose
+
+The Prospectus Regulation (EU 2017/1129) Art 1(4) exempts placements to fewer than
+150 non-professional investors per EU member state. GreenHouse must track this per-asset,
+per-jurisdiction at all times. Additionally, MiFID II Article 25 requires suitability
+assessments for complex instruments. This week encodes these rules as on-chain enforcement,
+replacing the current single-level AccreditedOnly flag with a full jurisdictional rule engine.
+
+### Files to create
+- `compliance.go`
+- `compliance_test.go`
+
+---
+
+### `compliance.go` — Complete Specification
+
+#### Types
+
+```go
+package gonetwork
+
+// ProspectusExemption tracks the regulatory basis for a placement
+// and enforces its limits automatically.
+type ProspectusExemption struct {
+    AssetID           string
+    Basis             ExemptionBasis
+    MaxRetailPerJurisdiction int  // typically 149 (i.e., < 150)
+    MaxTicketSizeEUR  float64     // 0 = no limit
+    JurisdictionCoverage []string // ISO codes of target jurisdictions; empty = EU-wide
+    // Live holder counts — maintained by finalizeBlock
+    RetailHoldersByJurisdiction map[string]int // jurisdictionCode → count
+}
+
+type ExemptionBasis string
+
+const (
+    ExemptionProspectusArt1_4 ExemptionBasis = "prospectus_art1_4" // < 150 retail / state
+    ExemptionQIBOnly          ExemptionBasis = "qib_only"           // qualified investors only
+    ExemptionPilotRegime      ExemptionBasis = "dlt_pilot"          // EU DLT Pilot Regime
+)
+
+// SuitabilityAssessment is the MiFID II Article 25 record.
+// For complex instruments (warrants, convertibles) a suitability check is mandatory.
+type SuitabilityAssessment struct {
+    WalletPublicKey   string
+    AssetID           string
+    InstrumentClass   AssetType
+    AssessedAt        int64
+    // Suitability flags — set by the onboarding flow or assessment tool
+    HasSufficientKnowledge  bool
+    HasSufficientExperience bool
+    CanAbsorbLoss           bool
+    Suitable                bool  // final determination
+    RegistrySignature       []byte // signed by IdentityRegistry
+}
+
+// JurisdictionRule encodes country-specific transfer constraints that are
+// layered on top of the global AccreditedOnly / MaxHolders rules.
+type JurisdictionRule struct {
+    CountryCode        string
+    MaxRetailHolders   int      // 0 = unlimited
+    RequiresSuitability bool    // true for MiFID II complex instruments
+    BlockedAssetTypes  []AssetType
+    MinTicketSizeEUR   float64
+    MaxTicketSizeEUR   float64  // 0 = no limit
+}
+```
+
+#### Functions
+
+```go
+func NewProspectusExemption(
+    assetID string,
+    basis ExemptionBasis,
+    maxRetailPerJurisdiction int,
+    jurisdictions []string,
+) *ProspectusExemption
+
+// CheckProspectusLimits is called from CheckTransferEligibility when
+// asset.Exemption is set. Returns an error if adding this holder would
+// breach the per-jurisdiction retail cap.
+func CheckProspectusLimits(
+    receiverCredential *CredentialAttestation,
+    exemption *ProspectusExemption,
+) error
+
+// CheckSuitability returns an error if the instrument requires a suitability
+// assessment and none exists for this wallet, or if the assessment is negative.
+func CheckSuitability(
+    walletKey string,
+    asset *Asset,
+    assessments map[string]*SuitabilityAssessment,
+) error
+
+// ApplyJurisdictionRule checks a JurisdictionRule against a proposed transfer.
+func ApplyJurisdictionRule(
+    rule *JurisdictionRule,
+    senderCredential *CredentialAttestation,
+    receiverCredential *CredentialAttestation,
+    ticketValueEUR float64,
+) error
+
+// UpdateRetailCounts rebuilds RetailHoldersByJurisdiction from the current holdings
+// and credentials maps. Called at the end of finalizeBlock.
+func UpdateRetailCounts(
+    exemption *ProspectusExemption,
+    holdings map[string]*AssetHolding,
+    credentials map[string]*CredentialAttestation,
+)
+```
+
+#### Integration with `Blockchain`
+
+Add to `Blockchain` struct:
+
+```go
+ProspectusExemptions  map[string]*ProspectusExemption    // assetID → exemption
+SuitabilityAssessments map[string]*SuitabilityAssessment // walletKey:assetID → assessment
+JurisdictionRules     map[string]*JurisdictionRule       // countryCode → rule
+```
+
+---
+
+### `compliance_test.go` — Required Test Cases
+
+| Test name | What it tests |
+|---|---|
+| `TestProspectusLimit_UnderCap` | 148 retail holders → 149th transfer allowed |
+| `TestProspectusLimit_AtCap` | 149 retail holders → 150th transfer blocked |
+| `TestProspectusLimit_ProfessionalExcluded` | Professional investors do not count toward cap |
+| `TestProspectusLimit_PerJurisdiction` | GB at cap does not block DE transfer |
+| `TestSuitability_Pass` | Suitable assessment → transfer allowed |
+| `TestSuitability_Fail` | Negative assessment → complex instrument blocked |
+| `TestSuitability_Missing` | No assessment → complex instrument blocked |
+| `TestSuitability_NotRequired` | Standard equity → suitability not checked |
+| `TestJurisdictionRule_MinTicket` | Transfer below MinTicketSizeEUR blocked |
+| `TestJurisdictionRule_BlockedAssetType` | Asset type blocked in jurisdiction |
+| `TestUpdateRetailCounts_Accurate` | Counts match actual retail holders by jurisdiction |
+
+---
+
+## Week 5–6: FiDA Reporting Layer
+
+### Purpose
+
+Under the Financial Data Access (FiDA) Regulation coming into force in 2026–2027, financial
+institutions must provide machine-readable data to authorised third-party data aggregators on
+participant request. GreenHouse must produce standardised holdings reports and tax-event
+records per EU jurisdiction. This is also the primary value proposition to family offices:
+a single, auditable view of all private market holdings with tax-ready output.
+
+### Files to create
+- `reporting.go`
+- `reporting_test.go`
+
+---
+
+### `reporting.go` — Complete Specification
+
+#### Types
+
+```go
+package gonetwork
+
+// HoldingsReport is a FiDA-compliant snapshot of a wallet's holdings at a point in time.
+type HoldingsReport struct {
+    SchemaVersion   string  // "1.0"
+    WalletPublicKey string
+    GeneratedAt     int64
+    Holdings        []HoldingSnapshot
+}
+
+type HoldingSnapshot struct {
+    AssetID        string
+    AssetName      string
+    AssetType      AssetType
+    ISIN           string
+    Balance        float64
+    Currency       string
+    NAVPerUnit     float64  // from SPV oracle or last known price
+    TotalValue     float64  // Balance * NAVPerUnit
+    AcquisitionCost float64 // total cost basis (sum of purchase prices)
+    UnrealisedPnL  float64  // TotalValue - AcquisitionCost
+    LockedUntil    int64   // 0 = freely transferable
+}
+
+// TaxReport contains taxable events for a wallet in a given tax year,
+// formatted to cover major EU jurisdiction requirements (UK CGT, German KeSt,
+// French PFU, Dutch Box 3).
+type TaxReport struct {
+    SchemaVersion   string
+    WalletPublicKey string
+    TaxYear         int
+    Jurisdiction    string // ISO 3166-1 alpha-2
+    Currency        string // reporting currency
+    Events          []TaxableEvent
+    TotalGain       float64
+    TotalLoss       float64
+    NetGainLoss     float64
+}
+
+type TaxableEventType string
+
+const (
+    TaxEventAcquisition  TaxableEventType = "acquisition"
+    TaxEventDisposal     TaxableEventType = "disposal"
+    TaxEventDividend     TaxableEventType = "dividend"
+    TaxEventCapitalCall  TaxableEventType = "capital_call"
+)
+
+type TaxableEvent struct {
+    Date        int64
+    AssetID     string
+    Type        TaxableEventType
+    Units       float64
+    UnitPrice   float64
+    Proceeds    float64  // Units * UnitPrice (for disposal)
+    CostBasis   float64  // original acquisition cost (for disposal)
+    GainLoss    float64  // Proceeds - CostBasis (for disposal)
+    Currency    string
+    TradeID     string  // links back to the Trade record
+}
+
+// ValuationOracle provides current NAV or price per unit for an asset.
+// MockValuationOracle returns the last trade price or par value.
+type ValuationOracle interface {
+    GetValuation(assetID string) (float64, error)
+    GetCurrencyRate(from, to string) (float64, error)  // for FX conversion
+}
+
+// CostBasisTracker maintains a per-wallet, per-asset acquisition cost record
+// using FIFO matching (standard for EU CGT purposes).
+type CostBasisTracker struct {
+    // walletKey:assetID → ordered acquisition lots
+    Lots map[string][]AcquisitionLot
+}
+
+type AcquisitionLot struct {
+    AcquiredAt  int64
+    Units       float64
+    UnitCost    float64
+    TradeID     string
+}
+```
+
+#### Functions
+
+```go
+func GenerateHoldingsReport(
+    walletKey string,
+    holdings map[string]*AssetHolding,
+    assets map[string]*Asset,
+    valuation ValuationOracle,
+    tracker *CostBasisTracker,
+) (*HoldingsReport, error)
+// Iterates all holdings for walletKey, populates HoldingSnapshot for each,
+// calls valuation.GetValuation for NAV, calculates UnrealisedPnL.
+
+func GenerateTaxReport(
+    walletKey string,
+    taxYear int,
+    jurisdiction string,
+    reportCurrency string,
+    trades []Trade,
+    assets map[string]*Asset,
+    tracker *CostBasisTracker,
+    valuation ValuationOracle,
+) (*TaxReport, error)
+// Filters trades for walletKey in taxYear.
+// For each disposal: matches against FIFO cost lots, calculates GainLoss.
+// Converts to reportCurrency via valuation.GetCurrencyRate.
+// Applies jurisdiction-specific rules:
+//   GB:  CGT — annual exempt amount applied (£3,000 in 2026)
+//   DE:  Kapitalertragsteuer — 25% flat; no annual exempt for disposals
+//   FR:  PFU (Flat Tax) — 30% on net gain
+//   NL:  Box 3 — assets valued at 1 Jan; no CGT on individual trades
+
+func (t *CostBasisTracker) RecordAcquisition(
+    walletKey, assetID string,
+    lot AcquisitionLot,
+)
+
+func (t *CostBasisTracker) ConsumeForDisposal(
+    walletKey, assetID string,
+    units float64,
+    disposalDate int64,
+) (costBasis float64, lotsConsumed []AcquisitionLot, err error)
+// FIFO: consumes earliest lots first. Returns total cost basis for the units disposed.
+
+// MarshalFiDA returns the report as a FiDA-compliant JSON byte slice.
+func (r *HoldingsReport) MarshalFiDA() ([]byte, error)
+func (r *TaxReport) MarshalFiDA() ([]byte, error)
+```
+
+#### Integration with `Blockchain`
+
+Add to `Blockchain` struct:
+
+```go
+CostBasisTracker  *CostBasisTracker
+ValuationOracle   ValuationOracle
+```
+
+`NewBlockchain`: initialise with `MockValuationOracle` (returns last trade price or par).
+
+In `finalizeBlock`, after applying asset transactions, call
+`bc.CostBasisTracker.RecordAcquisition` for each new holding created.
+
+---
+
+### `reporting_test.go` — Required Test Cases
+
+| Test name | What it tests |
+|---|---|
+| `TestGenerateHoldingsReport_SingleAsset` | One holding, correct value and PnL |
+| `TestGenerateHoldingsReport_MultiAsset` | Multiple holdings across different assets |
+| `TestGenerateHoldingsReport_EmptyWallet` | Returns empty report, no error |
+| `TestCostBasisTracker_FIFO` | Disposal consumes oldest lots first |
+| `TestCostBasisTracker_PartialLot` | Disposal consuming part of a lot |
+| `TestCostBasisTracker_InsufficientUnits` | Returns error if disposal exceeds held units |
+| `TestGenerateTaxReport_Gain` | Disposal at profit produces positive GainLoss |
+| `TestGenerateTaxReport_Loss` | Disposal at loss produces negative GainLoss |
+| `TestGenerateTaxReport_GBExemptAmount` | UK £3,000 annual CGT exempt amount applied |
+| `TestGenerateTaxReport_FXConversion` | EUR-denominated trade converted to GBP correctly |
+| `TestGenerateTaxReport_FiltersByYear` | Only events in taxYear included |
+| `TestMarshalFiDA_HoldingsReport` | Output is valid JSON with SchemaVersion field |
+
+---
+
+## Week 6–7: Lead Investor / Deal Anchoring
+
+### Purpose
+
+Unlike retail crowdfunding platforms, GreenHouse targets professional and family office
+investors. The **Lead Investor** model requires a reputable anchor (a named VC or Family
+Office) to commit a minimum stake before a placement opens to other participants. This
+signals quality, reduces adverse selection, and creates the social proof required by
+co-investors. The entire anchor commitment and co-investment process is on-chain and
+cryptographically verifiable.
+
+### Files to create
+- `deal.go`
+- `deal_test.go`
+
+---
+
+### `deal.go` — Complete Specification
+
+#### Types
+
+```go
+package gonetwork
+
+type DealStatus string
+
+const (
+    DealStatusDraft     DealStatus = "draft"      // created, no anchor yet
+    DealStatusAnchoring DealStatus = "anchoring"  // anchor invited, awaiting commitment
+    DealStatusAnchored  DealStatus = "anchored"   // anchor committed; open to co-investors
+    DealStatusLive      DealStatus = "live"        // liquidity window open
+    DealStatusClosed    DealStatus = "closed"      // fully subscribed or window closed
+    DealStatusFailed    DealStatus = "failed"      // anchor did not commit by deadline
+)
+
+// Deal is the top-level record for a private placement.
+// It ties together an Asset, a ProspectusExemption, an optional SPVWrapper,
+// a LiquidityWindow, and the anchor commitment.
+type Deal struct {
+    ID                  string
+    AssetID             string
+    SPVID               string       // empty if asset issued directly (non-SPV)
+    IssuerKey           string
+    Status              DealStatus
+    TargetRaiseAmount   float64
+    MinAnchorFraction   float64      // minimum anchor as fraction of TargetRaiseAmount (e.g. 0.20)
+    AnchorDeadlineAt    int64
+    Anchor              *DealAnchor  // nil until an anchor commits
+    CoInvestors         []*DealCommitment
+    LiquidityWindowID   string
+    CreatedAt           int64
+    IssuerSignature     []byte
+}
+
+// DealAnchor is the commitment record of the lead investor.
+type DealAnchor struct {
+    DealID               string
+    AnchorWalletKey      string
+    CommitmentAmount     float64
+    Currency             string
+    CommittedAt          int64
+    CredentialAttestation *CredentialAttestation // must be accredited + valid
+    AnchorSignature      []byte  // Sign(SHA3-256(DealID+AnchorWalletKey+CommitmentAmount))
+}
+
+// DealCommitment is an individual co-investor's subscription intent.
+// It becomes binding once the deal moves to DealStatusLive.
+type DealCommitment struct {
+    DealID          string
+    InvestorKey     string
+    CommitmentAmount float64
+    Currency        string
+    CommittedAt     int64
+    Signature       []byte
+}
+```
+
+#### Functions
+
+```go
+func NewDeal(
+    issuerKey *PrivateKey,
+    assetID string,
+    spvID string,
+    targetRaiseAmount float64,
+    minAnchorFraction float64,
+    anchorDeadlineDays int,
+) (*Deal, error)
+// - validates targetRaiseAmount > 0, minAnchorFraction in (0, 1]
+// - sets AnchorDeadlineAt = time.Now().Unix() + int64(anchorDeadlineDays*86400)
+// - signs with issuerKey
+
+func (d *Deal) AttachAnchor(
+    anchor *DealAnchor,
+    anchorPubKey *PublicKey,
+    credentials map[string]*CredentialAttestation,
+) error
+// - verifies AnchorSignature
+// - verifies anchor's credential IsAccredited()
+// - verifies CommitmentAmount >= d.TargetRaiseAmount * d.MinAnchorFraction
+// - transitions d.Status DealStatusAnchoring → DealStatusAnchored
+
+func (d *Deal) AddCoInvestor(
+    commitment *DealCommitment,
+    investorPubKey *PublicKey,
+    credentials map[string]*CredentialAttestation,
+) error
+// - verifies Signature
+// - verifies investor credential IsValid()
+// - allowed only when d.Status == DealStatusAnchored or DealStatusLive
+// - appends to d.CoInvestors
+
+func (d *Deal) TotalCommitted() float64
+// returns Anchor.CommitmentAmount + sum(CoInvestors.CommitmentAmount)
+
+func (d *Deal) IsOversubscribed() bool
+// return d.TotalCommitted() >= d.TargetRaiseAmount
+
+func (d *Deal) CheckAnchorDeadline() bool
+// if now > AnchorDeadlineAt && d.Anchor == nil → set Status = Failed, return true
+// returns true if deal was failed by this call
+
+// P2P message type constant
+const MessageTypeDealAnchor     = "deal_anchor"
+const MessageTypeDealCommitment = "deal_commitment"
+```
+
+#### Integration with `Blockchain`
+
+Add to `Blockchain` struct:
+
+```go
+Deals map[string]*Deal  // dealID → Deal
+```
+
+---
+
+### `deal_test.go` — Required Test Cases
+
+| Test name | What it tests |
+|---|---|
+| `TestNewDeal_Valid` | Deal created, issuer signature valid |
+| `TestNewDeal_InvalidFraction` | minAnchorFraction outside (0,1] rejected |
+| `TestAttachAnchor_Valid` | Anchor commitment meets minimum; status → Anchored |
+| `TestAttachAnchor_BelowMinimum` | Commitment below min fraction rejected |
+| `TestAttachAnchor_RetailInvestor` | Retail anchor credential rejected |
+| `TestAttachAnchor_ExpiredCredential` | Expired credential rejected |
+| `TestAddCoInvestor_Valid` | Co-investor added when deal is Anchored |
+| `TestAddCoInvestor_DealNotAnchored` | Co-investor rejected when deal is Draft |
+| `TestTotalCommitted_SumCorrect` | Anchor + co-investors summed correctly |
+| `TestIsOversubscribed_True` | Total >= target → true |
+| `TestCheckAnchorDeadline_Fails` | Deadline passed, no anchor → DealStatusFailed |
+| `TestCheckAnchorDeadline_NotYet` | Deadline not passed → no state change |
+
+---
+
+## Week 7–8: API Gateway + Production Key Management
+
+### Purpose
+
+Phase 2 concludes by exposing the blockchain operations through an authenticated REST API,
+enabling web and mobile clients to interact with the platform without running a full node.
+Simultaneously, the local Ed25519 key model is replaced with a `KeyProvider` interface
+that can be backed by AWS KMS or HashiCorp Vault, eliminating the critical security risk
+of keys in process memory.
+
+### Files to create
+- `keymanager.go`
+- `keymanager_test.go`
+- `api/server.go`
+- `api/handlers.go`
+- `api/middleware.go`
+
+---
+
+### `keymanager.go` — Complete Specification
+
+```go
+package gonetwork
+
+// KeyProvider abstracts key storage and signing.
+// LocalKeyProvider uses the existing in-memory PrivateKey.
+// KMSKeyProvider (stub) signs via AWS KMS API calls.
+type KeyProvider interface {
+    // PublicKey returns the provider's public key for identity purposes.
+    PublicKeyString() string
+
+    // Sign returns an Ed25519 signature over msg.
+    // For KMSKeyProvider this makes an AWS KMS Sign API call.
+    Sign(msg []byte) ([]byte, error)
+
+    // Verify verifies a signature.
+    Verify(msg, sig []byte) bool
+}
+
+type LocalKeyProvider struct {
+    key *PrivateKey
+}
+
+func NewLocalKeyProvider(key *PrivateKey) *LocalKeyProvider
+
+func (p *LocalKeyProvider) PublicKeyString() string
+func (p *LocalKeyProvider) Sign(msg []byte) ([]byte, error)
+func (p *LocalKeyProvider) Verify(msg, sig []byte) bool
+
+// KMSKeyProvider is a stub that records intended API calls.
+// Replace with real AWS SDK calls when KMS onboarding is complete.
+type KMSKeyProvider struct {
+    KeyARN    string
+    KeyID     string
+    PublicKey string // cached from KMS DescribeKey
+    // Calls records all invocations for test assertion.
+    Calls     []string
+}
+
+func NewKMSKeyProvider(keyARN string) *KMSKeyProvider
+
+func (p *KMSKeyProvider) PublicKeyString() string
+func (p *KMSKeyProvider) Sign(msg []byte) ([]byte, error)
+// Stub: appends "Sign" to p.Calls, returns nil sig and nil error.
+// Production: calls kms.Sign(keyARN, msg, "ECDSA_SHA_256")
+func (p *KMSKeyProvider) Verify(msg, sig []byte) bool
+// Stub: appends "Verify" to p.Calls, returns true.
+```
+
+---
+
+### `api/server.go` — Complete Specification
+
+```go
+package api
+
+// Server wraps the blockchain and exposes it over HTTP.
+// Authentication: Ed25519 challenge-response → short-lived JWT (15 min).
+// All write endpoints require a valid JWT.
+// Rate limiting: 100 req/min per IP for reads; 20 req/min for writes.
+
+type Server struct {
+    bc         *gonetwork.Blockchain
+    jwtSecret  []byte  // random 32 bytes at startup; not persisted (restart invalidates tokens)
+    listenAddr string
+}
+
+func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server
+
+func (s *Server) Start() error
+// Registers all routes and starts http.ListenAndServe
+
+func (s *Server) Routes() http.Handler
+// Returns the fully configured router with all middleware applied
+```
+
+#### Endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/v1/auth/challenge` | None | Returns a random challenge nonce |
+| `POST` | `/v1/auth/verify` | None | Verify Ed25519 sig over challenge; returns JWT |
+| `GET` | `/v1/assets` | JWT | List all assets |
+| `POST` | `/v1/assets` | JWT | Issue a new asset (issuer role) |
+| `GET` | `/v1/assets/{id}` | JWT | Get asset details |
+| `GET` | `/v1/holdings/{walletKey}` | JWT | Holdings report for a wallet |
+| `POST` | `/v1/orders` | JWT | Place an order |
+| `DELETE` | `/v1/orders/{id}` | JWT | Cancel an order |
+| `GET` | `/v1/orderbook/{assetID}` | JWT | Current order book state |
+| `GET` | `/v1/trades` | JWT | Trade history (filterable by assetID, walletKey) |
+| `GET` | `/v1/deals` | JWT | List all deals |
+| `POST` | `/v1/deals` | JWT | Create a new deal (issuer role) |
+| `POST` | `/v1/deals/{id}/anchor` | JWT | Attach anchor commitment |
+| `POST` | `/v1/deals/{id}/commit` | JWT | Add co-investor commitment |
+| `GET` | `/v1/reporting/holdings` | JWT | FiDA holdings report (JSON) |
+| `GET` | `/v1/reporting/tax/{year}` | JWT | Tax report for year and jurisdiction |
+| `GET` | `/v1/blocks` | None | Recent blocks (last 50) |
+| `GET` | `/v1/health` | None | Service health and version |
+
+#### `api/middleware.go`
+
+```go
+// JWTMiddleware validates the Bearer token on all protected routes.
+// CORSMiddleware sets appropriate CORS headers for the web client.
+// RateLimitMiddleware enforces per-IP rate limits using a sliding window.
+// LoggingMiddleware logs method, path, status, duration in structured JSON.
+```
+
+---
+
+### `keymanager_test.go` — Required Test Cases
+
+| Test name | What it tests |
+|---|---|
+| `TestLocalKeyProvider_SignVerify` | Sign then verify with same provider |
+| `TestLocalKeyProvider_CrossVerify` | Signature verifiable by raw PublicKey |
+| `TestKMSKeyProvider_SignRecordsCall` | Stub records Sign call in Calls slice |
+| `TestKMSKeyProvider_VerifyRecordsCall` | Stub records Verify call |
+| `TestKeyProvider_Interface` | LocalKeyProvider satisfies KeyProvider interface |
+
+---
+
+## Phase 2 Integration Checklist
+
+At the end of Phase 2, all of the following must pass:
+
+- [ ] `go build ./...` — clean
+- [ ] `go test ./...` — all Phase 1 and Phase 2 tests pass
+- [ ] `go vet ./...` — zero issues
+- [ ] Liquidity Window: orders submitted outside window are not matched
+- [ ] Liquidity Window: matching runs on window close, VWAP calculated
+- [ ] SPV: Participation Note issuance with admin signature verified
+- [ ] SPV: Dividend distribution creates correct per-holder payment instructions
+- [ ] ROFR: transfer on flagged asset pauses and broadcasts CorporateAction
+- [ ] Drag-along: ExecuteDragAlong produces signed AssetTransactions for all minority holders
+- [ ] Prospectus limit: 150th retail investor blocked per jurisdiction
+- [ ] Suitability: complex instrument blocked without positive assessment
+- [ ] Holdings report: FiDA-compliant JSON with correct valuations and PnL
+- [ ] Tax report: FIFO cost basis correct; GBP, EUR, DE jurisdictions tested
+- [ ] Deal anchoring: deal moves to Anchored only when minimum fraction committed
+- [ ] API: JWT auth flow (challenge → verify → protected endpoint) end-to-end
+- [ ] API: rate limiter blocks excessive requests
+- [ ] KMS stub: LocalKeyProvider and KMSKeyProvider both satisfy KeyProvider interface
+- [ ] All Phase 0 tests still pass (zero regressions)
+
+---
+
+## What Remains Stubbed After Phase 2 (Intentionally)
+
+| Stub | Production replacement | When needed |
+|---|---|---|
+| `MockValuationOracle` | Live price feed (Bloomberg / Refinitiv) or SPV NAV oracle | Before reporting goes live |
+| `KMSKeyProvider` (stub) | Real AWS KMS `Sign` + `DescribeKey` API calls | Before real money moves |
+| `GetCurrencyRate` stub | ECB FX rate feed | Before multi-currency reporting |
+| `JurisdictionRule` static config | Regulatory rules database with update mechanism | Before expanding to new jurisdictions |
+| Tax calculation stubs (DE, FR, NL) | Jurisdiction-specific accountant review + legal sign-off | Before tax reports sent to users |
+| `api/server.go` HTTP layer | TLS termination via reverse proxy (nginx / AWS ALB) | Before public access |
+| Anchor commitment (off-chain legal) | Legal commitment deed linked via `LegalDocHash` | Before accepting real anchor capital |

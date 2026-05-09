@@ -276,8 +276,20 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 		}
 	}
 
-	// 5. Run matching engine for all order books
+	// 5. Run matching engine for all order books.
+	// If the WindowManager has registered windows for an asset, matching is
+	// suppressed here — Tick() already ran MatchOrders when the window closed.
+	if bc.WindowManager != nil {
+		windowResults := bc.WindowManager.Tick(bc)
+		bc.WindowResults = append(bc.WindowResults, windowResults...)
+	}
+
 	for assetID, ob := range bc.OrderBooks {
+		// Skip assets managed by the WindowManager — they match on window close only.
+		if bc.WindowManager != nil && bc.WindowManager.IsManaged(assetID) {
+			continue
+		}
+
 		asset, ok := bc.Assets[assetID]
 		if !ok {
 			continue

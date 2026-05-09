@@ -19,11 +19,13 @@ import (
 type AssetType string
 
 const (
-	AssetTypeEquity      AssetType = "equity"
-	AssetTypeDebt        AssetType = "debt"
-	AssetTypeFundUnit    AssetType = "fund_unit"
-	AssetTypeWarrant     AssetType = "warrant"
-	AssetTypeConvertible AssetType = "convertible"
+	AssetTypeEquity            AssetType = "equity"
+	AssetTypeDebt              AssetType = "debt"
+	AssetTypeFundUnit          AssetType = "fund_unit"
+	AssetTypeWarrant           AssetType = "warrant"
+	AssetTypeConvertible       AssetType = "convertible"
+	AssetTypeParticipationNote AssetType = "participation_note" // SPV-backed; ISIN = SPV ISIN
+	AssetTypeDepositaryReceipt AssetType = "depositary_receipt" // cross-listing wrapper
 )
 
 // AssetTxType classifies an asset-layer transaction operation.
