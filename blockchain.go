@@ -153,6 +153,21 @@ type Blockchain struct {
 
 	// Phase 2: SPV / Participation Notes
 	SPVs map[string]*SPVWrapper // spvID → SPVWrapper
+
+	// Phase 2: Corporate Actions
+	PendingCorporateActions map[string]*CorporateAction // actionID → action
+
+	// Phase 2: Multi-Jurisdiction Compliance
+	ProspectusExemptions   map[string]*ProspectusExemption   // assetID → exemption
+	SuitabilityAssessments map[string]*SuitabilityAssessment // walletKey:assetID → assessment
+	JurisdictionRules      map[string]*JurisdictionRule      // countryCode → rule
+
+	// Phase 2: FiDA Reporting
+	CostBasisTracker *CostBasisTracker
+	ValuationOracle  ValuationOracle
+
+	// Phase 2: Deal Anchoring
+	Deals map[string]*Deal // dealID → Deal
 }
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
@@ -463,6 +478,21 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 
 	// Phase 2: SPV / Participation Notes
 	bc.SPVs = make(map[string]*SPVWrapper)
+
+	// Phase 2: Corporate Actions
+	bc.PendingCorporateActions = make(map[string]*CorporateAction)
+
+	// Phase 2: Multi-Jurisdiction Compliance
+	bc.ProspectusExemptions = make(map[string]*ProspectusExemption)
+	bc.SuitabilityAssessments = make(map[string]*SuitabilityAssessment)
+	bc.JurisdictionRules = make(map[string]*JurisdictionRule)
+
+	// Phase 2: FiDA Reporting
+	bc.CostBasisTracker = NewCostBasisTracker()
+	bc.ValuationOracle = NewMockValuationOracle()
+
+	// Phase 2: Deal Anchoring
+	bc.Deals = make(map[string]*Deal)
 
 	// Default to mock service implementations so existing tests need no changes
 	if bc.PaymentProvider == nil {

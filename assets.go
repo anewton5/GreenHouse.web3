@@ -53,6 +53,19 @@ type TransferRestrictions struct {
 	AllowedJurisdictions []string
 	// BlockedJurisdictions explicitly excludes listed ISO country codes.
 	BlockedJurisdictions []string
+
+	// Corporate-action rights (Phase 2 Week 3-4)
+
+	// HasROFR triggers a CorporateAction on every transfer, giving existing holders
+	// the right to purchase on the same terms before the transfer proceeds.
+	HasROFR bool
+	// ROFRDays is the notice period during which holders may exercise the ROFR (default 30).
+	ROFRDays int
+	// DragThreshold is the minimum fraction (0-1) of circulating supply that must consent
+	// before a drag-along can be triggered. 0 disables drag-along rights.
+	DragThreshold float64
+	// TagAlongRight allows minority holders to join any majority sale on identical terms.
+	TagAlongRight bool
 }
 
 // AssetMetadata holds legal and descriptive information about an asset.

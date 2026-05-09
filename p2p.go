@@ -42,17 +42,21 @@ type mdnsNotifee struct {
 }
 
 const (
-	MessageTypeTransaction         = "transaction"
-	MessageTypeBlock               = "block"
-	MessageTypeAck                 = "ack"
-	MessageTypePing                = "ping"
-	MessageTypeAssetTransaction    = "asset_transaction"
-	MessageTypeCredential          = "credential"
-	MessageTypePaymentInstruction  = "payment_instruction"
-	MessageTypePaymentConfirmation = "payment_confirmation"
-	MessageTypeOrderTransaction    = "order_transaction"
-	MessageTypeLiquidityWindow     = "liquidity_window"
-	MessageTypeSPVTransaction      = "spv_transaction"
+	MessageTypeTransaction             = "transaction"
+	MessageTypeBlock                   = "block"
+	MessageTypeAck                     = "ack"
+	MessageTypePing                    = "ping"
+	MessageTypeAssetTransaction        = "asset_transaction"
+	MessageTypeCredential              = "credential"
+	MessageTypePaymentInstruction      = "payment_instruction"
+	MessageTypePaymentConfirmation     = "payment_confirmation"
+	MessageTypeOrderTransaction        = "order_transaction"
+	MessageTypeLiquidityWindow         = "liquidity_window"
+	MessageTypeSPVTransaction          = "spv_transaction"
+	MessageTypeCorporateAction         = "corporate_action"
+	MessageTypeCorporateActionResponse = "corporate_action_response"
+	MessageTypeDealAnchor              = "deal_anchor"
+	MessageTypeDealCommitment          = "deal_commitment"
 )
 
 type P2PMessage struct {
