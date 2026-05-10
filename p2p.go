@@ -93,12 +93,16 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	}
 	logger.Infof("Libp2p host created with ID: %s", h.ID())
 
-	// Initialize the DHT for global peer discovery
-	dht, err := kaddht.New(ctx, h)
+	// Initialize the DHT in client mode for peer discovery.
+	// Client mode means this node only queries the DHT and never accepts
+	// routing table entries from unknown peers, eliminating the Sybil attack
+	// surface described in GO-2024-3218. The bootstrap node (cmd/bootstrap)
+	// runs in ModeServer and is the sole authoritative DHT server.
+	dht, err := kaddht.New(ctx, h, kaddht.Mode(kaddht.ModeClient))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DHT: %v", err)
 	}
-	logger.Infof("DHT initialized for peer discovery")
+	logger.Infof("DHT initialized in client mode for peer discovery")
 
 	// Log listening addresses
 	for _, addr := range h.Addrs() {
