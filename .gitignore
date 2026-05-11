@@ -20,3 +20,4 @@ vendor/
 # Environment variables
 .env
 .env.*
+node_modules

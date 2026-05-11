@@ -1,17 +1,22 @@
 // cmd/node/main.go — GreenHouse full P2P node entry point.
 //
-// Starts a blockchain node, connects to the bootstrap peer, and runs
-// the P2P message handler. Press Ctrl+C to shut down cleanly.
+// Starts a blockchain node, connects to bootstrap peers, and runs the P2P
+// message handler. Press Ctrl+C to shut down cleanly.
 //
-// Build:
+// # Environment variables
+//
+//	GREENHOUSE_BOOTSTRAP_PEERS — comma-separated multiaddrs of bootstrap nodes
+//	                              e.g. /ip4/1.2.3.4/tcp/4001/p2p/<PeerID>
+//
+// # Build
 //
 //	go build -o bin/gonetwork ./cmd/node/
 //
-// Run (Node 1 — listener, note the printed multiaddress):
+// # Run (standalone, no bootstrap peers)
 //
 //	./bin/gonetwork
 //
-// Run (Node 2 — connect directly to Node 1, then broadcast test messages):
+// # Run (connect to a specific peer directly via flag)
 //
 //	./bin/gonetwork --peer /ip4/127.0.0.1/tcp/<PORT>/p2p/<PEERID> --send
 package main
@@ -21,6 +26,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -49,6 +55,14 @@ func main() {
 	}
 
 	log.Println("Starting GreenHouse node...")
+
+	// Log bootstrap peer configuration from environment.
+	if raw := os.Getenv("GREENHOUSE_BOOTSTRAP_PEERS"); raw != "" {
+		count := len(strings.Split(strings.TrimSpace(raw), ","))
+		log.Printf("Bootstrap peers configured via GREENHOUSE_BOOTSTRAP_PEERS: %d peer(s)", count)
+	} else {
+		log.Println("No GREENHOUSE_BOOTSTRAP_PEERS set — running in standalone/local mode")
+	}
 
 	bc := gn.NewBlockchain(ctx, "greenhouse-p2p-network")
 	if bc.P2PNode == nil {

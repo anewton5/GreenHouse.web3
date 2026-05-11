@@ -42,6 +42,9 @@ type Server struct {
 	// When nil, POST /v1/webhooks/payment accepts without verifying the HMAC.
 	ModulrProvider *gonetwork.ModulrPaymentProvider
 
+	// wsHub fans blockchain events out to all connected WebSocket clients.
+	wsHub *hub
+
 	// adminWalletKeys is the set of wallet public keys permitted to call /admin/* routes.
 	// Loaded from GREENHOUSE_ADMIN_WALLET_KEYS (comma-separated base64 keys) at startup.
 	// When empty, any authenticated wallet may call admin routes (single-operator dev mode).
@@ -80,11 +83,14 @@ func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server {
 		listenAddr:      listenAddr,
 		challenges:      make(map[string]challengeRecord),
 		adminWalletKeys: adminKeys,
+		wsHub:           newHub(),
 	}
 }
 
-// Start registers all routes and starts the HTTP server.
+// Start registers all routes, starts background goroutines, and begins serving.
 func (s *Server) Start() error {
+	go s.startEventFan()
+	go s.startPing()
 	return http.ListenAndServe(s.listenAddr, s.Routes())
 }
 
@@ -117,12 +123,37 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/deals/{id}/commit", s.jwt(http.HandlerFunc(s.handleAddCommitment)))
 
 	// KYC: participant submits a request; operator approves it
+	mux.Handle("GET /v1/kyc/status", s.jwt(http.HandlerFunc(s.handleKYCStatus)))
 	mux.Handle("POST /v1/kyc/request", s.jwt(http.HandlerFunc(s.handleKYCRequest)))
 	mux.Handle("GET /v1/admin/kyc/pending", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCList)))
 	mux.Handle("POST /v1/admin/kyc/approve", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCApprove)))
 
+	// Open orders for the authenticated wallet
+	mux.Handle("GET /v1/orders", s.jwt(http.HandlerFunc(s.handleListOrders)))
+
+	// Cap table for an asset
+	mux.Handle("GET /v1/assets/{id}/captable", s.jwt(http.HandlerFunc(s.handleGetCapTable)))
+
+	// Liquidity windows (issuer-facing)
+	mux.Handle("GET /v1/liquidity/windows", s.jwt(http.HandlerFunc(s.handleListLiquidityWindows)))
+	mux.Handle("POST /v1/liquidity/windows", s.jwtAdmin(http.HandlerFunc(s.handleScheduleLiquidityWindow)))
+
+	// Corporate actions
+	mux.Handle("GET /v1/corporate-actions", s.jwt(http.HandlerFunc(s.handleListCorporateActions)))
+	mux.Handle("POST /v1/corporate-actions", s.jwtAdmin(http.HandlerFunc(s.handleProposeCorporateAction)))
+
+	// Trade approvals (mobile co-signing)
+	mux.Handle("GET /v1/trades/pending", s.jwt(http.HandlerFunc(s.handleListPendingTrades)))
+	mux.Handle("POST /v1/trades/{id}/approve", s.jwt(http.HandlerFunc(s.handleApproveTrade)))
+
 	// Payment webhook — no JWT; authenticated via HMAC signature from Modulr
 	mux.HandleFunc("POST /v1/webhooks/payment", s.handlePaymentWebhook)
+
+	// KYC webhook — no JWT; authenticated via HMAC from Onfido
+	mux.HandleFunc("POST /v1/webhooks/kyc", s.handleKYCWebhook)
+
+	// Real-time WebSocket event stream — JWT via ?token= or Authorization header
+	mux.HandleFunc("GET /v1/stream", s.handleStream)
 
 	return LoggingMiddleware(CORSMiddleware(RateLimitMiddleware(mux)))
 }

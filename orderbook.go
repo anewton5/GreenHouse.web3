@@ -62,7 +62,8 @@ type Trade struct {
 	Price      float64 // execution price (= ask price — price-time priority)
 	Quantity   float64
 	Currency   string
-	ExecutedAt int64 // Unix timestamp
+	ExecutedAt int64  // Unix timestamp
+	Status     string `json:"status,omitempty"` // "" = settled; "pending_approval" = awaiting seller co-sig
 }
 
 // OrderBook holds all open orders for a single asset.

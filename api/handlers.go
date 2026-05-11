@@ -507,3 +507,323 @@ func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 }
+
+// ---------------------------------------------------------------------------
+// KYC status endpoint
+// ---------------------------------------------------------------------------
+
+// handleKYCStatus returns the current KYC credential for the authenticated wallet.
+// GET /v1/kyc/status
+func (s *Server) handleKYCStatus(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	att, ok := s.bc.Credentials[walletKey]
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"kyc_status":     "not_found",
+			"investor_class": "",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"kyc_status":     att.KYCStatus,
+		"investor_class": string(att.InvestorClass),
+		"expires_at":     att.ExpiresAt,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Open orders by wallet
+// ---------------------------------------------------------------------------
+
+// handleListOrders returns all open orders in any order book that belong to
+// the authenticated wallet.
+// GET /v1/orders
+func (s *Server) handleListOrders(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	type orderView struct {
+		ID      string  `json:"id"`
+		AssetID string  `json:"asset_id"`
+		Side    string  `json:"side"`
+		Price   float64 `json:"price"`
+		Volume  float64 `json:"volume"`
+		Filled  float64 `json:"filled"`
+		Status  string  `json:"status"`
+	}
+	var out []orderView
+	for assetID, ob := range s.bc.OrderBooks {
+		allOrders := append(ob.Bids, ob.Asks...)
+		for _, o := range allOrders {
+			if o.PlacedBy != walletKey {
+				continue
+			}
+			side := "buy"
+			if o.Side == gonetwork.OrderSideAsk {
+				side = "sell"
+			}
+			out = append(out, orderView{
+				ID:      o.ID,
+				AssetID: assetID,
+				Side:    side,
+				Price:   o.Price,
+				Volume:  o.Quantity,
+				Filled:  o.Filled,
+				Status:  string(o.Status),
+			})
+		}
+	}
+	if out == nil {
+		out = []orderView{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ---------------------------------------------------------------------------
+// Cap table
+// ---------------------------------------------------------------------------
+
+// handleGetCapTable returns the cap table for an asset (all holders and their
+// percentage of total supply).
+// GET /v1/assets/{id}/captable
+func (s *Server) handleGetCapTable(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+	asset, ok := s.bc.Assets[assetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	type holderRow struct {
+		WalletKey  string  `json:"wallet_key"`
+		Quantity   float64 `json:"quantity"`
+		Percentage float64 `json:"percentage"`
+	}
+	var rows []holderRow
+	for _, h := range s.bc.Holdings {
+		if h.AssetID != assetID {
+			continue
+		}
+		pct := 0.0
+		if asset.TotalSupply > 0 {
+			pct = h.Balance / asset.TotalSupply * 100
+		}
+		rows = append(rows, holderRow{
+			WalletKey:  h.HolderID,
+			Quantity:   h.Balance,
+			Percentage: pct,
+		})
+	}
+	if rows == nil {
+		rows = []holderRow{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id":     assetID,
+		"total_supply": asset.TotalSupply,
+		"holders":      rows,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Liquidity windows
+// ---------------------------------------------------------------------------
+
+// handleListLiquidityWindows returns all scheduled/open/closed liquidity windows.
+// GET /v1/liquidity/windows?asset_id=
+func (s *Server) handleListLiquidityWindows(w http.ResponseWriter, r *http.Request) {
+	assetFilter := r.URL.Query().Get("asset_id")
+	var out []*gonetwork.LiquidityWindow
+	if s.bc.WindowManager != nil {
+		for _, win := range s.bc.WindowManager.Windows {
+			if assetFilter != "" && win.AssetID != assetFilter {
+				continue
+			}
+			out = append(out, win)
+		}
+	}
+	if out == nil {
+		out = []*gonetwork.LiquidityWindow{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleScheduleLiquidityWindow creates a new liquidity window for an asset.
+// POST /v1/liquidity/windows
+// Body: {"asset_id":"...","opens_at":unix,"closes_at":unix,"max_volume":0,"currency":"GBP"}
+func (s *Server) handleScheduleLiquidityWindow(w http.ResponseWriter, r *http.Request) {
+	if s.bc.WindowManager == nil {
+		writeError(w, http.StatusNotImplemented, "liquidity window manager not configured")
+		return
+	}
+	walletKey := walletFromCtx(r)
+	var req struct {
+		AssetID   string  `json:"asset_id"`
+		OpensAt   int64   `json:"opens_at"`
+		ClosesAt  int64   `json:"closes_at"`
+		MaxVolume float64 `json:"max_volume"`
+		Currency  string  `json:"currency"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.AssetID == "" || req.OpensAt == 0 || req.ClosesAt == 0 {
+		writeError(w, http.StatusBadRequest, "asset_id, opens_at, closes_at are required")
+		return
+	}
+	if req.ClosesAt <= req.OpensAt {
+		writeError(w, http.StatusBadRequest, "closes_at must be after opens_at")
+		return
+	}
+	win := &gonetwork.LiquidityWindow{
+		ID:          base64.RawURLEncoding.EncodeToString([]byte(req.AssetID + strconv.FormatInt(req.OpensAt, 10))),
+		AssetID:     req.AssetID,
+		OpenAt:      req.OpensAt,
+		CloseAt:     req.ClosesAt,
+		MaxVolume:   req.MaxVolume,
+		Currency:    req.Currency,
+		Status:      gonetwork.WindowStatusScheduled,
+		ProposerKey: walletKey,
+	}
+	if err := s.bc.WindowManager.ScheduleWindow(win); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, win)
+}
+
+// ---------------------------------------------------------------------------
+// Corporate actions
+// ---------------------------------------------------------------------------
+
+// handleListCorporateActions returns all pending corporate actions, optionally
+// filtered by asset.
+// GET /v1/corporate-actions?asset_id=
+func (s *Server) handleListCorporateActions(w http.ResponseWriter, r *http.Request) {
+	assetFilter := r.URL.Query().Get("asset_id")
+	var out []*gonetwork.CorporateAction
+	for _, ca := range s.bc.PendingCorporateActions {
+		if assetFilter != "" && ca.AssetID != assetFilter {
+			continue
+		}
+		out = append(out, ca)
+	}
+	if out == nil {
+		out = []*gonetwork.CorporateAction{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleProposeCorporateAction creates a new pending corporate action.
+// POST /v1/corporate-actions
+// Body: {"asset_id":"...","action_type":"dividend","record_date":unix,"parameters":{}}
+func (s *Server) handleProposeCorporateAction(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	var req struct {
+		AssetID    string                          `json:"asset_id"`
+		ActionType gonetwork.CorporateActionType   `json:"action_type"`
+		RecordDate int64                           `json:"record_date"`
+		Parameters map[string]interface{}          `json:"parameters"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.AssetID == "" || req.ActionType == "" {
+		writeError(w, http.StatusBadRequest, "asset_id and action_type are required")
+		return
+	}
+	id := base64.RawURLEncoding.EncodeToString([]byte(req.AssetID + string(req.ActionType) + strconv.FormatInt(time.Now().UnixNano(), 10)))
+	ca := &gonetwork.CorporateAction{
+		ID:          id,
+		AssetID:     req.AssetID,
+		Type:        req.ActionType,
+		Status:      gonetwork.CorporateActionPending,
+		ProposerKey: walletKey,
+		DeadlineAt:  req.RecordDate,
+	}
+	s.bc.PendingCorporateActions[id] = ca
+	writeJSON(w, http.StatusCreated, ca)
+}
+
+// ---------------------------------------------------------------------------
+// Pending trade approvals (mobile co-signing)
+// ---------------------------------------------------------------------------
+
+// handleListPendingTrades returns trades awaiting the authenticated wallet's
+// co-signature (seller confirmation).
+// GET /v1/trades/pending
+func (s *Server) handleListPendingTrades(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	var out []gonetwork.Trade
+	for _, t := range s.bc.Trades {
+		if t.SellerID == walletKey && t.Status == "pending_approval" {
+			out = append(out, t)
+		}
+	}
+	if out == nil {
+		out = []gonetwork.Trade{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleApproveTrade records a seller co-signature for a trade.
+// POST /v1/trades/{id}/approve
+// Body: {"approve":true,"signature":"<base64url>","timestamp":unix}
+func (s *Server) handleApproveTrade(w http.ResponseWriter, r *http.Request) {
+	tradeID := r.PathValue("id")
+	walletKey := walletFromCtx(r)
+
+	var req struct {
+		Approve   bool   `json:"approve"`
+		Signature string `json:"signature"`
+		Timestamp int64  `json:"timestamp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Find the trade and verify the caller is the seller.
+	var found *gonetwork.Trade
+	for i := range s.bc.Trades {
+		if s.bc.Trades[i].ID == tradeID {
+			found = &s.bc.Trades[i]
+			break
+		}
+	}
+	if found == nil {
+		writeError(w, http.StatusNotFound, "trade not found")
+		return
+	}
+	if found.SellerID != walletKey {
+		writeError(w, http.StatusForbidden, "only the seller may approve this trade")
+		return
+	}
+
+	// Verify the Ed25519 signature over the approval payload.
+	pub, err := gonetwork.PublicKeyFromString(walletKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid wallet key")
+		return
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(req.Signature)
+	if err != nil {
+		// fall back to standard base64
+		sig, err = base64.StdEncoding.DecodeString(req.Signature)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid signature encoding")
+			return
+		}
+	}
+	payload := map[string]any{"trade_id": tradeID, "approve": req.Approve, "timestamp": req.Timestamp}
+	payloadBytes, _ := json.Marshal(payload)
+	if !gonetwork.VerifySignatureBytes(pub, payloadBytes, sig) {
+		writeError(w, http.StatusUnauthorized, "signature verification failed")
+		return
+	}
+
+	status := "approved"
+	if !req.Approve {
+		status = "rejected"
+	}
+	found.Status = status
+	writeJSON(w, http.StatusOK, map[string]string{"trade_id": tradeID, "status": status})
+}

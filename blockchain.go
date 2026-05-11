@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -168,6 +169,60 @@ type Blockchain struct {
 
 	// Phase 2: Deal Anchoring
 	Deals map[string]*Deal // dealID → Deal
+
+	// Track 4: Real-time event stream
+	// Events is a buffered channel onto which the blockchain emits StreamEvents
+	// whenever significant state changes occur (blocks, trades, payments, credentials).
+	// The API server reads from this channel and fans the events out to WebSocket clients.
+	// Senders use bc.emitEvent() which never blocks — events are dropped when the
+	// buffer is full rather than blocking the consensus path.
+	Events chan StreamEvent
+}
+
+// ---------------------------------------------------------------------------
+// StreamEvent — real-time event type
+// ---------------------------------------------------------------------------
+
+// StreamEvent is emitted by the blockchain onto the Events channel when
+// significant state changes occur. The API server fans these out to all
+// connected WebSocket clients.
+type StreamEvent struct {
+	Type      string          `json:"type"`
+	Timestamp int64           `json:"timestamp"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// Stream event type constants.
+const (
+	EventBlockFinalised   = "block_finalised"
+	EventOrderPlaced      = "order_placed"
+	EventOrderCancelled   = "order_cancelled"
+	EventTradeExecuted    = "trade_executed"
+	EventPaymentConfirmed = "payment_confirmed"
+	EventCredentialIssued = "credential_issued"
+)
+
+// emitEvent sends an event onto bc.Events without blocking.
+// If the buffer is full the event is silently dropped — consensus must not stall
+// waiting for a WebSocket consumer.
+func (bc *Blockchain) emitEvent(eventType string, payload any) {
+	if bc.Events == nil {
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	event := StreamEvent{
+		Type:      eventType,
+		Timestamp: time.Now().UTC().Unix(),
+		Payload:   json.RawMessage(data),
+	}
+	select {
+	case bc.Events <- event:
+	default:
+		// buffer full — drop rather than block
+	}
 }
 
 func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
@@ -494,6 +549,9 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	// Phase 2: Deal Anchoring
 	bc.Deals = make(map[string]*Deal)
 
+	// Track 4: Real-time event stream (256-event buffer)
+	bc.Events = make(chan StreamEvent, 256)
+
 	// Default to mock service implementations so existing tests need no changes
 	if bc.PaymentProvider == nil {
 		bc.PaymentProvider = NewMockPaymentProvider()
@@ -505,8 +563,17 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 		bc.OracleService, _ = NewMockOracleService()
 	}
 
-	bootstrapPeers := []string{
-		"/ip4/206.189.29.191/tcp/4001/p2p/12D3KooWSCqgUhaTxKM9qB32q2hdv5vwKV8XmTALKh4n5SwKbRoq",
+	// Bootstrap peers are loaded from the GREENHOUSE_BOOTSTRAP_PEERS environment
+	// variable (comma-separated multiaddrs). An empty or unset variable means the
+	// node runs in standalone / local-only mode, which is the default for tests
+	// and local development. Production nodes are configured via the environment.
+	var bootstrapPeers []string
+	if raw := os.Getenv("GREENHOUSE_BOOTSTRAP_PEERS"); raw != "" {
+		for _, addr := range strings.Split(raw, ",") {
+			if addr = strings.TrimSpace(addr); addr != "" {
+				bootstrapPeers = append(bootstrapPeers, addr)
+			}
+		}
 	}
 
 	// Initialize the P2PNode

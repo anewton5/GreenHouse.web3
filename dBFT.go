@@ -236,6 +236,11 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 
 	// 1. Append to chain
 	bc.Blocks = append(bc.Blocks, block)
+	bc.emitEvent(EventBlockFinalised, map[string]any{
+		"block_index": len(bc.Blocks) - 1,
+		"hash":        block.CalculateHash(),
+		"tx_count":    len(block.Transactions),
+	})
 
 	// 2. Apply asset transactions from this block
 	for _, tx := range block.AssetTransactions {
@@ -251,6 +256,12 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 	// 3. Apply credential transactions
 	for _, ct := range block.CredentialTransactions {
 		bc.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
+		bc.emitEvent(EventCredentialIssued, map[string]any{
+			"wallet_key":     ct.Attestation.WalletPublicKey,
+			"investor_class": ct.Attestation.InvestorClass,
+			"kyc_status":     ct.Attestation.KYCStatus,
+			"expires_at":     ct.Attestation.ExpiresAt,
+		})
 	}
 
 	// 4. Apply new orders to order books
@@ -261,6 +272,10 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 					fmt.Printf("Failed to cancel order %s: %v\n", ot.Order.ID, err)
 				}
 			}
+			bc.emitEvent(EventOrderCancelled, map[string]any{
+				"order_id": ot.Order.ID,
+				"asset_id": ot.Order.AssetID,
+			})
 			continue
 		}
 		if _, ok := bc.OrderBooks[ot.Order.AssetID]; !ok {
@@ -273,6 +288,14 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 		}
 		if err := bc.OrderBooks[ot.Order.AssetID].AddOrder(&ot.Order, pubKey); err != nil {
 			fmt.Printf("Failed to add order to book: %v\n", err)
+		} else {
+			bc.emitEvent(EventOrderPlaced, map[string]any{
+				"order_id": ot.Order.ID,
+				"asset_id": ot.Order.AssetID,
+				"side":     ot.Order.Side,
+				"price":    ot.Order.Price,
+				"quantity": ot.Order.Quantity,
+			})
 		}
 	}
 
@@ -302,6 +325,15 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 
 		for i, trade := range trades {
 			bc.Trades = append(bc.Trades, trade)
+			bc.emitEvent(EventTradeExecuted, map[string]any{
+				"trade_id":  trade.ID,
+				"asset_id":  trade.AssetID,
+				"quantity":  trade.Quantity,
+				"price":     trade.Price,
+				"currency":  trade.Currency,
+				"buyer_id":  trade.BuyerID,
+				"seller_id": trade.SellerID,
+			})
 
 			// 6. Issue PaymentInstruction for each trade
 			instruction := &PaymentInstruction{
@@ -337,6 +369,12 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 				}
 				confirmation, _ = bc.OracleService.SignConfirmation(confirmation)
 				bc.ConfirmedPayments[trade.ID] = confirmation
+				bc.emitEvent(EventPaymentConfirmed, map[string]any{
+					"trade_id":  trade.ID,
+					"reference": instruction.Reference,
+					"amount":    instruction.TotalAmount,
+					"currency":  instruction.Currency,
+				})
 
 				// 8. DVP: apply asset transfer now that payment is confirmed
 				// AssetTransactions from MatchOrders are unsigned (seller key not in scope here).
