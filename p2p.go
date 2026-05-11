@@ -5,19 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"crypto/sha256"
+
+	"golang.org/x/crypto/sha3"
 
 	"github.com/ipfs/go-cid"
 	golog "github.com/ipfs/go-log/v2"
 	libp2p "github.com/libp2p/go-libp2p"
 	kaddht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/control"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	mdns "github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	ma "github.com/multiformats/go-multiaddr"
 	"github.com/multiformats/go-multihash"
 )
 
@@ -35,6 +40,7 @@ type P2PNode struct {
 	Sub         *pubsub.Subscription
 	Blockchain  *Blockchain
 	MdnsService mdns.Service // Store the mDNS service
+	Gater       *AllowlistGater
 }
 
 type mdnsNotifee struct {
@@ -57,11 +63,116 @@ const (
 	MessageTypeCorporateActionResponse = "corporate_action_response"
 	MessageTypeDealAnchor              = "deal_anchor"
 	MessageTypeDealCommitment          = "deal_commitment"
+	MessageTypeAllowlistAdd            = "allowlist_add"
+	MessageTypeAllowlistRevoke         = "allowlist_revoke"
 )
 
 type P2PMessage struct {
 	Type    string `json:"type"`    // Message type (e.g., "transaction", "block")
 	Payload []byte `json:"payload"` // Serialized payload
+}
+
+// AllowlistTransaction carries a signed allowlist mutation broadcast over P2P.
+// All validators verify the registry signature before applying the mutation
+// to their local AllowlistGater.
+type AllowlistTransaction struct {
+	PeerID    string `json:"peer_id"`   // libp2p peer ID string
+	Action    string `json:"action"`    // "allow" or "revoke"
+	Signature []byte `json:"signature"` // registry Ed25519 sig over SHA3-256([]byte(PeerID))
+}
+
+// AllowlistGater enforces a permissioned P2P network by maintaining a set of
+// approved peer IDs. Each entry must be authorised by an Ed25519 signature
+// from the network registry key over SHA3-256([]byte(peerID)).
+//
+// When the allowlist is empty the gater operates in open mode (all connections
+// permitted), preserving compatibility with development and test environments.
+// The network becomes permissioned as soon as the first peer is admitted.
+type AllowlistGater struct {
+	mu          sync.RWMutex
+	allowed     map[peer.ID]struct{}
+	registryKey *PublicKey
+}
+
+// NewAllowlistGater creates a gater bound to the given registry public key.
+// Pass nil to create an open-mode-only gater (useful for tests and development).
+func NewAllowlistGater(registryKey *PublicKey) *AllowlistGater {
+	return &AllowlistGater{
+		allowed:     make(map[peer.ID]struct{}),
+		registryKey: registryKey,
+	}
+}
+
+// AllowPeer admits a peer after verifying the registry signature.
+// sig must equal Sign(SHA3-256([]byte(peerID))) produced by the registry private key.
+func (g *AllowlistGater) AllowPeer(id peer.ID, sig []byte) error {
+	if g.registryKey == nil {
+		return fmt.Errorf("allowlist: registry key not configured")
+	}
+	hash := sha3.Sum256([]byte(id))
+	s := &Signature{value: sig}
+	if !s.Verify(g.registryKey, hash[:]) {
+		return fmt.Errorf("allowlist: invalid registry signature for peer %s", id)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.allowed[id] = struct{}{}
+	return nil
+}
+
+// RevokePeer removes a peer from the allowlist after verifying the registry signature.
+func (g *AllowlistGater) RevokePeer(id peer.ID, sig []byte) error {
+	if g.registryKey == nil {
+		return fmt.Errorf("allowlist: registry key not configured")
+	}
+	hash := sha3.Sum256([]byte(id))
+	s := &Signature{value: sig}
+	if !s.Verify(g.registryKey, hash[:]) {
+		return fmt.Errorf("allowlist: invalid registry signature for peer %s", id)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.allowed, id)
+	return nil
+}
+
+// InterceptPeerDial short-circuits outbound dials to unlisted peers early.
+func (g *AllowlistGater) InterceptPeerDial(p peer.ID) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if len(g.allowed) == 0 {
+		return true // open mode
+	}
+	_, ok := g.allowed[p]
+	return ok
+}
+
+// InterceptAddrDial defers to the per-peer check.
+func (g *AllowlistGater) InterceptAddrDial(p peer.ID, _ ma.Multiaddr) bool {
+	return g.InterceptPeerDial(p)
+}
+
+// InterceptAccept allows the TCP accept; peer identity is not yet known.
+func (g *AllowlistGater) InterceptAccept(_ network.ConnMultiaddrs) bool {
+	return true
+}
+
+// InterceptSecured is the primary gate: called after the TLS/Noise handshake
+// when the remote peer's identity has been confirmed.
+func (g *AllowlistGater) InterceptSecured(_ network.Direction, p peer.ID, _ network.ConnMultiaddrs) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if len(g.allowed) == 0 {
+		return true // open mode
+	}
+	_, ok := g.allowed[p]
+	return ok
+}
+
+// InterceptUpgraded approves all fully-upgraded connections; gating is done in
+// InterceptSecured.
+func (g *AllowlistGater) InterceptUpgraded(_ network.Conn) (bool, control.DisconnectReason) {
+	return true, 0
 }
 
 func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
@@ -86,8 +197,11 @@ func setupMdnsDiscovery(h host.Host) (mdns.Service, error) {
 
 // NewP2PNode initializes a new libp2p node with mDNS and DHT-based peer discovery
 func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, bootstrapPeers []string) (*P2PNode, error) {
-	// Create a new libp2p host with default options
-	h, err := libp2p.New()
+	// Create an allowlist gater (open mode until the first peer is admitted).
+	gater := NewAllowlistGater(nil)
+
+	// Create a new libp2p host with the connection gater wired in.
+	h, err := libp2p.New(libp2p.ConnectionGater(gater))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create libp2p host: %v", err)
 	}
@@ -226,6 +340,7 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 		Sub:         sub,
 		Blockchain:  blockchain,
 		MdnsService: mdnsSvc,
+		Gater:       gater,
 	}
 
 	// Set a stream handler for direct messaging
@@ -233,6 +348,26 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	logger.Infof("Stream handler set for direct messaging")
 
 	return node, nil
+}
+
+func (n *P2PNode) BroadcastAllowlistTransaction(at AllowlistTransaction) error {
+	if n == nil || n.Topic == nil {
+		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	payload, err := json.Marshal(at)
+	if err != nil {
+		return fmt.Errorf("failed to serialize allowlist transaction: %w", err)
+	}
+	msgType := MessageTypeAllowlistAdd
+	if at.Action == "revoke" {
+		msgType = MessageTypeAllowlistRevoke
+	}
+	message := P2PMessage{Type: msgType, Payload: payload}
+	data, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to serialize P2PMessage: %w", err)
+	}
+	return n.Topic.Publish(context.Background(), data)
 }
 
 func (n *P2PNode) BroadcastPing(ctx context.Context) error {
@@ -438,6 +573,30 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 				}
 				if n.Blockchain.OracleService.VerifyConfirmation(&pc) {
 					n.Blockchain.ConfirmedPayments[pc.InstructionID] = &pc
+				}
+
+			case MessageTypeAllowlistAdd:
+				var at AllowlistTransaction
+				if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
+					log.Printf("Failed to deserialize allowlist transaction: %v", err)
+					continue
+				}
+				if n.Gater != nil {
+					if err := n.Gater.AllowPeer(peer.ID(at.PeerID), at.Signature); err != nil {
+						log.Printf("Rejected allowlist_add for peer %s: %v", at.PeerID, err)
+					}
+				}
+
+			case MessageTypeAllowlistRevoke:
+				var at AllowlistTransaction
+				if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
+					log.Printf("Failed to deserialize allowlist transaction: %v", err)
+					continue
+				}
+				if n.Gater != nil {
+					if err := n.Gater.RevokePeer(peer.ID(at.PeerID), at.Signature); err != nil {
+						log.Printf("Rejected allowlist_revoke for peer %s: %v", at.PeerID, err)
+					}
 				}
 
 			default:

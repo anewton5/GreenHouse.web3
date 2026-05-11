@@ -6,7 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/sha3"
+
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewP2PNode(t *testing.T) {
@@ -137,27 +142,42 @@ func TestHandleMessages(t *testing.T) {
 	t.Log("All message types handled successfully")
 }
 
-func TestPeerDiscovery(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+// TestPeerDiscovery_Local verifies that two in-process libp2p nodes can
+// discover each other without any external network dependency.
+func TestPeerDiscovery_Local(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Initialize the blockchain
-	blockchain := NewBlockchain(ctx, "test-topic")
+	bc1 := NewBlockchain(ctx, "node1")
+	bc2 := NewBlockchain(ctx, "node2")
 
-	// Wait for peer discovery
-	time.Sleep(15 * time.Second) // Increase wait time for real-world latency
+	nodeA, err := NewP2PNode(ctx, bc1, "test-discovery", nil)
+	require.NoError(t, err, "nodeA should initialise without error")
+	defer nodeA.Shutdown(ctx)
 
-	// Verify that the local node discovered the remote node
-	found := false
-	for _, peer := range blockchain.P2PNode.Host.Network().Peers() {
-		if peer.String() == "12D3KooWAuhPZUUFjaMhEqF3WdvQUJ7SM91nnrQbzULwCyoY8F37" {
-			found = true
-			break
-		}
+	nodeB, err := NewP2PNode(ctx, bc2, "test-discovery", nil)
+	require.NoError(t, err, "nodeB should initialise without error")
+	defer nodeB.Shutdown(ctx)
+
+	// Connect nodeB directly to nodeA using its listen addresses.
+	nodeAInfo := peer.AddrInfo{
+		ID:    nodeA.Host.ID(),
+		Addrs: nodeA.Host.Addrs(),
 	}
+	err = nodeB.Host.Connect(ctx, nodeAInfo)
+	require.NoError(t, err, "nodeB should connect to nodeA")
 
-	assert.True(t, found, "Local node should discover the remote node")
-	t.Logf("Peer discovery successful: Local node discovered remote node (Remote Node ID: %s)", "12D3KooWAuhPZUUFjaMhEqF3WdvQUJ7SM91nnrQbzULwCyoY8F37")
+	// nodeA should appear in nodeB's peer list.
+	require.Eventually(t, func() bool {
+		for _, p := range nodeB.Host.Network().Peers() {
+			if p == nodeA.Host.ID() {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "nodeB should discover nodeA")
+
+	t.Logf("nodeB (%s) discovered nodeA (%s)", nodeB.Host.ID(), nodeA.Host.ID())
 }
 
 func TestSendMessage(t *testing.T) {
@@ -298,4 +318,130 @@ func TestRealPeersCommunication(t *testing.T) {
 	// Verify that Node2 received the transaction
 	// (You can add logic to check the blockchain or logs for the received transaction)
 	t.Log("Real peer communication test passed")
+}
+
+// ---------------------------------------------------------------------------
+// AllowlistGater tests
+// ---------------------------------------------------------------------------
+
+// TestAllowlistGater_OpenWhenEmpty verifies that an empty allowlist permits
+// all connections (open / development mode).
+func TestAllowlistGater_OpenWhenEmpty(t *testing.T) {
+	registryKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	g := NewAllowlistGater(registryKey.Public())
+
+	anyPeer := peer.ID("12D3KooWOpenModeAnyPeer")
+	assert.True(t, g.InterceptSecured(network.DirInbound, anyPeer, nil))
+	assert.True(t, g.InterceptPeerDial(anyPeer))
+}
+
+// TestAllowlistGater_Permits verifies that an explicitly admitted peer is
+// allowed to connect.
+func TestAllowlistGater_Permits(t *testing.T) {
+	registryKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	g := NewAllowlistGater(registryKey.Public())
+
+	testPeer := peer.ID("12D3KooWGaterPermitsPeer")
+	hash := sha3.Sum256([]byte(testPeer))
+	sig := registryKey.Sign(hash[:]).Bytes()
+	require.NoError(t, g.AllowPeer(testPeer, sig))
+
+	assert.True(t, g.InterceptSecured(network.DirInbound, testPeer, nil))
+	assert.True(t, g.InterceptPeerDial(testPeer))
+}
+
+// TestAllowlistGater_Blocks verifies that a peer absent from a non-empty
+// allowlist is rejected.
+func TestAllowlistGater_Blocks(t *testing.T) {
+	registryKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	g := NewAllowlistGater(registryKey.Public())
+
+	// Admit one peer to make the allowlist non-empty (permissioned mode).
+	knownPeer := peer.ID("12D3KooWGaterBlocksKnown")
+	hash := sha3.Sum256([]byte(knownPeer))
+	sig := registryKey.Sign(hash[:]).Bytes()
+	require.NoError(t, g.AllowPeer(knownPeer, sig))
+
+	unknownPeer := peer.ID("12D3KooWGaterBlocksUnknown")
+	assert.False(t, g.InterceptSecured(network.DirInbound, unknownPeer, nil))
+	assert.False(t, g.InterceptPeerDial(unknownPeer))
+}
+
+// TestAllowlistGater_AllowPeer_ValidSig verifies that a correctly signed
+// AllowPeer call admits the peer without error.
+func TestAllowlistGater_AllowPeer_ValidSig(t *testing.T) {
+	registryKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	g := NewAllowlistGater(registryKey.Public())
+
+	testPeer := peer.ID("12D3KooWGaterValidSigPeer")
+	hash := sha3.Sum256([]byte(testPeer))
+	sig := registryKey.Sign(hash[:]).Bytes()
+
+	err = g.AllowPeer(testPeer, sig)
+	assert.NoError(t, err)
+	assert.True(t, g.InterceptSecured(network.DirInbound, testPeer, nil))
+}
+
+// TestAllowlistGater_AllowPeer_InvalidSig verifies that an incorrectly signed
+// AllowPeer call is rejected and the peer is not admitted.
+func TestAllowlistGater_AllowPeer_InvalidSig(t *testing.T) {
+	registryKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	// A different key — its signatures should not be accepted.
+	attackerKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	g := NewAllowlistGater(registryKey.Public())
+
+	testPeer := peer.ID("12D3KooWGaterInvalidSigPeer")
+	hash := sha3.Sum256([]byte(testPeer))
+	wrongSig := attackerKey.Sign(hash[:]).Bytes()
+
+	err = g.AllowPeer(testPeer, wrongSig)
+	assert.Error(t, err, "invalid signature should be rejected")
+
+	// Peer must not have been admitted. Admit another peer to enter
+	// permissioned mode so the check is meaningful.
+	realPeer := peer.ID("12D3KooWGaterInvalidSigReal")
+	realHash := sha3.Sum256([]byte(realPeer))
+	realSig := registryKey.Sign(realHash[:]).Bytes()
+	require.NoError(t, g.AllowPeer(realPeer, realSig))
+
+	assert.False(t, g.InterceptSecured(network.DirInbound, testPeer, nil))
+}
+
+// TestAllowlistGater_RevokePeer verifies that a revoked peer is blocked while
+// other admitted peers remain unaffected.
+func TestAllowlistGater_RevokePeer(t *testing.T) {
+	registryKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	g := NewAllowlistGater(registryKey.Public())
+
+	peerA := peer.ID("12D3KooWGaterRevokeA")
+	peerB := peer.ID("12D3KooWGaterRevokeB")
+
+	hashA := sha3.Sum256([]byte(peerA))
+	hashB := sha3.Sum256([]byte(peerB))
+	sigA := registryKey.Sign(hashA[:]).Bytes()
+	sigB := registryKey.Sign(hashB[:]).Bytes()
+
+	require.NoError(t, g.AllowPeer(peerA, sigA))
+	require.NoError(t, g.AllowPeer(peerB, sigB))
+	assert.True(t, g.InterceptSecured(network.DirInbound, peerA, nil))
+
+	// Revoke peerA. peerB keeps the list non-empty so permissioned mode holds.
+	require.NoError(t, g.RevokePeer(peerA, sigA))
+
+	assert.False(t, g.InterceptSecured(network.DirInbound, peerA, nil), "revoked peer should be blocked")
+	assert.True(t, g.InterceptSecured(network.DirInbound, peerB, nil), "non-revoked peer should still be permitted")
 }

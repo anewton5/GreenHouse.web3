@@ -1,6 +1,19 @@
 package gonetwork
 
-import "encoding/base64"
+import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+)
 
 // ---------------------------------------------------------------------------
 // KeyProvider interface
@@ -58,9 +71,20 @@ func (p *LocalKeyProvider) Verify(msg, sig []byte) bool {
 // KMSKeyProvider (stub)
 // ---------------------------------------------------------------------------
 
-// KMSKeyProvider is a production stub for AWS KMS-backed signing.
-// In production, replace Sign and Verify bodies with real KMS SDK calls.
-// Calls records all method invocations for test assertion and audit.
+// KMSKeyProvider is a production stub for managed key storage and signing.
+//
+// AWS KMS does NOT support Ed25519. If you choose AWS, you must migrate the
+// signing scheme to ECDSA P-256 throughout the codebase — a significant change.
+//
+// Recommended production paths that preserve Ed25519:
+//
+//   - HashiCorp Vault Transit secrets engine (free, self-hosted alongside the
+//     bootstrap node, native Ed25519 support via the "ed25519" key type).
+//   - Google Cloud KMS (managed service, ~$0.006/key/month, native Ed25519
+//     support via the "EC_SIGN_ED25519" key spec).
+//
+// To implement: replace the Sign and Verify bodies below with the corresponding
+// SDK calls for your chosen provider. The interface and call sites remain unchanged.
 type KMSKeyProvider struct {
 	KeyARN    string
 	KeyID     string
@@ -93,6 +117,213 @@ func (p *KMSKeyProvider) Sign(msg []byte) ([]byte, error) {
 func (p *KMSKeyProvider) Verify(msg, sig []byte) bool {
 	p.Calls = append(p.Calls, "Verify")
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// VaultKeyProvider
+// ---------------------------------------------------------------------------
+
+// VaultKeyProvider implements KeyProvider using the HashiCorp Vault Transit
+// secrets engine with an Ed25519 key. All signing and verification operations
+// are delegated to Vault; the private key never leaves the server.
+//
+// One-time Vault setup:
+//
+//	vault secrets enable transit
+//	vault write transit/keys/greenhouse-node type=ed25519
+//
+// Required Vault policy:
+//
+//	path "transit/sign/greenhouse-node"   { capabilities = ["update"] }
+//	path "transit/verify/greenhouse-node" { capabilities = ["update"] }
+//	path "transit/keys/greenhouse-node"   { capabilities = ["read"]   }
+//
+// Environment variables read by NewVaultKeyProviderFromEnv:
+//
+//	VAULT_ADDR  — Vault server address (e.g. "http://127.0.0.1:8200")
+//	VAULT_TOKEN — Vault token with the policy above
+type VaultKeyProvider struct {
+	address   string // Vault server base URL, e.g. "http://127.0.0.1:8200"
+	token     string // Vault auth token
+	keyName   string // Transit key name, e.g. "greenhouse-node"
+	mountPath string // Transit mount path; defaults to "transit"
+	cachedPub string // lazily populated base64-encoded public key (32 raw bytes)
+	client    *http.Client
+}
+
+// NewVaultKeyProviderFromEnv creates a VaultKeyProvider from the VAULT_ADDR and
+// VAULT_TOKEN environment variables. keyName is the Transit key name to use.
+func NewVaultKeyProviderFromEnv(keyName string) (*VaultKeyProvider, error) {
+	addr := os.Getenv("VAULT_ADDR")
+	token := os.Getenv("VAULT_TOKEN")
+	if addr == "" || token == "" {
+		return nil, fmt.Errorf("vault: VAULT_ADDR and VAULT_TOKEN must be set")
+	}
+	return NewVaultKeyProvider(addr, token, keyName)
+}
+
+// NewVaultKeyProvider creates a VaultKeyProvider with explicit credentials.
+// mountPath defaults to "transit". address must not have a trailing slash.
+func NewVaultKeyProvider(address, token, keyName string) (*VaultKeyProvider, error) {
+	if address == "" {
+		return nil, fmt.Errorf("vault: address must not be empty")
+	}
+	if token == "" {
+		return nil, fmt.Errorf("vault: token must not be empty")
+	}
+	if keyName == "" {
+		return nil, fmt.Errorf("vault: keyName must not be empty")
+	}
+	return &VaultKeyProvider{
+		address:   strings.TrimRight(address, "/"),
+		token:     token,
+		keyName:   keyName,
+		mountPath: "transit",
+		client:    &http.Client{Timeout: 15 * time.Second},
+	}, nil
+}
+
+// PublicKeyString returns the base64-encoded raw Ed25519 public key (32 bytes).
+// The result is fetched from Vault on first call and cached for subsequent calls.
+func (v *VaultKeyProvider) PublicKeyString() string {
+	if v.cachedPub != "" {
+		return v.cachedPub
+	}
+	pub, err := v.fetchPublicKey()
+	if err != nil {
+		return ""
+	}
+	v.cachedPub = pub
+	return v.cachedPub
+}
+
+// Sign asks Vault Transit to sign msg and returns the raw 64-byte Ed25519
+// signature. The private key never leaves Vault.
+func (v *VaultKeyProvider) Sign(msg []byte) ([]byte, error) {
+	body, _ := json.Marshal(map[string]any{
+		"input": base64.StdEncoding.EncodeToString(msg),
+	})
+	endpoint := fmt.Sprintf("%s/v1/%s/sign/%s", v.address, v.mountPath, v.keyName)
+	data, err := v.vaultPost(endpoint, body)
+	if err != nil {
+		return nil, fmt.Errorf("vault: sign request failed: %w", err)
+	}
+	sigStr, ok := data["signature"].(string)
+	if !ok || sigStr == "" {
+		return nil, fmt.Errorf("vault: sign response missing signature field")
+	}
+	// Vault Transit signature format: "vault:v1:<base64>"
+	parts := strings.SplitN(sigStr, ":", 3)
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("vault: unexpected signature format: %s", sigStr)
+	}
+	raw, err := base64.StdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("vault: failed to decode signature bytes: %w", err)
+	}
+	return raw, nil
+}
+
+// Verify asks Vault Transit to verify sig over msg. sig must be the raw 64-byte
+// Ed25519 signature as returned by Sign.
+func (v *VaultKeyProvider) Verify(msg, sig []byte) bool {
+	body, _ := json.Marshal(map[string]any{
+		"input":     base64.StdEncoding.EncodeToString(msg),
+		"signature": "vault:v1:" + base64.StdEncoding.EncodeToString(sig),
+	})
+	endpoint := fmt.Sprintf("%s/v1/%s/verify/%s", v.address, v.mountPath, v.keyName)
+	data, err := v.vaultPost(endpoint, body)
+	if err != nil {
+		return false
+	}
+	valid, _ := data["valid"].(bool)
+	return valid
+}
+
+// vaultPost sends a POST request to endpoint with a JSON body, attaches the
+// Vault token header, and returns the parsed data map from the response envelope.
+func (v *VaultKeyProvider) vaultPost(endpoint string, body []byte) (map[string]any, error) {
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Vault-Token", v.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := v.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("vault: API returned %d: %s", res.StatusCode, string(b))
+	}
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("vault: failed to decode response: %w", err)
+	}
+	return envelope.Data, nil
+}
+
+// fetchPublicKey retrieves the Ed25519 public key from the Vault Transit keys
+// endpoint, parses the PEM SubjectPublicKeyInfo, and returns the raw 32-byte
+// key as a standard base64 string.
+func (v *VaultKeyProvider) fetchPublicKey() (string, error) {
+	endpoint := fmt.Sprintf("%s/v1/%s/keys/%s", v.address, v.mountPath, v.keyName)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-Vault-Token", v.token)
+
+	res, err := v.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("vault: fetch key request failed: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		return "", fmt.Errorf("vault: fetch key returned %d: %s", res.StatusCode, string(b))
+	}
+	var envelope struct {
+		Data struct {
+			Keys map[string]struct {
+				PublicKey string `json:"public_key"`
+			} `json:"keys"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&envelope); err != nil {
+		return "", fmt.Errorf("vault: failed to decode key response: %w", err)
+	}
+	var pemStr string
+	for _, kv := range envelope.Data.Keys {
+		if kv.PublicKey != "" {
+			pemStr = kv.PublicKey
+			break
+		}
+	}
+	if pemStr == "" {
+		return "", fmt.Errorf("vault: no public key found for key %s", v.keyName)
+	}
+	// Vault returns a PEM-encoded SubjectPublicKeyInfo block for Ed25519 keys.
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return "", fmt.Errorf("vault: failed to decode PEM public key")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("vault: failed to parse PKIX public key: %w", err)
+	}
+	ed25519Pub, ok := pub.(ed25519.PublicKey)
+	if !ok {
+		return "", fmt.Errorf("vault: key is not Ed25519")
+	}
+	return base64.StdEncoding.EncodeToString([]byte(ed25519Pub)), nil
 }
 
 // ---------------------------------------------------------------------------

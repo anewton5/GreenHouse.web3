@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,19 @@ type Server struct {
 
 	challengeMu sync.Mutex
 	challenges  map[string]challengeRecord // challenge hex → record
+
+	// Optional: set to enable the operator KYC approval workflow.
+	// When nil, POST /v1/admin/kyc/* and POST /v1/kyc/request return 501.
+	OperatorRegistry *gonetwork.OperatorIdentityRegistry
+
+	// Optional: set to enable Modulr webhook signature verification.
+	// When nil, POST /v1/webhooks/payment accepts without verifying the HMAC.
+	ModulrProvider *gonetwork.ModulrPaymentProvider
+
+	// adminWalletKeys is the set of wallet public keys permitted to call /admin/* routes.
+	// Loaded from GREENHOUSE_ADMIN_WALLET_KEYS (comma-separated base64 keys) at startup.
+	// When empty, any authenticated wallet may call admin routes (single-operator dev mode).
+	adminWalletKeys map[string]bool
 }
 
 type challengeRecord struct {
@@ -41,16 +55,31 @@ type challengeRecord struct {
 // NewServer creates an API server for the given Blockchain.
 // A fresh 32-byte JWT secret is generated at startup; restarting the server
 // invalidates all issued tokens.
+//
+// Admin wallet keys are loaded from GREENHOUSE_ADMIN_WALLET_KEYS
+// (comma-separated base64-encoded Ed25519 public keys). When the variable is
+// not set, any authenticated wallet may call admin routes (single-operator
+// development mode — restrict this before going to production).
 func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		panic("api: failed to generate JWT secret: " + err.Error())
 	}
+
+	adminKeys := make(map[string]bool)
+	for _, k := range strings.Split(os.Getenv("GREENHOUSE_ADMIN_WALLET_KEYS"), ",") {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			adminKeys[k] = true
+		}
+	}
+
 	return &Server{
-		bc:         bc,
-		jwtSecret:  secret,
-		listenAddr: listenAddr,
-		challenges: make(map[string]challengeRecord),
+		bc:              bc,
+		jwtSecret:       secret,
+		listenAddr:      listenAddr,
+		challenges:      make(map[string]challengeRecord),
+		adminWalletKeys: adminKeys,
 	}
 }
 
@@ -86,6 +115,14 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/deals", s.jwt(http.HandlerFunc(s.handleCreateDeal)))
 	mux.Handle("POST /v1/deals/{id}/anchor", s.jwt(http.HandlerFunc(s.handleAttachAnchor)))
 	mux.Handle("POST /v1/deals/{id}/commit", s.jwt(http.HandlerFunc(s.handleAddCommitment)))
+
+	// KYC: participant submits a request; operator approves it
+	mux.Handle("POST /v1/kyc/request", s.jwt(http.HandlerFunc(s.handleKYCRequest)))
+	mux.Handle("GET /v1/admin/kyc/pending", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCList)))
+	mux.Handle("POST /v1/admin/kyc/approve", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCApprove)))
+
+	// Payment webhook — no JWT; authenticated via HMAC signature from Modulr
+	mux.HandleFunc("POST /v1/webhooks/payment", s.handlePaymentWebhook)
 
 	return LoggingMiddleware(CORSMiddleware(RateLimitMiddleware(mux)))
 }
@@ -142,6 +179,22 @@ func (s *Server) verifyJWT(token string) (string, error) {
 		return "", fmt.Errorf("JWT has expired")
 	}
 	return claims.Sub, nil
+}
+
+// jwtAdmin wraps a handler requiring both a valid JWT and admin wallet status.
+// When adminWalletKeys is empty (development mode) any authenticated wallet is
+// considered an admin. In production, set GREENHOUSE_ADMIN_WALLET_KEYS.
+func (s *Server) jwtAdmin(next http.Handler) http.Handler {
+	return s.jwt(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(s.adminWalletKeys) > 0 {
+			walletKey := walletFromCtx(r)
+			if !s.adminWalletKeys[walletKey] {
+				writeError(w, http.StatusForbidden, "admin access required")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	}))
 }
 
 // jwt wraps a handler with JWT authentication. It sets the wallet key in the

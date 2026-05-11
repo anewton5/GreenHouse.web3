@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -373,4 +374,136 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version":   "2.0.0",
 		"timestamp": time.Now().UTC().Unix(),
 	})
+}
+
+// ---------------------------------------------------------------------------
+// KYC endpoints
+// ---------------------------------------------------------------------------
+
+// handleKYCRequest queues a KYC approval request from an authenticated participant.
+// POST /v1/kyc/request
+// Body: {"class":"professional","jurisdiction":"GB","valid_for_days":365}
+func (s *Server) handleKYCRequest(w http.ResponseWriter, r *http.Request) {
+	if s.OperatorRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "KYC workflow not configured on this node")
+		return
+	}
+	walletKey := walletFromCtx(r)
+	var req struct {
+		Class        gonetwork.InvestorClass `json:"class"`
+		Jurisdiction string                  `json:"jurisdiction"`
+		ValidForDays int                     `json:"valid_for_days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ValidForDays <= 0 {
+		req.ValidForDays = 365
+	}
+	if err := s.OperatorRegistry.RequestKYC(walletKey, req.Class, req.Jurisdiction, req.ValidForDays); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"wallet_key": walletKey,
+		"status":     "pending_review",
+		"message":    "Your KYC request has been submitted. A GreenHouse operator will review it shortly.",
+	})
+}
+
+// handleAdminKYCList returns all pending KYC approval requests.
+// GET /v1/admin/kyc/pending
+func (s *Server) handleAdminKYCList(w http.ResponseWriter, _ *http.Request) {
+	if s.OperatorRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "KYC workflow not configured on this node")
+		return
+	}
+	pending := s.OperatorRegistry.ListPendingRequests()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":    len(pending),
+		"requests": pending,
+	})
+}
+
+// handleAdminKYCApprove approves a pending KYC request and issues a credential.
+// POST /v1/admin/kyc/approve
+// Body: {"wallet_key":"<base64>"}
+func (s *Server) handleAdminKYCApprove(w http.ResponseWriter, r *http.Request) {
+	if s.OperatorRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "KYC workflow not configured on this node")
+		return
+	}
+	var req struct {
+		WalletKey string `json:"wallet_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.WalletKey == "" {
+		writeError(w, http.StatusBadRequest, "wallet_key must not be empty")
+		return
+	}
+	att, err := s.OperatorRegistry.ApproveKYC(req.WalletKey)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	// Propagate the credential to the blockchain's credential store so it
+	// is immediately usable for transfer eligibility checks.
+	s.bc.Credentials[req.WalletKey] = att
+	writeJSON(w, http.StatusOK, map[string]any{
+		"wallet_key":     att.WalletPublicKey,
+		"investor_class": att.InvestorClass,
+		"kyc_status":     att.KYCStatus,
+		"expires_at":     att.ExpiresAt,
+	})
+}
+
+// handlePaymentWebhook receives Modulr payment-received notifications.
+// POST /v1/webhooks/payment
+//
+// When ModulrProvider is configured the HMAC-SHA256 signature in
+// X-Mod-Nonce is verified before any payload processing. When it is nil
+// (e.g. in development using MockPaymentProvider) the signature check is
+// skipped and the event is still processed.
+func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB cap
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	if s.ModulrProvider != nil {
+		sig := r.Header.Get("X-Mod-Nonce")
+		if sig == "" {
+			writeError(w, http.StatusUnauthorized, "missing X-Mod-Nonce header")
+			return
+		}
+		if !s.ModulrProvider.VerifyWebhookSignature(body, sig) {
+			writeError(w, http.StatusUnauthorized, "invalid webhook signature")
+			return
+		}
+	}
+
+	var event struct {
+		Type      string  `json:"type"`
+		Reference string  `json:"externalReference"`
+		Amount    float64 `json:"amount"`
+		Currency  string  `json:"currency"`
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid webhook payload")
+		return
+	}
+
+	if event.Type == "PAYMENT_RECEIVED" && event.Reference != "" {
+		// Errors here are intentionally swallowed — returning a non-200 to
+		// Modulr would trigger automatic retries for events that may already
+		// be processed or are not applicable (e.g. wrong reference format).
+		_ = s.bc.PaymentProvider.ConfirmPayment(event.Reference, event.Amount, event.Currency)
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
