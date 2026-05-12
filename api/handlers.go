@@ -2,11 +2,15 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"time"
+
+	"golang.org/x/crypto/sha3"
 
 	"gonetwork"
 )
@@ -26,7 +30,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	s.storeChallenge(ch)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"challenge":  ch,
-		"expires_at": time.Now().UTC().Unix() + 300,
+		"expires_at": time.Now().UTC().Unix() + 60,
 	})
 }
 
@@ -49,10 +53,14 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid wallet_key: "+err.Error())
 		return
 	}
-	sig, err := base64.StdEncoding.DecodeString(req.Signature)
+	sig, err := base64.RawURLEncoding.DecodeString(req.Signature)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid signature encoding")
-		return
+		// fall back to standard base64
+		sig, err = base64.StdEncoding.DecodeString(req.Signature)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid signature encoding")
+			return
+		}
 	}
 	if !s.consumeChallenge(req.Challenge) {
 		writeError(w, http.StatusUnauthorized, "challenge not found or expired")
@@ -97,25 +105,102 @@ func (s *Server) handleGetAsset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
-// handleCreateAsset accepts a pre-signed Asset JSON and registers it on chain.
+// handleCreateAsset creates a new tokenised asset.
 // POST /v1/assets
-// Body: Asset JSON (must include a valid IssuerSignature)
+// Body: {"name":"...","symbol":"...","asset_class":"equity","total_supply":1000000,"currency":"GBP","metadata":{}}
 func (s *Server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
-	var a gonetwork.Asset
-	if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
+	walletKey := walletFromCtx(r)
+
+	var req struct {
+		Name        string            `json:"name"`
+		Symbol      string            `json:"symbol"`
+		AssetClass  string            `json:"asset_class"`
+		TotalSupply float64           `json:"total_supply"`
+		Currency    string            `json:"currency"`
+		Metadata    map[string]string `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid asset payload")
 		return
 	}
-	if a.ID == "" {
-		writeError(w, http.StatusBadRequest, "asset ID must not be empty")
+	if req.Name == "" || req.Symbol == "" {
+		writeError(w, http.StatusBadRequest, "name and symbol are required")
 		return
 	}
-	if _, exists := s.bc.Assets[a.ID]; exists {
+	if req.TotalSupply <= 0 {
+		writeError(w, http.StatusBadRequest, "total_supply must be greater than zero")
+		return
+	}
+	if req.Currency == "" {
+		writeError(w, http.StatusBadRequest, "currency is required")
+		return
+	}
+
+	// Derive a unique, collision-resistant ID from issuer wallet + symbol + timestamp.
+	idSrc := fmt.Sprintf("%s:%s:%d", walletKey, req.Symbol, time.Now().UnixNano())
+	idHash := sha3.Sum256([]byte(idSrc))
+	assetID := hex.EncodeToString(idHash[:])
+
+	// Build AssetMetadata from the optional metadata map.
+	meta := gonetwork.AssetMetadata{}
+	if req.Metadata != nil {
+		meta.ISIN = req.Metadata["isin"]
+		meta.Jurisdiction = req.Metadata["jurisdiction"]
+		meta.CompanyName = req.Metadata["company_name"]
+		meta.DividendTerms = req.Metadata["dividend_terms"]
+		meta.LegalDocHash = req.Metadata["legal_doc_hash"]
+	}
+
+	// Map asset_class string to AssetType.
+	classMap := map[string]gonetwork.AssetType{
+		"equity":      gonetwork.AssetTypeEquity,
+		"bond":        gonetwork.AssetTypeDebt,
+		"fund":        gonetwork.AssetTypeFundUnit,
+		"real_estate": gonetwork.AssetTypeEquity,
+		"commodity":   gonetwork.AssetTypeEquity,
+		"other":       gonetwork.AssetTypeEquity,
+	}
+	assetType, ok := classMap[req.AssetClass]
+	if !ok {
+		assetType = gonetwork.AssetTypeEquity
+	}
+
+	a := &gonetwork.Asset{
+		ID:          assetID,
+		Name:        req.Name,
+		Symbol:      req.Symbol,
+		Issuer:      walletKey,
+		AssetType:   assetType,
+		TotalSupply: req.TotalSupply,
+		Currency:    req.Currency,
+		Metadata:    meta,
+		CreatedAt:   time.Now().Unix(),
+	}
+	if a.Metadata.CompanyName == "" {
+		a.Metadata.CompanyName = req.Name
+	}
+
+	if _, exists := s.bc.Assets[assetID]; exists {
 		writeError(w, http.StatusConflict, "asset already exists")
 		return
 	}
-	s.bc.Assets[a.ID] = &a
-	writeJSON(w, http.StatusCreated, &a)
+	s.bc.Assets[assetID] = a
+
+	// Create the issuer's initial holding at full supply so they can immediately
+	// place ask orders and initiate transfers to investors.
+	issuerHoldingKey := gonetwork.HoldingKey(walletKey, assetID)
+	s.bc.Holdings[issuerHoldingKey] = &gonetwork.AssetHolding{
+		AssetID:  assetID,
+		HolderID: walletKey,
+		Balance:  req.TotalSupply,
+	}
+	a.CirculatingSupply = req.TotalSupply
+
+	s.bc.SealBlock(
+		[]gonetwork.AssetTransaction{{AssetID: assetID, TxType: gonetwork.AssetTxTypeIssue}},
+		nil, nil,
+	)
+	writeJSON(w, http.StatusCreated, a)
 }
 
 // ---------------------------------------------------------------------------
@@ -175,22 +260,162 @@ func (s *Server) handleListTrades(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handlePlaceOrder accepts a pre-signed OrderTransaction JSON and queues it.
+// handlePlaceOrder creates and stores a new order on behalf of the authenticated wallet.
 // POST /v1/orders
-// Body: OrderTransaction JSON
+// Body: {"asset_id":"...","side":"buy","type":"limit","price":10.50,"quantity":100}
 func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
-	var ot gonetwork.OrderTransaction
-	if err := json.NewDecoder(r.Body).Decode(&ot); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid order transaction payload")
+	walletKey := walletFromCtx(r)
+
+	var req struct {
+		AssetID  string  `json:"asset_id"`
+		Side     string  `json:"side"` // "buy" or "sell"
+		Type     string  `json:"type"` // "limit" or "market"
+		Price    float64 `json:"price"`
+		Quantity float64 `json:"quantity"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid order payload")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"order_id": ot.Order.ID, "status": "queued"})
+	if req.AssetID == "" {
+		writeError(w, http.StatusBadRequest, "asset_id is required")
+		return
+	}
+	if _, ok := s.bc.Assets[req.AssetID]; !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if req.Quantity <= 0 {
+		writeError(w, http.StatusBadRequest, "quantity must be greater than zero")
+		return
+	}
+	if req.Type == "limit" && req.Price <= 0 {
+		writeError(w, http.StatusBadRequest, "price must be greater than zero for limit orders")
+		return
+	}
+
+	// Map "buy"/"sell" → OrderSide constants.
+	var side gonetwork.OrderSide
+	switch req.Side {
+	case "buy":
+		side = gonetwork.OrderSideBid
+	case "sell":
+		side = gonetwork.OrderSideAsk
+	default:
+		writeError(w, http.StatusBadRequest, "side must be \"buy\" or \"sell\"")
+		return
+	}
+
+	// For market orders use a highly aggressive price to ensure immediate matching.
+	price := req.Price
+	if req.Type == "market" {
+		if side == gonetwork.OrderSideBid {
+			price = 1e15 // will match any ask
+		} else {
+			price = 0.0001 // will match any bid
+		}
+	}
+
+	now := time.Now()
+	idSrc := fmt.Sprintf("%s:%s:%d", walletKey, req.AssetID, now.UnixNano())
+	idHash := sha3.Sum256([]byte(idSrc))
+	orderID := hex.EncodeToString(idHash[:])
+
+	order := &gonetwork.Order{
+		ID:       orderID,
+		AssetID:  req.AssetID,
+		Side:     side,
+		Type:     req.Type,
+		Price:    price,
+		Quantity: req.Quantity,
+		Filled:   0,
+		PlacedBy: walletKey,
+		PlacedAt: now.UnixNano(),
+		Status:   gonetwork.OrderStatusOpen,
+	}
+
+	// Get or create the order book for this asset.
+	ob, ok := s.bc.OrderBooks[req.AssetID]
+	if !ok {
+		ob = gonetwork.NewOrderBook(req.AssetID)
+		s.bc.OrderBooks[req.AssetID] = ob
+	}
+
+	// Insert directly (JWT authentication already validates the caller).
+	if side == gonetwork.OrderSideBid {
+		ob.Bids = append(ob.Bids, order)
+	} else {
+		ob.Asks = append(ob.Asks, order)
+	}
+
+	s.bc.EmitEvent(gonetwork.EventOrderPlaced, map[string]any{
+		"order_id":  order.ID,
+		"asset_id":  order.AssetID,
+		"side":      req.Side,
+		"price":     req.Price,
+		"quantity":  order.Quantity,
+		"placed_by": walletKey,
+	})
+	s.bc.SealBlock(nil, []gonetwork.OrderTransaction{{Order: *order}}, nil)
+
+	// Return the order using the same shape as handleListOrders.
+	respSide := req.Side // already "buy" or "sell"
+	orderType := req.Type
+	if orderType == "" {
+		orderType = "limit"
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":         order.ID,
+		"asset_id":   order.AssetID,
+		"side":       respSide,
+		"type":       orderType,
+		"price":      req.Price, // return original price, not market sentinel
+		"quantity":   order.Quantity,
+		"filled":     order.Filled,
+		"status":     string(order.Status),
+		"created_at": now.Unix(),
+	})
 }
 
 // handleCancelOrder marks an order for cancellation.
 // DELETE /v1/orders/{id}
 func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	walletKey := walletFromCtx(r)
+
+	var found *gonetwork.Order
+	for _, book := range s.bc.OrderBooks {
+		for _, o := range append(book.Bids, book.Asks...) {
+			if o.ID == id {
+				found = o
+				break
+			}
+		}
+		if found != nil {
+			break
+		}
+	}
+	if found == nil {
+		writeError(w, http.StatusNotFound, "order not found")
+		return
+	}
+	if found.PlacedBy != walletKey {
+		writeError(w, http.StatusForbidden, "only the order placer may cancel it")
+		return
+	}
+	if found.Status != gonetwork.OrderStatusOpen {
+		writeError(w, http.StatusConflict, "order is not open")
+		return
+	}
+	found.Status = gonetwork.OrderStatusCancelled
+
+	s.bc.EmitEvent(gonetwork.EventOrderCancelled, map[string]any{
+		"order_id": id,
+		"asset_id": found.AssetID,
+		"reason":   "cancelled_by_placer",
+	})
+	s.bc.SealBlock(nil, []gonetwork.OrderTransaction{{Order: *found, IsCancellation: true}}, nil)
+
 	writeJSON(w, http.StatusOK, map[string]string{"order_id": id, "status": "cancelled"})
 }
 
@@ -299,6 +524,10 @@ func (s *Server) handleReportHoldings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Ensure holdings is always a JSON array, never null.
+	if report.Holdings == nil {
+		report.Holdings = []gonetwork.HoldingSnapshot{}
+	}
 	data, err := report.MarshalFiDA()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to serialise report")
@@ -398,8 +627,24 @@ func (s *Server) handleKYCRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.ValidForDays <= 0 {
-		req.ValidForDays = 365
+	// Validate investor class
+	validClasses := map[gonetwork.InvestorClass]bool{
+		"retail": true, "professional": true,
+		"elective_professional": true, "eligible_counterparty": true,
+	}
+	if !validClasses[req.Class] {
+		writeError(w, http.StatusBadRequest, "invalid investor class")
+		return
+	}
+	// Validate jurisdiction is a 2-letter ISO 3166-1 alpha-2 code
+	if len(req.Jurisdiction) != 2 {
+		writeError(w, http.StatusBadRequest, "jurisdiction must be a 2-letter ISO country code")
+		return
+	}
+	// Validate valid_for_days is in an acceptable range
+	if req.ValidForDays <= 0 || req.ValidForDays > 730 {
+		writeError(w, http.StatusBadRequest, "valid_for_days must be between 1 and 730")
+		return
 	}
 	if err := s.OperatorRegistry.RequestKYC(walletKey, req.Class, req.Jurisdiction, req.ValidForDays); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
@@ -453,6 +698,16 @@ func (s *Server) handleAdminKYCApprove(w http.ResponseWriter, r *http.Request) {
 	// Propagate the credential to the blockchain's credential store so it
 	// is immediately usable for transfer eligibility checks.
 	s.bc.Credentials[req.WalletKey] = att
+
+	s.bc.EmitEvent(gonetwork.EventCredentialIssued, map[string]any{
+		"wallet_key":     att.WalletPublicKey,
+		"investor_class": att.InvestorClass,
+		"kyc_status":     att.KYCStatus,
+		"jurisdiction":   att.Jurisdiction,
+		"expires_at":     att.ExpiresAt,
+	})
+	s.bc.SealBlock(nil, nil, []gonetwork.CredentialTransaction{{Attestation: *att}})
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"wallet_key":     att.WalletPublicKey,
 		"investor_class": att.InvestorClass,
@@ -541,13 +796,15 @@ func (s *Server) handleKYCStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListOrders(w http.ResponseWriter, r *http.Request) {
 	walletKey := walletFromCtx(r)
 	type orderView struct {
-		ID      string  `json:"id"`
-		AssetID string  `json:"asset_id"`
-		Side    string  `json:"side"`
-		Price   float64 `json:"price"`
-		Volume  float64 `json:"volume"`
-		Filled  float64 `json:"filled"`
-		Status  string  `json:"status"`
+		ID        string  `json:"id"`
+		AssetID   string  `json:"asset_id"`
+		Side      string  `json:"side"`
+		Type      string  `json:"type"`
+		Price     float64 `json:"price"`
+		Quantity  float64 `json:"quantity"`
+		Filled    float64 `json:"filled"`
+		Status    string  `json:"status"`
+		CreatedAt int64   `json:"created_at"`
 	}
 	var out []orderView
 	for assetID, ob := range s.bc.OrderBooks {
@@ -560,14 +817,20 @@ func (s *Server) handleListOrders(w http.ResponseWriter, r *http.Request) {
 			if o.Side == gonetwork.OrderSideAsk {
 				side = "sell"
 			}
+			orderType := o.Type
+			if orderType == "" {
+				orderType = "limit"
+			}
 			out = append(out, orderView{
-				ID:      o.ID,
-				AssetID: assetID,
-				Side:    side,
-				Price:   o.Price,
-				Volume:  o.Quantity,
-				Filled:  o.Filled,
-				Status:  string(o.Status),
+				ID:        o.ID,
+				AssetID:   assetID,
+				Side:      side,
+				Type:      orderType,
+				Price:     o.Price,
+				Quantity:  o.Quantity,
+				Filled:    o.Filled,
+				Status:    string(o.Status),
+				CreatedAt: o.PlacedAt / 1e9, // nanoseconds → seconds
 			})
 		}
 	}
@@ -575,6 +838,226 @@ func (s *Server) handleListOrders(w http.ResponseWriter, r *http.Request) {
 		out = []orderView{}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ---------------------------------------------------------------------------
+// Issuer order management
+// ---------------------------------------------------------------------------
+
+// handleIssuerListOrders returns all open buy (bid) orders for assets issued
+// by the authenticated wallet, so the issuer can review and fill/reject them.
+// GET /v1/issuer/orders
+func (s *Server) handleIssuerListOrders(w http.ResponseWriter, r *http.Request) {
+	issuerKey := walletFromCtx(r)
+
+	type issuerOrderView struct {
+		ID        string  `json:"id"`
+		AssetID   string  `json:"asset_id"`
+		AssetName string  `json:"asset_name"`
+		Side      string  `json:"side"`
+		Type      string  `json:"type"`
+		Price     float64 `json:"price"`
+		Quantity  float64 `json:"quantity"`
+		Filled    float64 `json:"filled"`
+		Status    string  `json:"status"`
+		PlacedBy  string  `json:"placed_by"`
+		CreatedAt int64   `json:"created_at"`
+	}
+
+	var out []issuerOrderView
+	for assetID, ob := range s.bc.OrderBooks {
+		asset, ok := s.bc.Assets[assetID]
+		if !ok || asset.Issuer != issuerKey {
+			continue
+		}
+		assetName := asset.Name
+		if assetName == "" {
+			assetName = asset.Symbol
+		}
+		allOrders := append(ob.Bids, ob.Asks...)
+		for _, o := range allOrders {
+			if o.Status != gonetwork.OrderStatusOpen {
+				continue
+			}
+			side := "buy"
+			if o.Side == gonetwork.OrderSideAsk {
+				side = "sell"
+			}
+			orderType := o.Type
+			if orderType == "" {
+				orderType = "limit"
+			}
+			out = append(out, issuerOrderView{
+				ID:        o.ID,
+				AssetID:   assetID,
+				AssetName: assetName,
+				Side:      side,
+				Type:      orderType,
+				Price:     o.Price,
+				Quantity:  o.Quantity,
+				Filled:    o.Filled,
+				Status:    string(o.Status),
+				PlacedBy:  o.PlacedBy,
+				CreatedAt: o.PlacedAt / 1e9,
+			})
+		}
+	}
+	if out == nil {
+		out = []issuerOrderView{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleFillOrder marks an order as filled and credits the buyer's holding.
+// The issuer must own the asset. Filling allocates tokens from the issuer's
+// holding (or directly from circulating supply if the issuer has no holding yet).
+// POST /v1/orders/{id}/fill
+func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
+	orderID := r.PathValue("id")
+	issuerKey := walletFromCtx(r)
+
+	// Find the order across all books.
+	var found *gonetwork.Order
+	for _, book := range s.bc.OrderBooks {
+		for _, o := range append(book.Bids, book.Asks...) {
+			if o.ID == orderID {
+				found = o
+				break
+			}
+		}
+		if found != nil {
+			break
+		}
+	}
+	if found == nil {
+		writeError(w, http.StatusNotFound, "order not found")
+		return
+	}
+
+	// Verify the caller issued the asset.
+	asset, ok := s.bc.Assets[found.AssetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if asset.Issuer != issuerKey {
+		writeError(w, http.StatusForbidden, "only the asset issuer may fill orders")
+		return
+	}
+	if found.Status != gonetwork.OrderStatusOpen {
+		writeError(w, http.StatusConflict, "order is not open")
+		return
+	}
+
+	fillQty := found.Quantity - found.Filled
+
+	// Credit the buyer's holding.
+	buyerKey := gonetwork.HoldingKey(found.PlacedBy, found.AssetID)
+	if h, exists := s.bc.Holdings[buyerKey]; exists {
+		h.Balance += fillQty
+	} else {
+		s.bc.Holdings[buyerKey] = &gonetwork.AssetHolding{
+			HolderID: found.PlacedBy,
+			AssetID:  found.AssetID,
+			Balance:  fillQty,
+		}
+	}
+
+	// Deduct from issuer holding if it exists.
+	issuerHoldingKey := gonetwork.HoldingKey(issuerKey, found.AssetID)
+	if ih, exists := s.bc.Holdings[issuerHoldingKey]; exists && ih.Balance >= fillQty {
+		ih.Balance -= fillQty
+	}
+
+	// Mark filled and update asset circulating supply.
+	found.Filled = found.Quantity
+	found.Status = gonetwork.OrderStatusFilled
+	asset.CirculatingSupply += fillQty
+
+	// Record the trade.
+	tradeID := fmt.Sprintf("trade-%s", orderID[:8])
+	s.bc.Trades = append(s.bc.Trades, gonetwork.Trade{
+		ID:         tradeID,
+		AssetID:    found.AssetID,
+		BuyerID:    found.PlacedBy,
+		SellerID:   issuerKey,
+		Quantity:   fillQty,
+		Price:      found.Price,
+		ExecutedAt: time.Now().Unix(),
+		Status:     "settled",
+	})
+
+	s.bc.EmitEvent(gonetwork.EventTradeExecuted, map[string]any{
+		"trade_id":  tradeID,
+		"asset_id":  found.AssetID,
+		"buyer_id":  found.PlacedBy,
+		"seller_id": issuerKey,
+		"quantity":  fillQty,
+		"price":     found.Price,
+	})
+	s.bc.SealBlock(nil, []gonetwork.OrderTransaction{{Order: *found}}, nil)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"order_id":   orderID,
+		"trade_id":   tradeID,
+		"status":     "filled",
+		"filled_qty": fillQty,
+		"buyer":      found.PlacedBy,
+		"asset_id":   found.AssetID,
+		"settled_at": time.Now().Unix(),
+	})
+}
+
+// handleRejectOrder marks an order as cancelled by the issuer.
+// POST /v1/orders/{id}/reject
+func (s *Server) handleRejectOrder(w http.ResponseWriter, r *http.Request) {
+	orderID := r.PathValue("id")
+	issuerKey := walletFromCtx(r)
+
+	var found *gonetwork.Order
+	for _, book := range s.bc.OrderBooks {
+		for _, o := range append(book.Bids, book.Asks...) {
+			if o.ID == orderID {
+				found = o
+				break
+			}
+		}
+		if found != nil {
+			break
+		}
+	}
+	if found == nil {
+		writeError(w, http.StatusNotFound, "order not found")
+		return
+	}
+
+	asset, ok := s.bc.Assets[found.AssetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if asset.Issuer != issuerKey {
+		writeError(w, http.StatusForbidden, "only the asset issuer may reject orders")
+		return
+	}
+	if found.Status != gonetwork.OrderStatusOpen {
+		writeError(w, http.StatusConflict, "order is not open")
+		return
+	}
+
+	found.Status = gonetwork.OrderStatusCancelled
+
+	s.bc.EmitEvent(gonetwork.EventOrderCancelled, map[string]any{
+		"order_id": orderID,
+		"asset_id": found.AssetID,
+		"reason":   "rejected_by_issuer",
+	})
+	s.bc.SealBlock(nil, []gonetwork.OrderTransaction{{Order: *found, IsCancellation: true}}, nil)
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"order_id": orderID,
+		"status":   "rejected",
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -717,10 +1200,10 @@ func (s *Server) handleListCorporateActions(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleProposeCorporateAction(w http.ResponseWriter, r *http.Request) {
 	walletKey := walletFromCtx(r)
 	var req struct {
-		AssetID    string                          `json:"asset_id"`
-		ActionType gonetwork.CorporateActionType   `json:"action_type"`
-		RecordDate int64                           `json:"record_date"`
-		Parameters map[string]interface{}          `json:"parameters"`
+		AssetID    string                        `json:"asset_id"`
+		ActionType gonetwork.CorporateActionType `json:"action_type"`
+		RecordDate int64                         `json:"record_date"`
+		Parameters map[string]interface{}        `json:"parameters"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -826,4 +1309,242 @@ func (s *Server) handleApproveTrade(w http.ResponseWriter, r *http.Request) {
 	}
 	found.Status = status
 	writeJSON(w, http.StatusOK, map[string]string{"trade_id": tradeID, "status": status})
+}
+
+// ---------------------------------------------------------------------------
+// SPV management
+// ---------------------------------------------------------------------------
+
+// handleListSPV returns all SPVs that the authenticated wallet administers.
+// GET /v1/spv
+func (s *Server) handleListSPV(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	out := make([]*gonetwork.SPVWrapper, 0)
+	for _, spv := range s.bc.SPVs {
+		if spv.SPVAdminKey == walletKey {
+			out = append(out, spv)
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleCreateSPV creates a new SPVWrapper signed by the authenticated wallet.
+// POST /v1/spv
+// Body: { signed_spv: <SPVWrapper> }
+func (s *Server) handleCreateSPV(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SignedSPV *gonetwork.SPVWrapper `json:"signed_spv"`
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.SignedSPV == nil {
+		writeError(w, http.StatusBadRequest, "signed_spv is required")
+		return
+	}
+
+	pubKey, err := gonetwork.PublicKeyFromString(req.SignedSPV.SPVAdminKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid SPVAdminKey in signed_spv")
+		return
+	}
+	if !req.SignedSPV.VerifySignature(pubKey) {
+		writeError(w, http.StatusUnauthorized, "signed_spv signature verification failed")
+		return
+	}
+
+	if _, exists := s.bc.SPVs[req.SignedSPV.ID]; exists {
+		writeError(w, http.StatusConflict, "SPV with this ID already exists")
+		return
+	}
+	s.bc.SPVs[req.SignedSPV.ID] = req.SignedSPV
+	writeJSON(w, http.StatusCreated, req.SignedSPV)
+}
+
+// handleUpdateSPVNAV updates the NAV of an SPV the authenticated wallet administers.
+// POST /v1/spv/{id}/nav
+// Body: { signed_tx: <SPVTransaction> }
+func (s *Server) handleUpdateSPVNAV(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	spvID := r.PathValue("id")
+
+	var req struct {
+		SignedTx *gonetwork.SPVTransaction `json:"signed_tx"`
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.SignedTx == nil {
+		writeError(w, http.StatusBadRequest, "signed_tx is required")
+		return
+	}
+
+	spv, ok := s.bc.SPVs[spvID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "SPV not found")
+		return
+	}
+	if spv.SPVAdminKey != walletKey {
+		writeError(w, http.StatusForbidden, "only the SPV admin may update NAV")
+		return
+	}
+
+	pubKey, err := gonetwork.PublicKeyFromString(spv.SPVAdminKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "SPV has invalid admin key")
+		return
+	}
+	if !req.SignedTx.VerifySignature(pubKey) {
+		writeError(w, http.StatusUnauthorized, "signed_tx signature verification failed")
+		return
+	}
+	if req.SignedTx.Type != gonetwork.SPVTxTypeNAVUpdate {
+		writeError(w, http.StatusBadRequest, "signed_tx must be nav_update type")
+		return
+	}
+
+	spv.NAV = req.SignedTx.NewNAV
+	spv.NAVUpdatedAt = req.SignedTx.EffectiveAt
+	writeJSON(w, http.StatusOK, spv)
+}
+
+// ---------------------------------------------------------------------------
+// Prospectus Exemption endpoints
+// ---------------------------------------------------------------------------
+
+// handleRegisterExemption creates a ProspectusExemption for an asset, enabling
+// the 149-retail-investor-per-jurisdiction cap to be enforced in Validate.
+// Only the asset issuer may register an exemption; only one exemption is allowed
+// per asset (attempt to overwrite returns 409).
+//
+// POST /v1/assets/{id}/exemption
+func (s *Server) handleRegisterExemption(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	assetID := r.PathValue("id")
+
+	asset, ok := s.bc.Assets[assetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if asset.Issuer != walletKey {
+		writeError(w, http.StatusForbidden, "only the asset issuer may register an exemption")
+		return
+	}
+	if _, exists := s.bc.ProspectusExemptions[assetID]; exists {
+		writeError(w, http.StatusConflict, "exemption already registered for this asset")
+		return
+	}
+
+	var req struct {
+		Basis                    string   `json:"basis"`
+		MaxRetailPerJurisdiction int      `json:"max_retail_per_jurisdiction"`
+		MaxTicketSizeEUR         float64  `json:"max_ticket_size_eur"`
+		JurisdictionCoverage     []string `json:"jurisdiction_coverage"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid exemption payload")
+		return
+	}
+	if req.Basis == "" {
+		writeError(w, http.StatusBadRequest, "basis is required")
+		return
+	}
+	if req.MaxRetailPerJurisdiction <= 0 {
+		req.MaxRetailPerJurisdiction = 149 // EU Prospectus Regulation default
+	}
+
+	pe := gonetwork.NewProspectusExemption(
+		assetID,
+		gonetwork.ExemptionBasis(req.Basis),
+		req.MaxRetailPerJurisdiction,
+		req.JurisdictionCoverage,
+	)
+	s.bc.ProspectusExemptions[assetID] = pe
+	writeJSON(w, http.StatusCreated, pe)
+}
+
+// handleGetExemption returns the ProspectusExemption for an asset, including
+// live retail_holders_by_jurisdiction counts rebuilt at the end of each block.
+//
+// GET /v1/assets/{id}/exemption
+func (s *Server) handleGetExemption(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+	pe, ok := s.bc.ProspectusExemptions[assetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "no exemption registered for this asset")
+		return
+	}
+	writeJSON(w, http.StatusOK, pe)
+}
+
+// ---------------------------------------------------------------------------
+// Suitability Assessment endpoints
+// ---------------------------------------------------------------------------
+
+// handleSubmitSuitability records a MiFID II suitability assessment for a
+// (wallet, asset) pair. Only compliance officers (jwtAdmin middleware) should
+// call this endpoint after completing the required investor questionnaire.
+//
+// POST /v1/suitability
+func (s *Server) handleSubmitSuitability(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		WalletKey               string `json:"wallet_key"`
+		AssetID                 string `json:"asset_id"`
+		HasSufficientKnowledge  bool   `json:"has_sufficient_knowledge"`
+		HasSufficientExperience bool   `json:"has_sufficient_experience"`
+		CanAbsorbLoss           bool   `json:"can_absorb_loss"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid suitability payload")
+		return
+	}
+	if req.WalletKey == "" || req.AssetID == "" {
+		writeError(w, http.StatusBadRequest, "wallet_key and asset_id are required")
+		return
+	}
+
+	suitable := req.HasSufficientKnowledge && req.HasSufficientExperience && req.CanAbsorbLoss
+
+	sa := &gonetwork.SuitabilityAssessment{
+		WalletPublicKey:         req.WalletKey,
+		AssetID:                 req.AssetID,
+		HasSufficientKnowledge:  req.HasSufficientKnowledge,
+		HasSufficientExperience: req.HasSufficientExperience,
+		CanAbsorbLoss:           req.CanAbsorbLoss,
+		Suitable:                suitable,
+		AssessedAt:              time.Now().Unix(),
+	}
+
+	key := gonetwork.SuitabilityKey(req.WalletKey, req.AssetID)
+	s.bc.SuitabilityAssessments[key] = sa
+	writeJSON(w, http.StatusCreated, sa)
+}
+
+// handleGetSuitability returns the suitability assessment for a given
+// (walletKey, assetID) pair. Returns 404 if no assessment has been submitted.
+//
+// GET /v1/suitability/{walletKey}/{assetID}
+func (s *Server) handleGetSuitability(w http.ResponseWriter, r *http.Request) {
+	walletKey := r.PathValue("walletKey")
+	assetID := r.PathValue("assetID")
+	key := gonetwork.SuitabilityKey(walletKey, assetID)
+	sa, ok := s.bc.SuitabilityAssessments[key]
+	if !ok {
+		writeError(w, http.StatusNotFound, "no suitability assessment found")
+		return
+	}
+	writeJSON(w, http.StatusOK, sa)
 }

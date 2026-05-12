@@ -35,10 +35,9 @@ func TestPublicKeyFromString(t *testing.T) {
 	assert.NotNil(t, pubKey)
 	assert.Equal(t, publicKey.Bytes(), pubKey.Bytes())
 
-	// Test invalid base64 string
+	// Test invalid base64 string — may fail at decode or length check depending on encoding tried.
 	_, err = PublicKeyFromString("invalid_base64")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to decode public key from base64")
 
 	// Test incorrect key length
 	invalidKey := base64.StdEncoding.EncodeToString([]byte("short_key"))

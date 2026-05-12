@@ -1,11 +1,15 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,10 +47,22 @@ type rateLimiter struct {
 }
 
 func newRateLimiter() *rateLimiter {
+	readMax := 300
+	writeMax := 100
+	if v := os.Getenv("RATE_LIMIT_READ_PER_MIN"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			readMax = n
+		}
+	}
+	if v := os.Getenv("RATE_LIMIT_WRITE_PER_MIN"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			writeMax = n
+		}
+	}
 	return &rateLimiter{
 		windows:  make(map[string][]int64),
-		readMax:  100,
-		writeMax: 20,
+		readMax:  readMax,
+		writeMax: writeMax,
 	}
 }
 
@@ -88,7 +104,8 @@ func (rl *rateLimiter) allow(ip, method string) bool {
 var globalRateLimiter = newRateLimiter()
 
 // RateLimitMiddleware enforces per-IP rate limits.
-// Reads: 100 req/min. Writes: 20 req/min.
+// Defaults: reads 300 req/min, writes 100 req/min.
+// Override with RATE_LIMIT_READ_PER_MIN / RATE_LIMIT_WRITE_PER_MIN env vars.
 func RateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -153,6 +170,16 @@ type responseRecorder struct {
 func (rr *responseRecorder) WriteHeader(code int) {
 	rr.statusCode = code
 	rr.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker so that WebSocket upgrades work through
+// the logging middleware. Without this the gorilla upgrader returns 500.
+func (rr *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := rr.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("logging middleware: ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
 }
 
 // LoggingMiddleware logs each request as structured JSON: method, path, status, duration.

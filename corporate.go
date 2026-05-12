@@ -52,26 +52,26 @@ const (
 // It is created automatically when a transfer triggers a ROFR, or when an
 // issuer initiates a drag-along / tag-along event.
 type CorporateAction struct {
-	ID                string
-	AssetID           string
-	Type              CorporateActionType
-	Status            CorporateActionStatus
-	ProposerKey       string            // base64 Ed25519 public key of the wallet initiating
-	TargetTransfer    *AssetTransaction // the transfer under evaluation (nil for drag/tag)
-	PricePerUnit      float64
-	TotalUnits        float64
-	DeadlineAt        int64           // Unix timestamp — action lapses after this
-	Responses         map[string]bool // holderKey → exercised (true) / waived (false)
-	RequiredThreshold float64         // 0-1 fraction of circulating supply
-	ProposerSignature []byte
+	ID                string                `json:"id"`
+	AssetID           string                `json:"asset_id"`
+	Type              CorporateActionType   `json:"action_type"`
+	Status            CorporateActionStatus `json:"status"`
+	ProposerKey       string                `json:"proposer_key"` // base64 Ed25519 public key of the wallet initiating
+	TargetTransfer    *AssetTransaction     `json:"target_transfer,omitempty"`
+	PricePerUnit      float64               `json:"price_per_unit,omitempty"`
+	TotalUnits        float64               `json:"total_units,omitempty"`
+	DeadlineAt        int64                 `json:"record_date"`         // Unix timestamp
+	Responses         map[string]bool       `json:"responses,omitempty"` // holderKey → exercised
+	RequiredThreshold float64               `json:"required_threshold"`
+	ProposerSignature []byte                `json:"-"`
 }
 
 // CorporateActionResponse is broadcast by a holder exercising or waiving a right.
 type CorporateActionResponse struct {
-	ActionID  string
-	HolderKey string // base64 Ed25519 public key of the responding holder
-	Exercised bool   // true = exercising; false = waiving
-	Signature []byte // Sign(SHA3-256(ActionID || HolderKey || exercisedByte))
+	ActionID  string `json:"action_id"`
+	HolderKey string `json:"holder_key"` // base64 Ed25519 public key of the responding holder
+	Exercised bool   `json:"exercised"`  // true = exercising; false = waiving
+	Signature []byte `json:"-"`
 }
 
 // ---------------------------------------------------------------------------

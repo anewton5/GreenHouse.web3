@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GreenHouse Dev Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 400: '#34d399', 500: '#10b981', 600: '#059669' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'Inter', 'ui-sans-serif', system-ui, sans-serif; }
+    .event-feed { height: 420px; overflow-y: auto; scroll-behavior: smooth; }
+    .event-feed::-webkit-scrollbar { width: 4px; }
+    .event-feed::-webkit-scrollbar-track { background: #1e293b; }
+    .event-feed::-webkit-scrollbar-thumb { background: #475569; border-radius: 2px; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .pulse { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+    .fade-in { animation: fadeIn 0.3s ease-in; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
+    .mini-chart { height: 48px; }
+    .truncate-key { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    pre { white-space: pre-wrap; word-break: break-all; }
+    .stat-card:hover { transform: translateY(-1px); transition: transform 0.15s; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+  <!-- ─── Header ─────────────────────────────────────────────────────── -->
+  <header class="bg-slate-900 border-b border-slate-800 px-6 py-3 flex items-center justify-between sticky top-0 z-50">
+    <div class="flex items-center gap-3">
+      <span class="text-2xl">🌱</span>
+      <div>
+        <h1 class="text-lg font-bold text-white leading-none">GreenHouse</h1>
+        <p class="text-xs text-slate-400 leading-none mt-0.5">Development Dashboard</p>
+      </div>
+      <span id="dev-badge" class="ml-3 px-2 py-0.5 rounded text-xs font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30">DEV MODE</span>
+    </div>
+
+    <div class="flex items-center gap-6 text-sm">
+      <!-- API status -->
+      <div class="flex items-center gap-1.5">
+        <span id="api-dot" class="w-2 h-2 rounded-full bg-slate-600"></span>
+        <span class="text-slate-400">API</span>
+        <span id="api-status" class="text-slate-500">–</span>
+      </div>
+      <!-- WS status -->
+      <div class="flex items-center gap-1.5">
+        <span id="ws-dot" class="w-2 h-2 rounded-full bg-slate-600"></span>
+        <span class="text-slate-400">Stream</span>
+        <span id="ws-status" class="text-slate-500">–</span>
+      </div>
+      <!-- Events/min -->
+      <div class="text-slate-400">
+        <span id="events-rate" class="text-white font-mono">0</span>
+        <span class="ml-1">ev/min</span>
+      </div>
+      <!-- Last update -->
+      <div class="text-slate-500 text-xs font-mono" id="last-update">–</div>
+      <!-- API base URL config -->
+      <div class="flex items-center gap-1">
+        <input id="api-base" value="http://localhost:8080"
+          class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-300 w-44 focus:outline-none focus:border-brand-500"
+          placeholder="http://localhost:8080" />
+        <button onclick="reconnect()"
+          class="bg-brand-600 hover:bg-brand-500 text-white text-xs px-2 py-1 rounded transition-colors">
+          Connect
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ─── KPI cards ───────────────────────────────────────────────────── -->
+  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 px-6 py-4">
+    <div class="stat-card bg-slate-900 border border-slate-800 rounded-xl p-4 cursor-default">
+      <p class="text-slate-400 text-xs uppercase tracking-wider mb-1">Blocks</p>
+      <p id="kpi-blocks" class="text-2xl font-bold text-white font-mono">–</p>
+      <p class="text-xs text-slate-500 mt-1">on chain</p>
+    </div>
+    <div class="stat-card bg-slate-900 border border-slate-800 rounded-xl p-4 cursor-default">
+      <p class="text-slate-400 text-xs uppercase tracking-wider mb-1">Assets</p>
+      <p id="kpi-assets" class="text-2xl font-bold text-brand-400 font-mono">–</p>
+      <p class="text-xs text-slate-500 mt-1">tokenised</p>
+    </div>
+    <div class="stat-card bg-slate-900 border border-slate-800 rounded-xl p-4 cursor-default">
+      <p class="text-slate-400 text-xs uppercase tracking-wider mb-1">Trades</p>
+      <p id="kpi-trades" class="text-2xl font-bold text-emerald-400 font-mono">–</p>
+      <p class="text-xs text-slate-500 mt-1">executed</p>
+    </div>
+    <div class="stat-card bg-slate-900 border border-slate-800 rounded-xl p-4 cursor-default">
+      <p class="text-slate-400 text-xs uppercase tracking-wider mb-1">Open Orders</p>
+      <p id="kpi-orders" class="text-2xl font-bold text-violet-400 font-mono">–</p>
+      <p class="text-xs text-slate-500 mt-1"><span id="kpi-bids">–</span> bids / <span id="kpi-asks">–</span> asks</p>
+    </div>
+    <div class="stat-card bg-slate-900 border border-slate-800 rounded-xl p-4 cursor-default">
+      <p class="text-slate-400 text-xs uppercase tracking-wider mb-1">Credentials</p>
+      <p id="kpi-credentials" class="text-2xl font-bold text-cyan-400 font-mono">–</p>
+      <p class="text-xs text-slate-500 mt-1">KYC issued</p>
+    </div>
+    <div class="stat-card bg-slate-900 border border-slate-800 rounded-xl p-4 cursor-default">
+      <p class="text-slate-400 text-xs uppercase tracking-wider mb-1">Events</p>
+      <p id="kpi-events" class="text-2xl font-bold text-orange-400 font-mono">0</p>
+      <p class="text-xs text-slate-500 mt-1">total received</p>
+    </div>
+  </div>
+
+  <!-- ─── Main content ────────────────────────────────────────────────── -->
+  <div class="px-6 pb-6 grid grid-cols-1 xl:grid-cols-2 gap-4">
+
+    <!-- LEFT: Live event stream -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl flex flex-col">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+        <div class="flex items-center gap-2">
+          <span id="stream-pulse" class="w-2 h-2 rounded-full bg-slate-600"></span>
+          <h2 class="font-semibold text-sm text-white">Live Event Stream</h2>
+        </div>
+        <div class="flex items-center gap-2">
+          <!-- Filter buttons -->
+          <div class="flex gap-1 text-xs" id="event-filters">
+            <button data-type="all" onclick="setFilter('all',this)"
+              class="filter-btn active px-2 py-0.5 rounded border border-slate-700 bg-slate-700 text-white">All</button>
+            <button data-type="block_finalised" onclick="setFilter('block_finalised',this)"
+              class="filter-btn px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white">Block</button>
+            <button data-type="trade_executed" onclick="setFilter('trade_executed',this)"
+              class="filter-btn px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white">Trade</button>
+            <button data-type="order_placed" onclick="setFilter('order_placed',this)"
+              class="filter-btn px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white">Order</button>
+            <button data-type="payment_confirmed" onclick="setFilter('payment_confirmed',this)"
+              class="filter-btn px-2 py-0.5 rounded border border-slate-700 text-slate-400 hover:text-white">Payment</button>
+          </div>
+          <button onclick="clearEvents()"
+            class="text-xs text-slate-500 hover:text-red-400 transition-colors ml-1">Clear</button>
+          <label class="flex items-center gap-1 text-xs text-slate-400 cursor-pointer select-none">
+            <input type="checkbox" id="auto-scroll" checked class="rounded" />
+            Auto-scroll
+          </label>
+        </div>
+      </div>
+      <div id="event-feed" class="event-feed p-3 space-y-1 flex-1 font-mono text-xs">
+        <p class="text-slate-600 text-center pt-6">Waiting for events…</p>
+      </div>
+    </div>
+
+    <!-- RIGHT: State panels (tabbed) -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl flex flex-col">
+      <!-- Tabs -->
+      <div class="flex border-b border-slate-800 overflow-x-auto">
+        <button onclick="showTab('assets')" id="tab-assets"
+          class="tab-btn active text-sm px-4 py-3 font-medium border-b-2 border-brand-500 text-brand-400 whitespace-nowrap">
+          Assets
+        </button>
+        <button onclick="showTab('orderbook')" id="tab-orderbook"
+          class="tab-btn text-sm px-4 py-3 font-medium border-b-2 border-transparent text-slate-400 hover:text-white whitespace-nowrap">
+          Order Books
+        </button>
+        <button onclick="showTab('trades')" id="tab-trades"
+          class="tab-btn text-sm px-4 py-3 font-medium border-b-2 border-transparent text-slate-400 hover:text-white whitespace-nowrap">
+          Trades
+        </button>
+        <button onclick="showTab('blocks')" id="tab-blocks"
+          class="tab-btn text-sm px-4 py-3 font-medium border-b-2 border-transparent text-slate-400 hover:text-white whitespace-nowrap">
+          Blocks
+        </button>
+        <button onclick="showTab('kyc')" id="tab-kyc"
+          class="tab-btn text-sm px-4 py-3 font-medium border-b-2 border-transparent text-slate-400 hover:text-white whitespace-nowrap">
+          KYC
+        </button>
+        <button onclick="showTab('deals')" id="tab-deals"
+          class="tab-btn text-sm px-4 py-3 font-medium border-b-2 border-transparent text-slate-400 hover:text-white whitespace-nowrap">
+          Deals
+        </button>
+      </div>
+
+      <!-- Panel content wrapper (scrollable) -->
+      <div class="flex-1 overflow-y-auto" style="max-height:420px;">
+
+        <!-- Assets tab -->
+        <div id="tab-content-assets" class="tab-content active p-4">
+          <div id="assets-table">
+            <p class="text-slate-600 text-sm text-center py-8">No assets yet</p>
+          </div>
+        </div>
+
+        <!-- Order Books tab -->
+        <div id="tab-content-orderbook" class="tab-content p-4">
+          <div id="orderbook-select-row" class="mb-3 flex items-center gap-2">
+            <label class="text-xs text-slate-400">Asset:</label>
+            <select id="ob-asset-select" onchange="renderOrderBook()"
+              class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+              <option value="">— select asset —</option>
+            </select>
+          </div>
+          <div id="orderbook-content">
+            <p class="text-slate-600 text-sm text-center py-8">No order books yet</p>
+          </div>
+        </div>
+
+        <!-- Trades tab -->
+        <div id="tab-content-trades" class="tab-content p-4">
+          <div id="trades-table">
+            <p class="text-slate-600 text-sm text-center py-8">No trades yet</p>
+          </div>
+        </div>
+
+        <!-- Blocks tab -->
+        <div id="tab-content-blocks" class="tab-content p-4">
+          <div id="blocks-table">
+            <p class="text-slate-600 text-sm text-center py-8">No blocks yet</p>
+          </div>
+        </div>
+
+        <!-- KYC tab -->
+        <div id="tab-content-kyc" class="tab-content p-4">
+          <div id="kyc-table">
+            <p class="text-slate-600 text-sm text-center py-8">No credentials yet</p>
+          </div>
+        </div>
+
+        <!-- Deals tab -->
+        <div id="tab-content-deals" class="tab-content p-4">
+          <div id="deals-table">
+            <p class="text-slate-600 text-sm text-center py-8">No deals yet</p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Bottom row ──────────────────────────────────────────────────── -->
+  <div class="px-6 pb-6 grid grid-cols-1 xl:grid-cols-3 gap-4">
+
+    <!-- Event type breakdown -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <h3 class="text-sm font-semibold text-white mb-3">Event Breakdown</h3>
+      <div id="event-breakdown" class="space-y-2">
+        <p class="text-slate-600 text-xs text-center py-4">No events yet</p>
+      </div>
+    </div>
+
+    <!-- Activity map -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <h3 class="text-sm font-semibold text-white mb-3">Platform Interaction Map</h3>
+      <div class="space-y-3 text-sm">
+        <div class="flex items-center justify-between p-2 rounded-lg bg-slate-800/50">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-violet-400"></span>
+            <span class="text-slate-300">Investor Portal</span>
+            <span class="text-xs text-slate-500">:3000</span>
+          </div>
+          <div class="text-xs font-mono text-slate-400">
+            <span id="portal-investor-orders">0</span> orders
+          </div>
+        </div>
+        <div class="flex items-center justify-between text-slate-500 text-xs text-center px-4">
+          <span class="text-slate-600">↕ REST + WebSocket</span>
+          <span class="text-slate-600">↕ REST + WebSocket</span>
+        </div>
+        <div class="flex items-center justify-center p-3 rounded-lg bg-brand-500/10 border border-brand-500/20">
+          <div class="text-center">
+            <span class="text-brand-400 font-semibold text-sm">GreenHouse API</span>
+            <p class="text-xs text-slate-500 mt-0.5">:8080 · Go · dBFT</p>
+          </div>
+        </div>
+        <div class="flex items-center justify-between p-2 rounded-lg bg-slate-800/50">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+            <span class="text-slate-300">Issuer Portal</span>
+            <span class="text-xs text-slate-500">:3001</span>
+          </div>
+          <div class="text-xs font-mono text-slate-400">
+            <span id="portal-issuer-assets">0</span> assets
+          </div>
+        </div>
+        <div class="flex items-center justify-between text-slate-500 text-xs text-center px-4">
+          <span class="text-slate-600">↓ P2P / libp2p</span>
+          <span class="text-slate-600">↓ Modulr / Onfido</span>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div class="flex items-center justify-center p-2 rounded-lg bg-slate-800/50">
+            <div class="text-center">
+              <span class="text-slate-400 text-xs font-semibold">Blockchain</span>
+              <p class="text-xs text-slate-600 mt-0.5"><span id="map-blocks">0</span> blocks</p>
+            </div>
+          </div>
+          <div class="flex items-center justify-center p-2 rounded-lg bg-slate-800/50">
+            <div class="text-center">
+              <span class="text-slate-400 text-xs font-semibold">Payments</span>
+              <p class="text-xs text-slate-600 mt-0.5"><span id="map-payments">0</span> pending</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Raw event inspector -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col">
+      <h3 class="text-sm font-semibold text-white mb-3">Last Event · Raw Payload</h3>
+      <pre id="raw-inspector" class="flex-1 bg-slate-950 rounded-lg p-3 text-xs text-slate-400 overflow-auto" style="min-height:120px; max-height:200px;">
+{
+  "type": "–",
+  "timestamp": –,
+  "payload": {}
+}</pre>
+      <div class="mt-2 flex gap-2">
+        <button onclick="copyRaw()"
+          class="text-xs text-slate-500 hover:text-white transition-colors border border-slate-700 rounded px-2 py-1">
+          Copy JSON
+        </button>
+        <button onclick="openApiDocs()"
+          class="text-xs text-slate-500 hover:text-white transition-colors border border-slate-700 rounded px-2 py-1">
+          API Docs →
+        </button>
+        <button onclick="refreshState()"
+          class="ml-auto text-xs bg-brand-600 hover:bg-brand-500 text-white rounded px-2 py-1 transition-colors">
+          Refresh State
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── JavaScript ───────────────────────────────────────────────────── -->
+  <script>
+    // ── State ────────────────────────────────────────────────────────────
+    let ws = null
+    let state = {}
+    let allEvents = []
+    let eventCounts = {}
+    let totalEventCount = 0
+    let activeFilter = 'all'
+    let eventTimestamps = [] // for rate calculation
+    let pollInterval = null
+    let activeTab = 'assets'
+    let lastRawEvent = null
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+    function apiBase() {
+      return document.getElementById('api-base').value.replace(/\/$/, '')
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '–'
+      const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts)
+      return d.toLocaleTimeString('en-GB', { hour12: false })
+    }
+
+    function fmtDate(ts) {
+      if (!ts) return '–'
+      const d = new Date(ts * 1000)
+      return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }) + ' ' + d.toLocaleTimeString('en-GB', { hour12: false })
+    }
+
+    function shortKey(key) {
+      if (!key || key.length < 12) return key || '–'
+      return key.slice(0, 8) + '…' + key.slice(-4)
+    }
+
+    function escHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    }
+
+    // ── Event type config ────────────────────────────────────────────────
+    const EVENT_STYLES = {
+      block_finalised:   { color: 'bg-blue-500/20 text-blue-300 border-blue-500/30',   icon: '⬡', label: 'BLOCK' },
+      order_placed:      { color: 'bg-violet-500/20 text-violet-300 border-violet-500/30', icon: '📋', label: 'ORDER+' },
+      order_cancelled:   { color: 'bg-orange-500/20 text-orange-300 border-orange-500/30', icon: '✕', label: 'ORDER×' },
+      trade_executed:    { color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30', icon: '⇄', label: 'TRADE' },
+      payment_confirmed: { color: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30', icon: '£', label: 'PAYMENT' },
+      credential_issued: { color: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',   icon: '✓', label: 'KYC' },
+    }
+
+    function eventStyle(type) {
+      return EVENT_STYLES[type] || { color: 'bg-slate-700 text-slate-300 border-slate-600', icon: '·', label: type.toUpperCase() }
+    }
+
+    function eventSummary(type, payload) {
+      try {
+        const p = typeof payload === 'string' ? JSON.parse(payload) : payload
+        switch (type) {
+          case 'block_finalised':
+            return `Block #${p.index ?? p.block_index ?? '?'} · ${(p.tx_count ?? 0) + (p.asset_tx_count ?? 0) + (p.order_tx_count ?? 0)} txns · ${shortKey(p.hash)}`
+          case 'order_placed':
+            return `${p.side?.toUpperCase() ?? '?'} ${p.quantity ?? '?'} ${p.asset_id ? shortKey(p.asset_id) : ''} @ ${p.price ? '£' + Number(p.price).toFixed(2) : 'market'}`
+          case 'order_cancelled':
+            return `Order ${shortKey(p.order_id ?? p.id)} cancelled`
+          case 'trade_executed':
+            return `${p.quantity ?? '?'} units @ £${Number(p.price ?? 0).toFixed(2)} · ${shortKey(p.asset_id)}`
+          case 'payment_confirmed':
+            return `£${Number(p.amount ?? 0).toFixed(2)} confirmed · ref ${shortKey(p.reference ?? p.trade_id)}`
+          case 'credential_issued':
+            return `KYC approved · ${shortKey(p.holder_id ?? p.wallet_key)} · ${p.investor_class ?? p.class ?? ''}`
+          default:
+            return JSON.stringify(p).slice(0, 80)
+        }
+      } catch {
+        return ''
+      }
+    }
+
+    // ── WebSocket ────────────────────────────────────────────────────────
+    function connectWS() {
+      const wsUrl = apiBase().replace(/^http/, 'ws') + '/v1/dev/stream'
+      setWsStatus('connecting')
+
+      ws = new WebSocket(wsUrl)
+
+      ws.onopen = () => {
+        setWsStatus('connected')
+      }
+
+      ws.onmessage = (e) => {
+        try {
+          const event = JSON.parse(e.data)
+          handleEvent(event)
+        } catch {}
+      }
+
+      ws.onclose = () => {
+        setWsStatus('disconnected')
+        // Reconnect after 3s
+        setTimeout(connectWS, 3000)
+      }
+
+      ws.onerror = () => {
+        setWsStatus('error')
+        ws.close()
+      }
+    }
+
+    function setWsStatus(status) {
+      const dot = document.getElementById('ws-dot')
+      const label = document.getElementById('ws-status')
+      const pulse = document.getElementById('stream-pulse')
+      const states = {
+        connecting:   { dot: 'bg-yellow-400', label: 'connecting', pulse: 'bg-yellow-400' },
+        connected:    { dot: 'bg-brand-500 pulse', label: 'connected', pulse: 'bg-brand-500 pulse' },
+        disconnected: { dot: 'bg-slate-600', label: 'offline', pulse: 'bg-slate-600' },
+        error:        { dot: 'bg-red-500', label: 'error', pulse: 'bg-red-500' },
+      }
+      const s = states[status] || states.disconnected
+      dot.className = `w-2 h-2 rounded-full ${s.dot}`
+      label.textContent = s.label
+      label.className = status === 'connected' ? 'text-brand-400' : 'text-slate-500'
+      pulse.className = `w-2 h-2 rounded-full ${s.pulse}`
+    }
+
+    function setApiStatus(ok, version) {
+      const dot = document.getElementById('api-dot')
+      const label = document.getElementById('api-status')
+      if (ok) {
+        dot.className = 'w-2 h-2 rounded-full bg-brand-500'
+        label.textContent = version || 'online'
+        label.className = 'text-brand-400'
+      } else {
+        dot.className = 'w-2 h-2 rounded-full bg-red-500'
+        label.textContent = 'offline'
+        label.className = 'text-red-400'
+      }
+    }
+
+    // ── Handle incoming event ────────────────────────────────────────────
+    function handleEvent(event) {
+      totalEventCount++
+      allEvents.push(event)
+      lastRawEvent = event
+
+      // Rate tracking
+      const now = Date.now()
+      eventTimestamps.push(now)
+      eventTimestamps = eventTimestamps.filter(t => now - t < 60000)
+
+      // Count by type
+      eventCounts[event.type] = (eventCounts[event.type] || 0) + 1
+
+      // Update KPI
+      document.getElementById('kpi-events').textContent = totalEventCount
+      document.getElementById('events-rate').textContent = eventTimestamps.length
+
+      // Update last update time
+      document.getElementById('last-update').textContent = fmtTime(event.timestamp)
+
+      // Update raw inspector
+      document.getElementById('raw-inspector').textContent = JSON.stringify(event, null, 2)
+
+      // Add to feed
+      appendEventToFeed(event)
+
+      // Update breakdown
+      renderEventBreakdown()
+    }
+
+    function appendEventToFeed(event) {
+      if (activeFilter !== 'all' && event.type !== activeFilter) return
+
+      const feed = document.getElementById('event-feed')
+
+      // Remove placeholder
+      const placeholder = feed.querySelector('p.text-slate-600')
+      if (placeholder) placeholder.remove()
+
+      const s = eventStyle(event.type)
+      const summary = eventSummary(event.type, event.payload)
+
+      const div = document.createElement('div')
+      div.className = `flex items-start gap-2 px-2 py-1.5 rounded hover:bg-slate-800/50 fade-in`
+      div.innerHTML = `
+        <span class="text-slate-600 shrink-0 w-16 text-right">${fmtTime(event.timestamp)}</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold border ${s.color} shrink-0 w-20 text-center">${s.label}</span>
+        <span class="text-slate-300 truncate">${escHtml(summary)}</span>
+      `
+      div.title = JSON.stringify(event, null, 2)
+      div.onclick = () => {
+        document.getElementById('raw-inspector').textContent = JSON.stringify(event, null, 2)
+      }
+
+      feed.insertBefore(div, feed.firstChild)
+
+      // Limit DOM nodes
+      while (feed.children.length > 200) {
+        feed.removeChild(feed.lastChild)
+      }
+
+      const autoScroll = document.getElementById('auto-scroll').checked
+      if (autoScroll) feed.scrollTop = 0
+    }
+
+    function clearEvents() {
+      allEvents = []
+      eventCounts = {}
+      totalEventCount = 0
+      document.getElementById('event-feed').innerHTML = '<p class="text-slate-600 text-center pt-6">Cleared</p>'
+      document.getElementById('kpi-events').textContent = '0'
+      renderEventBreakdown()
+    }
+
+    function setFilter(type, btn) {
+      activeFilter = type
+      document.querySelectorAll('.filter-btn').forEach(b => {
+        b.classList.remove('active', 'bg-slate-700', 'text-white')
+        b.classList.add('text-slate-400')
+      })
+      btn.classList.add('active', 'bg-slate-700', 'text-white')
+      btn.classList.remove('text-slate-400')
+
+      // Re-render feed with filtered events
+      const feed = document.getElementById('event-feed')
+      feed.innerHTML = ''
+      const filtered = type === 'all' ? allEvents : allEvents.filter(e => e.type === type)
+      if (filtered.length === 0) {
+        feed.innerHTML = '<p class="text-slate-600 text-center pt-6">No events match filter</p>'
+        return
+      }
+      // Render most recent first
+      ;[...filtered].reverse().forEach(e => appendEventToFeedDirect(e))
+    }
+
+    function appendEventToFeedDirect(event) {
+      const feed = document.getElementById('event-feed')
+      const s = eventStyle(event.type)
+      const summary = eventSummary(event.type, event.payload)
+      const div = document.createElement('div')
+      div.className = `flex items-start gap-2 px-2 py-1.5 rounded hover:bg-slate-800/50`
+      div.innerHTML = `
+        <span class="text-slate-600 shrink-0 w-16 text-right">${fmtTime(event.timestamp)}</span>
+        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold border ${s.color} shrink-0 w-20 text-center">${s.label}</span>
+        <span class="text-slate-300 truncate">${escHtml(summary)}</span>
+      `
+      div.onclick = () => {
+        document.getElementById('raw-inspector').textContent = JSON.stringify(event, null, 2)
+      }
+      feed.appendChild(div)
+    }
+
+    // ── Event breakdown bar chart ─────────────────────────────────────────
+    function renderEventBreakdown() {
+      const el = document.getElementById('event-breakdown')
+      const types = Object.keys(EVENT_STYLES)
+      const total = Object.values(eventCounts).reduce((a, b) => a + b, 0)
+      if (total === 0) {
+        el.innerHTML = '<p class="text-slate-600 text-xs text-center py-4">No events yet</p>'
+        return
+      }
+      el.innerHTML = types.map(type => {
+        const count = eventCounts[type] || 0
+        const pct = total > 0 ? Math.round((count / total) * 100) : 0
+        const s = eventStyle(type)
+        return `
+          <div>
+            <div class="flex justify-between text-xs mb-1">
+              <span class="text-slate-400">${type.replace(/_/g, ' ')}</span>
+              <span class="font-mono text-slate-300">${count}</span>
+            </div>
+            <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full rounded-full transition-all duration-300 ${barColor(type)}" style="width:${pct}%"></div>
+            </div>
+          </div>`
+      }).join('')
+    }
+
+    function barColor(type) {
+      const map = {
+        block_finalised: 'bg-blue-500',
+        order_placed: 'bg-violet-500',
+        order_cancelled: 'bg-orange-500',
+        trade_executed: 'bg-emerald-500',
+        payment_confirmed: 'bg-yellow-500',
+        credential_issued: 'bg-cyan-500',
+      }
+      return map[type] || 'bg-slate-500'
+    }
+
+    // ── Poll state ────────────────────────────────────────────────────────
+    async function fetchHealth() {
+      try {
+        const r = await fetch(apiBase() + '/v1/health')
+        if (r.ok) {
+          const data = await r.json()
+          setApiStatus(true, `v${data.version || '?'}`)
+        } else {
+          setApiStatus(false)
+        }
+      } catch {
+        setApiStatus(false)
+      }
+    }
+
+    async function fetchState() {
+      try {
+        const r = await fetch(apiBase() + '/v1/dev/state')
+        if (!r.ok) return
+        state = await r.json()
+        applyState()
+      } catch (e) {
+        console.error('fetchState error:', e)
+      }
+    }
+
+    function applyState() {
+      // KPI cards
+      setText('kpi-blocks', state.block_count ?? 0)
+      setText('kpi-assets', state.asset_count ?? 0)
+      setText('kpi-trades', state.trade_count ?? 0)
+      const openOrders = (state.open_bid_count ?? 0) + (state.open_ask_count ?? 0)
+      setText('kpi-orders', openOrders)
+      setText('kpi-bids', state.open_bid_count ?? 0)
+      setText('kpi-asks', state.open_ask_count ?? 0)
+      setText('kpi-credentials', state.credential_count ?? 0)
+
+      // Interaction map
+      setText('map-blocks', state.block_count ?? 0)
+      setText('map-payments', (state.pending_payments ?? []).length)
+      setText('portal-issuer-assets', state.asset_count ?? 0)
+      setText('portal-investor-orders', openOrders)
+
+      // Update last update
+      if (state.timestamp) {
+        document.getElementById('last-update').textContent = fmtTime(state.timestamp)
+      }
+
+      // Render active tab
+      renderActiveTab()
+    }
+
+    function setText(id, val) {
+      const el = document.getElementById(id)
+      if (el) el.textContent = val
+    }
+
+    // ── Tab rendering ──────────────────────────────────────────────────────
+    function showTab(name) {
+      activeTab = name
+      document.querySelectorAll('.tab-btn').forEach(b => {
+        b.classList.remove('border-brand-500', 'text-brand-400')
+        b.classList.add('border-transparent', 'text-slate-400')
+      })
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'))
+
+      const btn = document.getElementById('tab-' + name)
+      const content = document.getElementById('tab-content-' + name)
+      if (btn) { btn.classList.add('border-brand-500', 'text-brand-400'); btn.classList.remove('border-transparent', 'text-slate-400') }
+      if (content) content.classList.add('active')
+
+      renderActiveTab()
+    }
+
+    function renderActiveTab() {
+      switch (activeTab) {
+        case 'assets':    renderAssets(); break
+        case 'orderbook': renderOrderBookSelector(); break
+        case 'trades':    renderTrades(); break
+        case 'blocks':    renderBlocks(); break
+        case 'kyc':       renderKYC(); break
+        case 'deals':     renderDeals(); break
+      }
+    }
+
+    function tableWrap(html) {
+      return `<div class="overflow-x-auto"><table class="w-full text-xs">${html}</table></div>`
+    }
+
+    function th(label) {
+      return `<th class="text-left text-slate-500 font-medium pb-2 pr-4">${label}</th>`
+    }
+
+    function emptyMsg(msg) {
+      return `<p class="text-slate-600 text-sm text-center py-8">${msg}</p>`
+    }
+
+    // Assets
+    function renderAssets() {
+      const el = document.getElementById('assets-table')
+      const assets = state.assets || []
+      if (!assets.length) { el.innerHTML = emptyMsg('No assets yet'); return }
+      let html = `<thead><tr>${th('Symbol')}${th('Name')}${th('Type')}${th('Supply')}${th('Currency')}${th('Issuer')}</tr></thead><tbody>`
+      assets.forEach(a => {
+        html += `<tr class="border-t border-slate-800 hover:bg-slate-800/30">
+          <td class="py-1.5 pr-4 font-semibold text-brand-400">${escHtml(a.symbol ?? '–')}</td>
+          <td class="py-1.5 pr-4 text-slate-300">${escHtml(a.name ?? '–')}</td>
+          <td class="py-1.5 pr-4 text-slate-400">${escHtml(a.asset_type ?? a.AssetType ?? '–')}</td>
+          <td class="py-1.5 pr-4 font-mono text-slate-300">${Number(a.total_supply ?? a.TotalSupply ?? 0).toLocaleString()}</td>
+          <td class="py-1.5 pr-4 text-slate-400">${escHtml(a.currency ?? a.Currency ?? '–')}</td>
+          <td class="py-1.5 text-slate-500 truncate-key" title="${escHtml(a.issuer ?? a.Issuer ?? '')}">${shortKey(a.issuer ?? a.Issuer)}</td>
+        </tr>`
+      })
+      html += '</tbody>'
+      el.innerHTML = tableWrap(html)
+    }
+
+    // Order book selector + render
+    function renderOrderBookSelector() {
+      const books = state.order_books || []
+      const sel = document.getElementById('ob-asset-select')
+      const prev = sel.value
+      sel.innerHTML = '<option value="">— select asset —</option>'
+      books.forEach(ob => {
+        const opt = document.createElement('option')
+        opt.value = ob.asset_id
+        const asset = (state.assets || []).find(a => (a.id ?? a.ID) === ob.asset_id)
+        opt.textContent = asset ? `${asset.symbol} (${ob.bid_count} bids / ${ob.ask_count} asks)` : shortKey(ob.asset_id)
+        sel.appendChild(opt)
+      })
+      if (prev) sel.value = prev
+      renderOrderBook()
+    }
+
+    function renderOrderBook() {
+      const el = document.getElementById('orderbook-content')
+      const assetID = document.getElementById('ob-asset-select').value
+      if (!assetID) { el.innerHTML = emptyMsg('Select an asset to view its order book'); return }
+
+      const books = state.order_books || []
+      const ob = books.find(b => b.asset_id === assetID)
+      if (!ob) { el.innerHTML = emptyMsg('No order book for this asset'); return }
+
+      const bids = (ob.bids || []).filter(o => String(o.Status ?? o.status) === 'open')
+      const asks = (ob.asks || []).filter(o => String(o.Status ?? o.status) === 'open')
+
+      let html = '<div class="grid grid-cols-2 gap-3">'
+
+      // Bids
+      html += '<div>'
+      html += '<p class="text-xs font-semibold text-emerald-400 mb-2">Bids (Buy)</p>'
+      if (bids.length === 0) {
+        html += '<p class="text-slate-600 text-xs">No open bids</p>'
+      } else {
+        html += `<table class="w-full text-xs"><thead><tr>${th('Price')}${th('Qty')}${th('Filled')}</tr></thead><tbody>`
+        bids.sort((a, b) => (b.Price ?? b.price ?? 0) - (a.Price ?? a.price ?? 0)).forEach(o => {
+          html += `<tr class="border-t border-slate-800">
+            <td class="py-1 pr-3 font-mono text-emerald-400">£${Number(o.Price ?? o.price ?? 0).toFixed(4)}</td>
+            <td class="py-1 pr-3 font-mono text-slate-300">${Number(o.Quantity ?? o.quantity ?? 0).toLocaleString()}</td>
+            <td class="py-1 font-mono text-slate-500">${Number(o.Filled ?? o.filled ?? 0).toLocaleString()}</td>
+          </tr>`
+        })
+        html += '</tbody></table>'
+      }
+      html += '</div>'
+
+      // Asks
+      html += '<div>'
+      html += '<p class="text-xs font-semibold text-red-400 mb-2">Asks (Sell)</p>'
+      if (asks.length === 0) {
+        html += '<p class="text-slate-600 text-xs">No open asks</p>'
+      } else {
+        html += `<table class="w-full text-xs"><thead><tr>${th('Price')}${th('Qty')}${th('Filled')}</tr></thead><tbody>`
+        asks.sort((a, b) => (a.Price ?? a.price ?? 0) - (b.Price ?? b.price ?? 0)).forEach(o => {
+          html += `<tr class="border-t border-slate-800">
+            <td class="py-1 pr-3 font-mono text-red-400">£${Number(o.Price ?? o.price ?? 0).toFixed(4)}</td>
+            <td class="py-1 pr-3 font-mono text-slate-300">${Number(o.Quantity ?? o.quantity ?? 0).toLocaleString()}</td>
+            <td class="py-1 font-mono text-slate-500">${Number(o.Filled ?? o.filled ?? 0).toLocaleString()}</td>
+          </tr>`
+        })
+        html += '</tbody></table>'
+      }
+      html += '</div>'
+
+      html += '</div>'
+      el.innerHTML = html
+    }
+
+    // Trades
+    function renderTrades() {
+      const el = document.getElementById('trades-table')
+      const trades = state.trades || []
+      if (!trades.length) { el.innerHTML = emptyMsg('No trades yet'); return }
+      let html = `<thead><tr>${th('#')}${th('Asset')}${th('Qty')}${th('Price')}${th('Buyer')}${th('Seller')}${th('Time')}</tr></thead><tbody>`
+      ;[...trades].reverse().forEach((t, i) => {
+        const assetID = t.AssetID ?? t.asset_id ?? ''
+        const asset = (state.assets || []).find(a => (a.id ?? a.ID) === assetID)
+        html += `<tr class="border-t border-slate-800 hover:bg-slate-800/30">
+          <td class="py-1.5 pr-3 text-slate-600 font-mono">${trades.length - i}</td>
+          <td class="py-1.5 pr-3 text-brand-400 font-semibold">${asset ? escHtml(asset.symbol) : shortKey(assetID)}</td>
+          <td class="py-1.5 pr-3 font-mono text-slate-300">${Number(t.Quantity ?? t.quantity ?? 0).toLocaleString()}</td>
+          <td class="py-1.5 pr-3 font-mono text-emerald-400">£${Number(t.Price ?? t.price ?? 0).toFixed(4)}</td>
+          <td class="py-1.5 pr-3 text-slate-500 truncate-key" title="${escHtml(t.BuyerID ?? t.buyer_id ?? '')}">${shortKey(t.BuyerID ?? t.buyer_id)}</td>
+          <td class="py-1.5 pr-3 text-slate-500 truncate-key" title="${escHtml(t.SellerID ?? t.seller_id ?? '')}">${shortKey(t.SellerID ?? t.seller_id)}</td>
+          <td class="py-1.5 text-slate-600 font-mono text-[10px]">${fmtDate(t.Timestamp ?? t.timestamp ?? t.ExecutedAt ?? t.executed_at)}</td>
+        </tr>`
+      })
+      html += '</tbody>'
+      el.innerHTML = tableWrap(html)
+    }
+
+    // Blocks
+    function renderBlocks() {
+      const el = document.getElementById('blocks-table')
+      const blocks = state.blocks || []
+      if (!blocks.length) { el.innerHTML = emptyMsg('No blocks yet'); return }
+      let html = `<thead><tr>${th('#')}${th('Hash')}${th('Prev')}${th('Txns')}${th('Asset')}${th('Order')}${th('Cred')}</tr></thead><tbody>`
+      ;[...blocks].reverse().forEach(b => {
+        const totalTxns = (b.tx_count || 0) + (b.asset_tx_count || 0) + (b.order_tx_count || 0) + (b.credential_tx_count || 0)
+        html += `<tr class="border-t border-slate-800 hover:bg-slate-800/30">
+          <td class="py-1.5 pr-3 font-mono text-brand-400">${b.index}</td>
+          <td class="py-1.5 pr-3 font-mono text-slate-400 truncate-key" title="${escHtml(b.hash)}">${b.hash ? b.hash.slice(0,10)+'…' : '–'}</td>
+          <td class="py-1.5 pr-3 font-mono text-slate-600 truncate-key" title="${escHtml(b.prev_hash)}">${b.prev_hash ? b.prev_hash.slice(0,10)+'…' : '–'}</td>
+          <td class="py-1.5 pr-3 font-mono text-slate-300">${totalTxns}</td>
+          <td class="py-1.5 pr-3 font-mono text-violet-400">${b.asset_tx_count || 0}</td>
+          <td class="py-1.5 pr-3 font-mono text-orange-400">${b.order_tx_count || 0}</td>
+          <td class="py-1.5 font-mono text-cyan-400">${b.credential_tx_count || 0}</td>
+        </tr>`
+      })
+      html += '</tbody>'
+      el.innerHTML = tableWrap(html)
+    }
+
+    // KYC credentials
+    function renderKYC() {
+      const el = document.getElementById('kyc-table')
+      const creds = state.credentials || []
+      if (!creds.length) { el.innerHTML = emptyMsg('No credentials yet'); return }
+      let html = `<thead><tr>${th('Wallet')}${th('Class')}${th('Jurisdiction')}${th('Issued')}${th('Expires')}</tr></thead><tbody>`
+      creds.forEach(c => {
+        html += `<tr class="border-t border-slate-800 hover:bg-slate-800/30">
+          <td class="py-1.5 pr-3 text-slate-500 truncate-key" title="${escHtml(c.HolderID ?? c.holder_id ?? '')}">${shortKey(c.HolderID ?? c.holder_id)}</td>
+          <td class="py-1.5 pr-3">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold border bg-cyan-500/20 text-cyan-300 border-cyan-500/30">${escHtml(c.InvestorClass ?? c.investor_class ?? c.Class ?? c.class ?? '–')}</span>
+          </td>
+          <td class="py-1.5 pr-3 text-slate-400">${escHtml(c.Jurisdiction ?? c.jurisdiction ?? '–')}</td>
+          <td class="py-1.5 pr-3 font-mono text-slate-500 text-[10px]">${fmtDate(c.IssuedAt ?? c.issued_at)}</td>
+          <td class="py-1.5 font-mono text-slate-500 text-[10px]">${fmtDate(c.ExpiresAt ?? c.expires_at)}</td>
+        </tr>`
+      })
+      html += '</tbody>'
+      el.innerHTML = tableWrap(html)
+    }
+
+    // Deals
+    function renderDeals() {
+      const el = document.getElementById('deals-table')
+      const deals = state.deals || []
+      if (!deals.length) { el.innerHTML = emptyMsg('No deals yet'); return }
+      let html = `<thead><tr>${th('ID')}${th('Asset')}${th('Status')}${th('Counterparties')}${th('Created')}</tr></thead><tbody>`
+      deals.forEach(d => {
+        html += `<tr class="border-t border-slate-800 hover:bg-slate-800/30">
+          <td class="py-1.5 pr-3 font-mono text-slate-400">${shortKey(d.ID ?? d.id)}</td>
+          <td class="py-1.5 pr-3 text-brand-400">${shortKey(d.AssetID ?? d.asset_id)}</td>
+          <td class="py-1.5 pr-3">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold border bg-violet-500/20 text-violet-300 border-violet-500/30">${escHtml(d.Status ?? d.status ?? '–')}</span>
+          </td>
+          <td class="py-1.5 pr-3 text-slate-500">${(d.Parties ?? d.parties ?? []).length} parties</td>
+          <td class="py-1.5 font-mono text-slate-600 text-[10px]">${fmtDate(d.CreatedAt ?? d.created_at)}</td>
+        </tr>`
+      })
+      html += '</tbody>'
+      el.innerHTML = tableWrap(html)
+    }
+
+    // ── Utilities ────────────────────────────────────────────────────────
+    function copyRaw() {
+      const text = document.getElementById('raw-inspector').textContent
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = event.target
+        const orig = btn.textContent
+        btn.textContent = 'Copied!'
+        setTimeout(() => btn.textContent = orig, 1200)
+      })
+    }
+
+    function openApiDocs() {
+      window.open(apiBase() + '/v1/health', '_blank')
+    }
+
+    function refreshState() {
+      fetchState()
+      fetchHealth()
+    }
+
+    function reconnect() {
+      if (ws) ws.close()
+      if (pollInterval) clearInterval(pollInterval)
+      start()
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────
+    function start() {
+      fetchHealth()
+      fetchState()
+      connectWS()
+      pollInterval = setInterval(() => {
+        fetchState()
+        fetchHealth()
+      }, 3000)
+    }
+
+    document.addEventListener('DOMContentLoaded', start)
+  </script>
+</body>
+</html>

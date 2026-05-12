@@ -44,63 +44,65 @@ const (
 // All fields are optional; zero values mean no restriction.
 type TransferRestrictions struct {
 	// LockupPeriodDays sets how long a newly acquired holding is non-transferable.
-	LockupPeriodDays int
+	LockupPeriodDays int `json:"lockup_period_days,omitempty"`
 	// AccreditedOnly restricts transfers to wallets with a non-retail credential.
-	AccreditedOnly bool
+	AccreditedOnly bool `json:"accredited_only,omitempty"`
 	// MaxHolders limits the total number of distinct holders. 0 = unlimited.
-	MaxHolders int
+	MaxHolders int `json:"max_holders,omitempty"`
 	// AllowedJurisdictions restricts holders to listed ISO country codes. Empty = all allowed.
-	AllowedJurisdictions []string
+	AllowedJurisdictions []string `json:"allowed_jurisdictions,omitempty"`
 	// BlockedJurisdictions explicitly excludes listed ISO country codes.
-	BlockedJurisdictions []string
+	BlockedJurisdictions []string `json:"blocked_jurisdictions,omitempty"`
 
 	// Corporate-action rights (Phase 2 Week 3-4)
 
 	// HasROFR triggers a CorporateAction on every transfer, giving existing holders
 	// the right to purchase on the same terms before the transfer proceeds.
-	HasROFR bool
+	HasROFR bool `json:"has_rofr,omitempty"`
 	// ROFRDays is the notice period during which holders may exercise the ROFR (default 30).
-	ROFRDays int
+	ROFRDays int `json:"rofr_days,omitempty"`
 	// DragThreshold is the minimum fraction (0-1) of circulating supply that must consent
 	// before a drag-along can be triggered. 0 disables drag-along rights.
-	DragThreshold float64
+	DragThreshold float64 `json:"drag_threshold,omitempty"`
 	// TagAlongRight allows minority holders to join any majority sale on identical terms.
-	TagAlongRight bool
+	TagAlongRight bool `json:"tag_along_right,omitempty"`
 }
 
 // AssetMetadata holds legal and descriptive information about an asset.
 type AssetMetadata struct {
-	CompanyName   string
-	Jurisdiction  string // ISO 3166-1 alpha-2 country code of incorporation
-	ISIN          string // optional — assigned by issuer or registration authority
-	VotingRights  bool
-	DividendTerms string
+	CompanyName   string `json:"company_name,omitempty"`
+	Jurisdiction  string `json:"jurisdiction,omitempty"` // ISO 3166-1 alpha-2 country code of incorporation
+	ISIN          string `json:"isin,omitempty"`         // optional — assigned by issuer or registration authority
+	VotingRights  bool   `json:"voting_rights,omitempty"`
+	DividendTerms string `json:"dividend_terms,omitempty"`
 	// LegalDocHash is the SHA3-256 hex of the subscription agreement or term sheet.
 	// Committing this hash on-chain binds the on-chain issuance to the legal document.
-	LegalDocHash string
+	LegalDocHash string `json:"legal_doc_hash,omitempty"`
 }
 
 // Asset represents a tokenised financial instrument on the GreenHouse network.
 // It is created by an issuer wallet and governs all subsequent transfer rules.
 type Asset struct {
-	ID                string
-	Issuer            string // base64-encoded Ed25519 public key of the issuing wallet
-	AssetType         AssetType
-	TotalSupply       float64
-	CirculatingSupply float64 // increments on issue, decrements on redeem
-	Currency          string  // "GBP", "EUR", "USD", "CHF"
-	Metadata          AssetMetadata
-	Restrictions      TransferRestrictions
-	CreatedAt         int64  // Unix timestamp
-	IssuerSignature   []byte // Ed25519 sig over all fields (with IssuerSignature=nil)
+	ID                string               `json:"id"`
+	Name              string               `json:"name,omitempty"`
+	Symbol            string               `json:"symbol,omitempty"`
+	Issuer            string               `json:"issuer"` // base64-encoded Ed25519 public key of the issuing wallet
+	AssetType         AssetType            `json:"asset_class"`
+	TotalSupply       float64              `json:"total_supply"`
+	CirculatingSupply float64              `json:"circulating_supply"` // increments on issue, decrements on redeem
+	Currency          string               `json:"currency"`           // "GBP", "EUR", "USD", "CHF"
+	Metadata          AssetMetadata        `json:"metadata"`
+	Restrictions      TransferRestrictions `json:"restrictions,omitempty"`
+	CreatedAt         int64                `json:"created_at"` // Unix timestamp
+	IssuerSignature   []byte               `json:"-"`          // Ed25519 sig — not exposed via API
 }
 
 // AssetHolding records a wallet's balance of a specific asset.
 type AssetHolding struct {
-	AssetID     string
-	HolderID    string // base64-encoded Ed25519 public key
-	Balance     float64
-	LockedUntil int64 // Unix timestamp; 0 = no lockup active
+	AssetID     string  `json:"asset_id"`
+	HolderID    string  `json:"holder_id"` // base64-encoded Ed25519 public key
+	Balance     float64 `json:"balance"`
+	LockedUntil int64   `json:"locked_until,omitempty"` // Unix timestamp; 0 = no lockup active
 }
 
 // AssetTransaction is the payload for an asset-layer operation broadcast via P2P.
@@ -243,6 +245,7 @@ func NewAssetTransaction(
 // are skipped. This allows Week 1 assets to be tested before identity.go exists.
 //
 // Validation order:
+//  0. AML screening (sender + receiver) — optional; pass a non-nil AMLScreener
 //  1. Asset exists
 //  2. Quantity > 0
 //  3. Sender and Receiver are non-empty
@@ -251,12 +254,41 @@ func NewAssetTransaction(
 //  6. Transfer/Redeem: sender holds sufficient balance
 //  7. Transfer/Redeem: holding lockup period is not active
 //  8. Transfer: MaxHolders limit is not exceeded by adding a new holder
+//     8b. Transfer: ROFR check (if pendingActions != nil and asset has HasROFR set)
 //  9. Credential checks (AccreditedOnly, BlockedJurisdictions) if credentials != nil
+//
+// pendingActions is the blockchain's PendingCorporateActions map. Pass nil to skip
+// the ROFR check (e.g. in tests that don't exercise ROFR logic).
+// AML screening is optional: pass an AMLScreener as the 5th variadic argument.
 func (at *AssetTransaction) Validate(
 	assets map[string]*Asset,
 	holdings map[string]*AssetHolding,
 	credentials map[string]*CredentialAttestation,
+	pendingActions map[string]*CorporateAction,
+	screener ...AMLScreener,
 ) error {
+	// 0. AML screening — runs before any other check so blocked parties are
+	// rejected immediately rather than after expensive validation work.
+	if len(screener) > 0 && screener[0] != nil {
+		asset0, ok0 := assets[at.AssetID]
+		currency := ""
+		if ok0 {
+			currency = asset0.Currency
+		}
+		alert, err := screener[0].ScreenTransaction(
+			at.Tx.Sender, at.Tx.Receiver, at.AssetID, at.Tx.Amount, currency,
+		)
+		if err != nil {
+			return fmt.Errorf("aml screening error: %w", err)
+		}
+		if alert != nil && alert.Severity == AMLSeverityBlock {
+			return fmt.Errorf("transaction blocked by AML screening: %s (list: %s)",
+				alert.Reason, alert.MatchedList)
+		}
+		// AMLSeverityFlag: log and continue — the event is already recorded in
+		// the screener's Calls slice for compliance audit purposes.
+	}
+
 	// 1. Asset must exist in the registry.
 	asset, ok := assets[at.AssetID]
 	if !ok {
@@ -334,6 +366,16 @@ func (at *AssetTransaction) Validate(
 				return fmt.Errorf("max holders reached: limit is %d, currently %d",
 					asset.Restrictions.MaxHolders, holderCount)
 			}
+		}
+	}
+
+	// 8b. ROFR: if the asset has a right-of-first-refusal, suspend the transfer
+	// so existing holders can exercise their pre-emption right. A CorporateAction
+	// is created in pendingActions and ErrROFRTriggered is returned. The transfer
+	// may proceed once the action resolves (caller's responsibility).
+	if at.TxType == AssetTxTypeTransfer && pendingActions != nil {
+		if triggered, _, err := CheckROFR(at, asset, holdings, pendingActions); triggered {
+			return err // ErrROFRTriggered
 		}
 	}
 

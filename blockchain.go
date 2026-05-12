@@ -170,6 +170,11 @@ type Blockchain struct {
 	// Phase 2: Deal Anchoring
 	Deals map[string]*Deal // dealID → Deal
 
+	// Phase 3 / Track 5: AML screening — called from AssetTransaction.Validate
+	// before any other check. Defaults to MockAMLScreener (passes everything).
+	// Replace with ComplyAdvantageScreener / EllipticScreener before going live.
+	AMLScreener AMLScreener
+
 	// Track 4: Real-time event stream
 	// Events is a buffered channel onto which the blockchain emits StreamEvents
 	// whenever significant state changes occur (blocks, trades, payments, credentials).
@@ -201,6 +206,33 @@ const (
 	EventPaymentConfirmed = "payment_confirmed"
 	EventCredentialIssued = "credential_issued"
 )
+
+// EmitEvent is the exported entry point for emitEvent, allowing external
+// packages (e.g. the API layer) to push events onto the stream channel.
+func (bc *Blockchain) EmitEvent(eventType string, payload any) {
+	bc.emitEvent(eventType, payload)
+}
+
+// SealBlock anchors a set of specialised transactions into a new block and
+// immediately emits EventBlockFinalised. It is called by the API layer after
+// each state-mutating HTTP request so the chain grows in real time without
+// requiring a full dBFT consensus round.
+func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTransaction, credTxs []CredentialTransaction) {
+	bc.AddBlock(nil, nil)
+	idx := len(bc.Blocks) - 1
+	bc.Blocks[idx].AssetTransactions = assetTxs
+	bc.Blocks[idx].OrderTransactions = orderTxs
+	bc.Blocks[idx].CredentialTransactions = credTxs
+	blk := bc.Blocks[idx]
+	bc.emitEvent(EventBlockFinalised, map[string]any{
+		"block_index":         idx,
+		"hash":                blk.CalculateHash(),
+		"tx_count":            0,
+		"asset_tx_count":      len(assetTxs),
+		"order_tx_count":      len(orderTxs),
+		"credential_tx_count": len(credTxs),
+	})
+}
 
 // emitEvent sends an event onto bc.Events without blocking.
 // If the buffer is full the event is silently dropped — consensus must not stall
@@ -553,6 +585,9 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc.Events = make(chan StreamEvent, 256)
 
 	// Default to mock service implementations so existing tests need no changes
+	if bc.AMLScreener == nil {
+		bc.AMLScreener = NewMockAMLScreener()
+	}
 	if bc.PaymentProvider == nil {
 		bc.PaymentProvider = NewMockPaymentProvider()
 	}

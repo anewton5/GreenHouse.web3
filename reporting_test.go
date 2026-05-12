@@ -69,10 +69,10 @@ func TestGenerateHoldingsReport_SingleAsset(t *testing.T) {
 	assert.Equal(t, "Acme Corp", h.AssetName)
 	assert.Equal(t, AssetType("equity"), h.AssetType)
 	assert.Equal(t, "DE000A0Z1234", h.ISIN)
-	assert.InDelta(t, 100.0, h.Balance, 1e-9)
-	assert.InDelta(t, 12.50, h.NAVPerUnit, 1e-9)
-	assert.InDelta(t, 1250.0, h.TotalValue, 1e-9)
-	assert.InDelta(t, 1000.0, h.AcquisitionCost, 1e-9)
+	assert.InDelta(t, 100.0, h.Quantity, 1e-9)
+	assert.InDelta(t, 12.50, h.CurrentPrice, 1e-9)
+	assert.InDelta(t, 1250.0, h.MarketValue, 1e-9)
+	assert.InDelta(t, 10.0, h.AvgCost, 1e-9) // 1000 total cost / 100 units
 	assert.InDelta(t, 250.0, h.UnrealisedPnL, 1e-9)
 }
 
@@ -102,7 +102,7 @@ func TestGenerateHoldingsReport_MultiAsset(t *testing.T) {
 
 	totalValue := 0.0
 	for _, h := range report.Holdings {
-		totalValue += h.TotalValue
+		totalValue += h.MarketValue
 	}
 	// A1: 50×100=5000; A2: 200×1.05=210
 	assert.InDelta(t, 5210.0, totalValue, 1e-6)
@@ -376,7 +376,7 @@ func TestMarshalFiDA_HoldingsReport(t *testing.T) {
 	var out map[string]interface{}
 	require.NoError(t, json.Unmarshal(data, &out))
 	assert.Equal(t, "1.0", out["schema_version"])
-	assert.Equal(t, wallet, out["wallet_public_key"])
+	assert.Equal(t, wallet, out["wallet_key"])
 	assert.NotNil(t, out["generated_at"])
 	assert.NotNil(t, out["holdings"])
 }

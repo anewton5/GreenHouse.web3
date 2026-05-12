@@ -131,6 +131,11 @@ func (s *Server) Routes() http.Handler {
 	// Open orders for the authenticated wallet
 	mux.Handle("GET /v1/orders", s.jwt(http.HandlerFunc(s.handleListOrders)))
 
+	// Issuer order management — see all bids on assets you issued, fill or reject
+	mux.Handle("GET /v1/issuer/orders", s.jwt(http.HandlerFunc(s.handleIssuerListOrders)))
+	mux.Handle("POST /v1/orders/{id}/fill", s.jwt(http.HandlerFunc(s.handleFillOrder)))
+	mux.Handle("POST /v1/orders/{id}/reject", s.jwt(http.HandlerFunc(s.handleRejectOrder)))
+
 	// Cap table for an asset
 	mux.Handle("GET /v1/assets/{id}/captable", s.jwt(http.HandlerFunc(s.handleGetCapTable)))
 
@@ -141,6 +146,19 @@ func (s *Server) Routes() http.Handler {
 	// Corporate actions
 	mux.Handle("GET /v1/corporate-actions", s.jwt(http.HandlerFunc(s.handleListCorporateActions)))
 	mux.Handle("POST /v1/corporate-actions", s.jwtAdmin(http.HandlerFunc(s.handleProposeCorporateAction)))
+
+	// SPV management
+	mux.Handle("GET /v1/spv", s.jwt(http.HandlerFunc(s.handleListSPV)))
+	mux.Handle("POST /v1/spv", s.jwt(http.HandlerFunc(s.handleCreateSPV)))
+	mux.Handle("POST /v1/spv/{id}/nav", s.jwt(http.HandlerFunc(s.handleUpdateSPVNAV)))
+
+	// Prospectus exemption registration (issuer-only write; any authenticated read)
+	mux.Handle("POST /v1/assets/{id}/exemption", s.jwt(http.HandlerFunc(s.handleRegisterExemption)))
+	mux.Handle("GET /v1/assets/{id}/exemption", s.jwt(http.HandlerFunc(s.handleGetExemption)))
+
+	// MiFID II suitability assessments (admin write; any authenticated read)
+	mux.Handle("POST /v1/suitability", s.jwtAdmin(http.HandlerFunc(s.handleSubmitSuitability)))
+	mux.Handle("GET /v1/suitability/{walletKey}/{assetID}", s.jwt(http.HandlerFunc(s.handleGetSuitability)))
 
 	// Trade approvals (mobile co-signing)
 	mux.Handle("GET /v1/trades/pending", s.jwt(http.HandlerFunc(s.handleListPendingTrades)))
@@ -154,6 +172,10 @@ func (s *Server) Routes() http.Handler {
 
 	// Real-time WebSocket event stream — JWT via ?token= or Authorization header
 	mux.HandleFunc("GET /v1/stream", s.handleStream)
+
+	// Dev-mode endpoints (disabled when GREENHOUSE_ADMIN_WALLET_KEYS is set)
+	mux.HandleFunc("GET /v1/dev/state", s.handleDevState)
+	mux.HandleFunc("GET /v1/dev/stream", s.handleDevStream)
 
 	return LoggingMiddleware(CORSMiddleware(RateLimitMiddleware(mux)))
 }
@@ -175,7 +197,7 @@ func b64url(b []byte) string {
 func (s *Server) issueJWT(walletKey string) (string, error) {
 	now := time.Now().UTC().Unix()
 	header, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
-	claims, err := json.Marshal(jwtClaims{Sub: walletKey, Iat: now, Exp: now + 900})
+	claims, err := json.Marshal(jwtClaims{Sub: walletKey, Iat: now, Exp: now + 28800})
 	if err != nil {
 		return "", err
 	}
@@ -264,7 +286,7 @@ func walletFromCtx(r *http.Request) string {
 func (s *Server) storeChallenge(ch string) {
 	s.challengeMu.Lock()
 	defer s.challengeMu.Unlock()
-	s.challenges[ch] = challengeRecord{expiresAt: time.Now().UTC().Unix() + 300}
+	s.challenges[ch] = challengeRecord{expiresAt: time.Now().UTC().Unix() + 60}
 	// Opportunistic cleanup of expired challenges
 	now := time.Now().UTC().Unix()
 	for k, v := range s.challenges {

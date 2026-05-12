@@ -147,25 +147,26 @@ func (t *CostBasisTracker) ConsumeForDisposal(
 
 // HoldingsReport is a FiDA-compliant snapshot of a wallet's holdings.
 type HoldingsReport struct {
-	SchemaVersion   string            `json:"schema_version"`
-	WalletPublicKey string            `json:"wallet_public_key"`
-	GeneratedAt     int64             `json:"generated_at"`
-	Holdings        []HoldingSnapshot `json:"holdings"`
+	SchemaVersion    string            `json:"schema_version"`
+	WalletPublicKey  string            `json:"wallet_key"`
+	GeneratedAt      int64             `json:"generated_at"`
+	Holdings         []HoldingSnapshot `json:"holdings"`
+	TotalMarketValue float64           `json:"total_market_value"`
 }
 
 // HoldingSnapshot captures the current economic position for one asset in a wallet.
 type HoldingSnapshot struct {
-	AssetID         string    `json:"asset_id"`
-	AssetName       string    `json:"asset_name"`
-	AssetType       AssetType `json:"asset_type"`
-	ISIN            string    `json:"isin"`
-	Balance         float64   `json:"balance"`
-	Currency        string    `json:"currency"`
-	NAVPerUnit      float64   `json:"nav_per_unit"`
-	TotalValue      float64   `json:"total_value"`
-	AcquisitionCost float64   `json:"acquisition_cost"`
-	UnrealisedPnL   float64   `json:"unrealised_pnl"`
-	LockedUntil     int64     `json:"locked_until"`
+	AssetID       string    `json:"asset_id"`
+	AssetName     string    `json:"asset_name"`
+	AssetType     AssetType `json:"asset_type"`
+	ISIN          string    `json:"isin"`
+	Quantity      float64   `json:"quantity"`
+	Currency      string    `json:"currency"`
+	CurrentPrice  float64   `json:"current_price"`
+	MarketValue   float64   `json:"market_value"`
+	AvgCost       float64   `json:"avg_cost"`
+	UnrealisedPnL float64   `json:"unrealised_pnl"`
+	LockedUntil   int64     `json:"locked_until"`
 }
 
 // GenerateHoldingsReport builds a FiDA HoldingsReport for walletKey from current
@@ -203,28 +204,35 @@ func GenerateHoldingsReport(
 			return nil, fmt.Errorf("valuation error for asset %s: %w", holding.AssetID, err)
 		}
 
-		totalValue := holding.Balance * nav
+		marketValue := holding.Balance * nav
 
-		// Acquisition cost: sum of remaining lot costs for this wallet/asset
-		var acqCost float64
+		// Total acquisition cost: sum of remaining lot costs for this wallet/asset.
+		var totalAcqCost float64
 		lotKey := walletKey + ":" + holding.AssetID
 		for _, lot := range tracker.Lots[lotKey] {
-			acqCost += lot.Units * lot.UnitCost
+			totalAcqCost += lot.Units * lot.UnitCost
+		}
+
+		// avg_cost is per-unit average acquisition cost.
+		avgCost := 0.0
+		if holding.Balance > 0 {
+			avgCost = totalAcqCost / holding.Balance
 		}
 
 		report.Holdings = append(report.Holdings, HoldingSnapshot{
-			AssetID:         holding.AssetID,
-			AssetName:       asset.Metadata.CompanyName,
-			AssetType:       asset.AssetType,
-			ISIN:            asset.Metadata.ISIN,
-			Balance:         holding.Balance,
-			Currency:        asset.Currency,
-			NAVPerUnit:      nav,
-			TotalValue:      totalValue,
-			AcquisitionCost: acqCost,
-			UnrealisedPnL:   totalValue - acqCost,
-			LockedUntil:     holding.LockedUntil,
+			AssetID:       holding.AssetID,
+			AssetName:     asset.Metadata.CompanyName,
+			AssetType:     asset.AssetType,
+			ISIN:          asset.Metadata.ISIN,
+			Quantity:      holding.Balance,
+			Currency:      asset.Currency,
+			CurrentPrice:  nav,
+			MarketValue:   marketValue,
+			AvgCost:       avgCost,
+			UnrealisedPnL: marketValue - totalAcqCost,
+			LockedUntil:   holding.LockedUntil,
 		})
+		report.TotalMarketValue += marketValue
 	}
 
 	return report, nil

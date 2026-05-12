@@ -548,7 +548,7 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 					log.Printf("Failed to deserialize asset transaction: %v", err)
 					continue
 				}
-				if err := at.Validate(n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials); err == nil {
+				if err := at.Validate(n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials, n.Blockchain.PendingCorporateActions, n.Blockchain.AMLScreener); err == nil {
 					n.Blockchain.PendingAssetTransactions = append(n.Blockchain.PendingAssetTransactions, at)
 				} else {
 					log.Printf("Received invalid asset transaction: %v", err)

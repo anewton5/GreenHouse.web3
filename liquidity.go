@@ -29,27 +29,27 @@ const (
 // Outside an open window, orders may be submitted to the book but MatchOrders
 // is suppressed — no trades are generated until the window closes.
 type LiquidityWindow struct {
-	ID          string       `json:"ID"`
-	AssetID     string       `json:"AssetID"`
-	OpenAt      int64        `json:"OpenAt"`    // Unix seconds — window opens
-	CloseAt     int64        `json:"CloseAt"`   // Unix seconds — matching fires at close
-	MaxVolume   float64      `json:"MaxVolume"` // 0 = unlimited
-	Currency    string       `json:"Currency"`
-	Status      WindowStatus `json:"Status"`
-	ProposerKey string       `json:"ProposerKey"` // base64-encoded Ed25519 public key
-	Signature   []byte       `json:"Signature,omitempty"`
+	ID          string       `json:"id"`
+	AssetID     string       `json:"asset_id"`
+	OpenAt      int64        `json:"opens_at"`   // Unix seconds — window opens
+	CloseAt     int64        `json:"closes_at"`  // Unix seconds — matching fires at close
+	MaxVolume   float64      `json:"max_volume"` // 0 = unlimited
+	Currency    string       `json:"currency"`
+	Status      WindowStatus `json:"status"`
+	ProposerKey string       `json:"proposer_key"` // base64-encoded Ed25519 public key
+	Signature   []byte       `json:"-"`
 }
 
 // WindowResult is the settlement summary produced when a LiquidityWindow closes.
 // It is appended to Blockchain.WindowResults for auditability.
 type WindowResult struct {
-	WindowID      string  `json:"WindowID"`
-	AssetID       string  `json:"AssetID"`
-	TotalVolume   float64 `json:"TotalVolume"` // total units matched
-	TotalValue    float64 `json:"TotalValue"`  // total cash value of matched trades
-	TradeCount    int     `json:"TradeCount"`
-	ClearingPrice float64 `json:"ClearingPrice"` // volume-weighted average price (VWAP)
-	ClosedAt      int64   `json:"ClosedAt"`
+	WindowID      string  `json:"window_id"`
+	AssetID       string  `json:"asset_id"`
+	TotalVolume   float64 `json:"total_volume"` // total units matched
+	TotalValue    float64 `json:"total_value"`  // total cash value of matched trades
+	TradeCount    int     `json:"trade_count"`
+	ClearingPrice float64 `json:"clearing_price"` // volume-weighted average price (VWAP)
+	ClosedAt      int64   `json:"closed_at"`
 }
 
 // ---------------------------------------------------------------------------

@@ -37,42 +37,43 @@ const (
 // Order represents a single buy or sell order placed by a participant.
 // Orders are signed by the placer — any mutation is detectable.
 type Order struct {
-	ID        string
-	AssetID   string
-	Side      OrderSide
-	Price     float64 // price per unit in the asset's currency
-	Quantity  float64 // total units requested
-	Filled    float64 // units matched so far
-	PlacedBy  string  // base64-encoded Ed25519 public key of the order placer
-	PlacedAt  int64   // Unix nanosecond timestamp — used for time-priority ordering
-	ExpiresAt int64   // Unix timestamp (seconds); 0 = GTC (good till cancelled)
-	Status    OrderStatus
-	Signature []byte // Ed25519 sig over all fields (with Signature=nil)
+	ID        string      `json:"id"`
+	AssetID   string      `json:"asset_id"`
+	Side      OrderSide   `json:"side"`
+	Type      string      `json:"type,omitempty"`       // "limit" or "market"
+	Price     float64     `json:"price"`                // price per unit in the asset's currency
+	Quantity  float64     `json:"quantity"`             // total units requested
+	Filled    float64     `json:"filled"`               // units matched so far
+	PlacedBy  string      `json:"placed_by"`            // base64-encoded Ed25519 public key of the order placer
+	PlacedAt  int64       `json:"created_at"`           // Unix nanosecond timestamp — used for time-priority ordering
+	ExpiresAt int64       `json:"expires_at,omitempty"` // Unix timestamp (seconds); 0 = GTC
+	Status    OrderStatus `json:"status"`
+	Signature []byte      `json:"-"` // Ed25519 sig — not exposed via API
 }
 
 // Trade is the immutable record of a matched execution.
 // One Trade is produced per matched bid/ask pair.
 type Trade struct {
-	ID         string
-	AssetID    string
-	BidOrderID string
-	AskOrderID string
-	BuyerID    string  // base64-encoded public key of the buyer
-	SellerID   string  // base64-encoded public key of the seller
-	Price      float64 // execution price (= ask price — price-time priority)
-	Quantity   float64
-	Currency   string
-	ExecutedAt int64  // Unix timestamp
-	Status     string `json:"status,omitempty"` // "" = settled; "pending_approval" = awaiting seller co-sig
+	ID         string  `json:"id"`
+	AssetID    string  `json:"asset_id"`
+	BidOrderID string  `json:"bid_order_id"`
+	AskOrderID string  `json:"ask_order_id"`
+	BuyerID    string  `json:"buyer_id"`  // base64-encoded public key of the buyer
+	SellerID   string  `json:"seller_id"` // base64-encoded public key of the seller
+	Price      float64 `json:"price"`     // execution price
+	Quantity   float64 `json:"quantity"`
+	Currency   string  `json:"currency"`
+	ExecutedAt int64   `json:"executed_at"`      // Unix timestamp
+	Status     string  `json:"status,omitempty"` // "" = settled; "pending_approval" = awaiting seller co-sig
 }
 
 // OrderBook holds all open orders for a single asset.
 // Bids are sorted highest-price first; Asks are sorted lowest-price first.
 // Within the same price level, orders are sorted by PlacedAt ascending (time priority).
 type OrderBook struct {
-	AssetID string
-	Bids    []*Order // sorted: highest price first
-	Asks    []*Order // sorted: lowest price first
+	AssetID string   `json:"asset_id"`
+	Bids    []*Order `json:"bids"` // sorted: highest price first
+	Asks    []*Order `json:"asks"` // sorted: lowest price first
 }
 
 // OrderTransaction is broadcast via P2P to place or cancel an order.

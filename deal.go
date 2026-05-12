@@ -34,41 +34,41 @@ const (
 // the anchor commitment. Only moves forward through its lifecycle; it cannot
 // revert to an earlier status.
 type Deal struct {
-	ID                string
-	AssetID           string
-	SPVID             string // empty if asset issued directly (non-SPV)
-	IssuerKey         string // base64-encoded public key of the issuer
-	Status            DealStatus
-	TargetRaiseAmount float64
-	MinAnchorFraction float64 // fraction of TargetRaiseAmount the anchor must commit (0, 1]
-	AnchorDeadlineAt  int64   // Unix timestamp after which the deal can be failed
-	Anchor            *DealAnchor
-	CoInvestors       []*DealCommitment
-	LiquidityWindowID string
-	CreatedAt         int64
-	IssuerSignature   []byte // Sign(SHA3-256(JSON of Deal with IssuerSignature=nil))
+	ID                string            `json:"id"`
+	AssetID           string            `json:"asset_id"`
+	SPVID             string            `json:"spv_id,omitempty"` // empty if asset issued directly (non-SPV)
+	IssuerKey         string            `json:"issuer_key"`       // base64-encoded public key of the issuer
+	Status            DealStatus        `json:"status"`
+	TargetRaiseAmount float64           `json:"target_amount"`
+	MinAnchorFraction float64           `json:"min_anchor_fraction"`
+	AnchorDeadlineAt  int64             `json:"closes_at"` // Unix timestamp after which the deal can be failed
+	Anchor            *DealAnchor       `json:"anchor,omitempty"`
+	CoInvestors       []*DealCommitment `json:"co_investors,omitempty"`
+	LiquidityWindowID string            `json:"liquidity_window_id,omitempty"`
+	CreatedAt         int64             `json:"created_at"`
+	IssuerSignature   []byte            `json:"-"`
 }
 
 // DealAnchor is the commitment record of the lead investor.
 type DealAnchor struct {
-	DealID                string
-	AnchorWalletKey       string
-	CommitmentAmount      float64
-	Currency              string
-	CommittedAt           int64
-	CredentialAttestation *CredentialAttestation // must be accredited + valid
-	AnchorSignature       []byte                 // Sign(SHA3-256(DealID+AnchorWalletKey+CommitmentAmount))
+	DealID                string                 `json:"deal_id"`
+	AnchorWalletKey       string                 `json:"anchor_wallet_key"`
+	CommitmentAmount      float64                `json:"commitment_amount"`
+	Currency              string                 `json:"currency"`
+	CommittedAt           int64                  `json:"committed_at"`
+	CredentialAttestation *CredentialAttestation `json:"credential_attestation,omitempty"`
+	AnchorSignature       []byte                 `json:"-"`
 }
 
 // DealCommitment is an individual co-investor's subscription intent.
 // It becomes binding once the deal moves to DealStatusLive.
 type DealCommitment struct {
-	DealID           string
-	InvestorKey      string
-	CommitmentAmount float64
-	Currency         string
-	CommittedAt      int64
-	Signature        []byte // Sign(SHA3-256(JSON of DealCommitment with Signature=nil))
+	DealID           string  `json:"deal_id"`
+	InvestorKey      string  `json:"investor_key"`
+	CommitmentAmount float64 `json:"commitment_amount"`
+	Currency         string  `json:"currency"`
+	CommittedAt      int64   `json:"committed_at"`
+	Signature        []byte  `json:"-"`
 }
 
 // ---------------------------------------------------------------------------

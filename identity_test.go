@@ -328,7 +328,7 @@ func TestAssetValidationWithCredentials(t *testing.T) {
 	require.NoError(t, err)
 
 	// Validate must pass with valid credentials.
-	err = at.Validate(assets, holdings, creds)
+	err = at.Validate(assets, holdings, creds, nil)
 	require.NoError(t, err)
 
 	// Apply the issuance.
@@ -362,7 +362,7 @@ func TestAssetValidationWithCredentials(t *testing.T) {
 	require.NoError(t, err)
 	creds[thirdStr] = retailCred
 
-	err = transferAt.Validate(assets, holdings, creds)
+	err = transferAt.Validate(assets, holdings, creds, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "accredited")
 }

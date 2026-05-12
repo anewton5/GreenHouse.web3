@@ -244,7 +244,7 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 
 	// 2. Apply asset transactions from this block
 	for _, tx := range block.AssetTransactions {
-		if err := tx.Validate(bc.Assets, bc.Holdings, bc.Credentials); err != nil {
+		if err := tx.Validate(bc.Assets, bc.Holdings, bc.Credentials, bc.PendingCorporateActions, bc.AMLScreener); err != nil {
 			fmt.Printf("Skipping invalid asset tx: %v\n", err)
 			continue
 		}
@@ -386,6 +386,12 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 			}
 		}
 	}
+
+	// 9. Update prospectus retail counts and emit threshold warnings.
+	for _, pe := range bc.ProspectusExemptions {
+		UpdateRetailCounts(pe, bc.Holdings, bc.Credentials)
+	}
+	CheckProspectusThresholds(bc, bc.ProspectusExemptions)
 }
 
 // Create a new block and add it to the blockchain
