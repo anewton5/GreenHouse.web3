@@ -1,0 +1,1692 @@
+=== RUN   TestAMLScreener_PassesClean
+--- PASS: TestAMLScreener_PassesClean (0.00s)
+=== RUN   TestAMLScreener_BlocksSender
+--- PASS: TestAMLScreener_BlocksSender (0.00s)
+=== RUN   TestAMLScreener_BlocksReceiver
+--- PASS: TestAMLScreener_BlocksReceiver (0.00s)
+=== RUN   TestAMLScreener_FlagsSender
+--- PASS: TestAMLScreener_FlagsSender (0.00s)
+=== RUN   TestAMLScreener_FlagsReceiver
+--- PASS: TestAMLScreener_FlagsReceiver (0.00s)
+=== RUN   TestAMLScreener_BlockTakesPrecedenceOverFlag
+--- PASS: TestAMLScreener_BlockTakesPrecedenceOverFlag (0.00s)
+=== RUN   TestAMLScreener_RecordsCallHistory
+--- PASS: TestAMLScreener_RecordsCallHistory (0.00s)
+=== RUN   TestAMLScreener_WiredIntoValidate_BlocksTransfer
+--- PASS: TestAMLScreener_WiredIntoValidate_BlocksTransfer (0.00s)
+=== RUN   TestAMLScreener_WiredIntoValidate_AllowsClean
+--- PASS: TestAMLScreener_WiredIntoValidate_AllowsClean (0.00s)
+=== RUN   TestAMLScreener_WiredIntoValidate_FlagDoesNotBlock
+--- PASS: TestAMLScreener_WiredIntoValidate_FlagDoesNotBlock (0.00s)
+=== RUN   TestProspectusWarning_ThresholdConstant
+--- PASS: TestProspectusWarning_ThresholdConstant (0.00s)
+=== RUN   TestCheckProspectusThresholds_EmitsWarning
+--- PASS: TestCheckProspectusThresholds_EmitsWarning (0.00s)
+=== RUN   TestCheckProspectusThresholds_NoWarningBeforeThreshold
+--- PASS: TestCheckProspectusThresholds_NoWarningBeforeThreshold (0.00s)
+=== RUN   TestCirculatingSupply_ConsistencyAfterIssue
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.011+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53255/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/53919/quic-v1/webtransport/certhash/uEiCZPzPrb-CICG3XBgvO0Ia4Ipfw-9a7Pf1ehGnWwFU_Ow/certhash/uEiBXnCETMXx69VotJrzIsYQxzNfUAYMbDGNjq7DlSSBwIQ/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/62217/webrtc-direct/certhash/uEiCGTx2cfnk4TAkUiaVAEqJggL1SpSRCq4dVoMZdk9ALdA/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/63424/quic-v1/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53255/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/53919/quic-v1/webtransport/certhash/uEiCZPzPrb-CICG3XBgvO0Ia4Ipfw-9a7Pf1ehGnWwFU_Ow/certhash/uEiBXnCETMXx69VotJrzIsYQxzNfUAYMbDGNjq7DlSSBwIQ/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/62217/webrtc-direct/certhash/uEiCGTx2cfnk4TAkUiaVAEqJggL1SpSRCq4dVoMZdk9ALdA/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/63424/quic-v1/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53258/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/50041/webrtc-direct/certhash/uEiCGTx2cfnk4TAkUiaVAEqJggL1SpSRCq4dVoMZdk9ALdA/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/52702/quic-v1/webtransport/certhash/uEiCZPzPrb-CICG3XBgvO0Ia4Ipfw-9a7Pf1ehGnWwFU_Ow/certhash/uEiBXnCETMXx69VotJrzIsYQxzNfUAYMbDGNjq7DlSSBwIQ/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53854/quic-v1/p2p/12D3KooWMFZ8A6fnj96dDuDea15h48ToKrdr5QLwdSY1H2teh6WP
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+--- PASS: TestCirculatingSupply_ConsistencyAfterIssue (0.01s)
+=== RUN   TestCirculatingSupply_ConsistencyAfterTransfer
+--- PASS: TestCirculatingSupply_ConsistencyAfterTransfer (0.00s)
+=== RUN   TestCirculatingSupply_DetectsDivergence
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.017+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.017+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.017+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53259/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/49498/quic-v1/webtransport/certhash/uEiDvzaaMJvSAlPfBCFieDA4dvLwrwqUpx6fwpEqvPrHi-w/certhash/uEiAQ2NJuG6AGwTiEpT5ULE5Tm5KYRlwzsWqPbhns7uM3rA/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/49962/webrtc-direct/certhash/uEiCdrivso8M5FM9etpDsZMcUlOYDglq7frmrC28rU3fNVg/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/52591/quic-v1/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53259/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/49498/quic-v1/webtransport/certhash/uEiDvzaaMJvSAlPfBCFieDA4dvLwrwqUpx6fwpEqvPrHi-w/certhash/uEiAQ2NJuG6AGwTiEpT5ULE5Tm5KYRlwzsWqPbhns7uM3rA/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/49962/webrtc-direct/certhash/uEiCdrivso8M5FM9etpDsZMcUlOYDglq7frmrC28rU3fNVg/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/52591/quic-v1/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53260/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/52824/webrtc-direct/certhash/uEiCdrivso8M5FM9etpDsZMcUlOYDglq7frmrC28rU3fNVg/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53806/quic-v1/webtransport/certhash/uEiDvzaaMJvSAlPfBCFieDA4dvLwrwqUpx6fwpEqvPrHi-w/certhash/uEiAQ2NJuG6AGwTiEpT5ULE5Tm5KYRlwzsWqPbhns7uM3rA/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/63297/quic-v1/p2p/12D3KooWKLhZZZKKk8eeq434UGQjoDEPA54RJKkP33yqjq21dGPG
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test
+2026-05-16T18:09:51.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.019+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+--- PASS: TestCirculatingSupply_DetectsDivergence (0.01s)
+=== RUN   TestValidate_TamperedAssetRejected
+--- PASS: TestValidate_TamperedAssetRejected (0.00s)
+=== RUN   TestValidate_IntactSignatureAllowed
+--- PASS: TestValidate_IntactSignatureAllowed (0.00s)
+=== RUN   TestValidate_AssetWithoutSignatureIsAllowed
+--- PASS: TestValidate_AssetWithoutSignatureIsAllowed (0.00s)
+=== RUN   TestLegalDoc_AmendmentChain
+--- PASS: TestLegalDoc_AmendmentChain (0.00s)
+=== RUN   TestLegalDoc_WrongPreviousHashRejected
+--- PASS: TestLegalDoc_WrongPreviousHashRejected (0.00s)
+=== RUN   TestLegalDoc_GenesisHashNoAmendments
+--- PASS: TestLegalDoc_GenesisHashNoAmendments (0.00s)
+=== RUN   TestIssue_ParticipationNoteCirculatingSupplyZeroAtCreation
+--- PASS: TestIssue_ParticipationNoteCirculatingSupplyZeroAtCreation (0.00s)
+=== RUN   TestIssue_ParticipationNoteBlockedWithoutCountersig
+--- PASS: TestIssue_ParticipationNoteBlockedWithoutCountersig (0.00s)
+=== RUN   TestIssue_ParticipationNoteReleasedAfterCountersig
+--- PASS: TestIssue_ParticipationNoteReleasedAfterCountersig (0.00s)
+=== RUN   TestWarrant_ExerciseReducesWarrantBalance
+--- PASS: TestWarrant_ExerciseReducesWarrantBalance (0.00s)
+=== RUN   TestWarrant_ExerciseIncreasesEquityBalance
+--- PASS: TestWarrant_ExerciseIncreasesEquityBalance (0.00s)
+=== RUN   TestWarrant_ExerciseInsufficientBalance
+--- PASS: TestWarrant_ExerciseInsufficientBalance (0.00s)
+=== RUN   TestWarrant_ExerciseCreatesCashInstruction
+--- PASS: TestWarrant_ExerciseCreatesCashInstruction (0.00s)
+=== RUN   TestConvertible_ConversionAtMaturity
+--- PASS: TestConvertible_ConversionAtMaturity (0.00s)
+=== RUN   TestConvertible_InsufficientBalance
+--- PASS: TestConvertible_InsufficientBalance (0.00s)
+=== RUN   TestAntiDilution_DownRoundAdjustsConversionRatio
+--- PASS: TestAntiDilution_DownRoundAdjustsConversionRatio (0.00s)
+=== RUN   TestAntiDilution_UpRoundNoAdjustment
+--- PASS: TestAntiDilution_UpRoundNoAdjustment (0.00s)
+=== RUN   TestCapitalCall_InstructionCreatedPerHolder
+--- PASS: TestCapitalCall_InstructionCreatedPerHolder (0.00s)
+=== RUN   TestCapitalCall_DefaultMarksHoldingLocked
+--- PASS: TestCapitalCall_DefaultMarksHoldingLocked (0.00s)
+=== RUN   TestExerciseRequestSignatureVerification
+--- PASS: TestExerciseRequestSignatureVerification (0.00s)
+=== RUN   TestNewAsset_Valid
+--- PASS: TestNewAsset_Valid (0.00s)
+=== RUN   TestNewAsset_InvalidSupply
+--- PASS: TestNewAsset_InvalidSupply (0.00s)
+=== RUN   TestNewAsset_NilKey
+--- PASS: TestNewAsset_NilKey (0.00s)
+=== RUN   TestNewAsset_EmptyCurrency
+--- PASS: TestNewAsset_EmptyCurrency (0.00s)
+=== RUN   TestAssetIssuerSignatureTampering
+--- PASS: TestAssetIssuerSignatureTampering (0.00s)
+=== RUN   TestAssetCalculateHash_Deterministic
+--- PASS: TestAssetCalculateHash_Deterministic (0.00s)
+=== RUN   TestHoldingKey
+--- PASS: TestHoldingKey (0.00s)
+=== RUN   TestNewAssetTransaction_Valid
+--- PASS: TestNewAssetTransaction_Valid (0.00s)
+=== RUN   TestNewAssetTransaction_NilSenderKey
+--- PASS: TestNewAssetTransaction_NilSenderKey (0.00s)
+=== RUN   TestNewAssetTransaction_NilReceiverKey
+--- PASS: TestNewAssetTransaction_NilReceiverKey (0.00s)
+=== RUN   TestNewAssetTransaction_ZeroQuantity
+--- PASS: TestNewAssetTransaction_ZeroQuantity (0.00s)
+=== RUN   TestAssetIssueTransaction
+--- PASS: TestAssetIssueTransaction (0.00s)
+=== RUN   TestAssetIssuerOnlyIssuance
+--- PASS: TestAssetIssuerOnlyIssuance (0.00s)
+=== RUN   TestAssetTransfer_Valid
+--- PASS: TestAssetTransfer_Valid (0.00s)
+=== RUN   TestAssetTransfer_InsufficientBalance
+--- PASS: TestAssetTransfer_InsufficientBalance (0.00s)
+=== RUN   TestAssetTransfer_NoHolding
+--- PASS: TestAssetTransfer_NoHolding (0.00s)
+=== RUN   TestAssetTransfer_InvalidSignature
+--- PASS: TestAssetTransfer_InvalidSignature (0.00s)
+=== RUN   TestAssetTransfer_LockupActive
+--- PASS: TestAssetTransfer_LockupActive (0.00s)
+=== RUN   TestAssetTransfer_LockupExpired
+--- PASS: TestAssetTransfer_LockupExpired (0.00s)
+=== RUN   TestAssetRedeem
+--- PASS: TestAssetRedeem (0.00s)
+=== RUN   TestAssetRedeem_FullBalance
+--- PASS: TestAssetRedeem_FullBalance (0.00s)
+=== RUN   TestAssetMaxHolders
+--- PASS: TestAssetMaxHolders (0.00s)
+=== RUN   TestAssetBlockedJurisdiction
+--- PASS: TestAssetBlockedJurisdiction (0.00s)
+=== RUN   TestAssetAccreditedOnly_Accredited
+--- PASS: TestAssetAccreditedOnly_Accredited (0.00s)
+=== RUN   TestAssetAccreditedOnly_RetailBlocked
+--- PASS: TestAssetAccreditedOnly_RetailBlocked (0.00s)
+=== RUN   TestAssetAccreditedOnly_NoCredential
+--- PASS: TestAssetAccreditedOnly_NoCredential (0.00s)
+=== RUN   TestAssetNoRestrictions_NoCredentialRequired
+--- PASS: TestAssetNoRestrictions_NoCredentialRequired (0.00s)
+=== RUN   TestApplyAssetTransaction_Idempotent
+--- PASS: TestApplyAssetTransaction_Idempotent (0.00s)
+=== RUN   TestValidate_UnknownAsset
+--- PASS: TestValidate_UnknownAsset (0.00s)
+=== RUN   TestAssetLockupAppliedOnIssue
+--- PASS: TestAssetLockupAppliedOnIssue (0.00s)
+=== RUN   TestAddBlock
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53261/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/50816/webrtc-direct/certhash/uEiDcszgLMwWDKOOXitLRJ9f8TLpz2YOUPYQJOUqMwfw-iA/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/52883/quic-v1/webtransport/certhash/uEiC7rP0Iq3VC3Gw1KvDIkAKiSMY5x43iFX-vCSrkGUrRpQ/certhash/uEiA2Y9TNVakfutlTZZzWEE4wSHfme_SDxNZYncrHWxbE9A/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/61580/quic-v1/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53261/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/50816/webrtc-direct/certhash/uEiDcszgLMwWDKOOXitLRJ9f8TLpz2YOUPYQJOUqMwfw-iA/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/52883/quic-v1/webtransport/certhash/uEiC7rP0Iq3VC3Gw1KvDIkAKiSMY5x43iFX-vCSrkGUrRpQ/certhash/uEiA2Y9TNVakfutlTZZzWEE4wSHfme_SDxNZYncrHWxbE9A/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/61580/quic-v1/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53262/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/54345/quic-v1/webtransport/certhash/uEiC7rP0Iq3VC3Gw1KvDIkAKiSMY5x43iFX-vCSrkGUrRpQ/certhash/uEiA2Y9TNVakfutlTZZzWEE4wSHfme_SDxNZYncrHWxbE9A/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/58278/webrtc-direct/certhash/uEiDcszgLMwWDKOOXitLRJ9f8TLpz2YOUPYQJOUqMwfw-iA/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/59652/quic-v1/p2p/12D3KooWPiSztLrb9zPMYoax4gySmfpexoHYQzTU13CqQVEMEMZn
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.036+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.036+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.036+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+    blockchain_test.go:35: Block added successfully
+--- PASS: TestAddBlock (0.01s)
+=== RUN   TestSignTransaction
+--- PASS: TestSignTransaction (0.00s)
+=== RUN   TestInvalidTransactionPublicKey
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53263/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/50948/webrtc-direct/certhash/uEiCMER0cPQ736NeNqPpGAUuesZvIJD-RcaUqUs3cnKAWqA/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/52447/quic-v1/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/55404/quic-v1/webtransport/certhash/uEiBmcCkb_4FrDcQB5XmplB06mlhD0xH67nbhkgSOwM69DQ/certhash/uEiB32qIf5vckd1bDc_I-6h30EH4Xx4onpHEvf9WMjz09XA/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53263/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/50948/webrtc-direct/certhash/uEiCMER0cPQ736NeNqPpGAUuesZvIJD-RcaUqUs3cnKAWqA/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/52447/quic-v1/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/55404/quic-v1/webtransport/certhash/uEiBmcCkb_4FrDcQB5XmplB06mlhD0xH67nbhkgSOwM69DQ/certhash/uEiB32qIf5vckd1bDc_I-6h30EH4Xx4onpHEvf9WMjz09XA/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53264/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/51623/quic-v1/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/56239/quic-v1/webtransport/certhash/uEiBmcCkb_4FrDcQB5XmplB06mlhD0xH67nbhkgSOwM69DQ/certhash/uEiB32qIf5vckd1bDc_I-6h30EH4Xx4onpHEvf9WMjz09XA/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/61070/webrtc-direct/certhash/uEiCMER0cPQ736NeNqPpGAUuesZvIJD-RcaUqUs3cnKAWqA/p2p/12D3KooWNn1ug5HKetFB9Y4Y8PccQBGu8pXKFFuw6fLSkWegC7Ne
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.041+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Attempting to add transaction: {Sender:invalid_base64_key Receiver:receiverPublicKey Amount:10 Signatures:[] RequiredSigs:0 Nonce:0}
+Invalid transaction: error decoding sender's public key (invalid public key length: expected 32 bytes, got 13 bytes)
+    blockchain_test.go:84: Invalid transaction was correctly rejected
+--- PASS: TestInvalidTransactionPublicKey (0.00s)
+=== RUN   TestBlockValidationWithSignatures
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53265/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/55925/webrtc-direct/certhash/uEiDEyhGsLKYn2Zmy_Bh0iyDXhKRXdyAhMOkovuXnicptLQ/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/59212/quic-v1/webtransport/certhash/uEiAaqRe27y1vvHY-szKF_En5w7wwrdn26exD8ht21OEdxw/certhash/uEiBOCO9zQYD50Apjsq8LEyLXju5lokySiI7OEUjYf6ZlCg/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/65495/quic-v1/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53265/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/55925/webrtc-direct/certhash/uEiDEyhGsLKYn2Zmy_Bh0iyDXhKRXdyAhMOkovuXnicptLQ/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/59212/quic-v1/webtransport/certhash/uEiAaqRe27y1vvHY-szKF_En5w7wwrdn26exD8ht21OEdxw/certhash/uEiBOCO9zQYD50Apjsq8LEyLXju5lokySiI7OEUjYf6ZlCg/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/65495/quic-v1/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53266/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53610/webrtc-direct/certhash/uEiDEyhGsLKYn2Zmy_Bh0iyDXhKRXdyAhMOkovuXnicptLQ/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/58912/quic-v1/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/60798/quic-v1/webtransport/certhash/uEiAaqRe27y1vvHY-szKF_En5w7wwrdn26exD8ht21OEdxw/certhash/uEiBOCO9zQYD50Apjsq8LEyLXju5lokySiI7OEUjYf6ZlCg/p2p/12D3KooWE4qrXgZsBhXMPCkeYmXyZJZkCWawo9kRmrtSqFm7NiLj
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Validating transaction from rb5vUaCJ37/LPCPfZ5vSwq5TA2E98bl0x6ij07lQhSQ= to receiver
+Block validated successfully
+    blockchain_test.go:118: Block validated successfully
+--- PASS: TestBlockValidationWithSignatures (0.01s)
+=== RUN   TestSortTransactionPool
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53267/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/54161/quic-v1/webtransport/certhash/uEiA7AqLmuT2XCMKR8iyyKp0sA7Jd52pkLzEJQ8HIO68qkA/certhash/uEiBqsnAPJFVD6px40uiyY160OQm5O8F2pNQJSg0sSGfxug/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/54177/quic-v1/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/60629/webrtc-direct/certhash/uEiBy7QKpjWUggng5bxKPR5JGVHrLhuBKoFF_LHGMNrkhdg/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53267/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/54161/quic-v1/webtransport/certhash/uEiA7AqLmuT2XCMKR8iyyKp0sA7Jd52pkLzEJQ8HIO68qkA/certhash/uEiBqsnAPJFVD6px40uiyY160OQm5O8F2pNQJSg0sSGfxug/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/54177/quic-v1/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/60629/webrtc-direct/certhash/uEiBy7QKpjWUggng5bxKPR5JGVHrLhuBKoFF_LHGMNrkhdg/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53268/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53378/webrtc-direct/certhash/uEiBy7QKpjWUggng5bxKPR5JGVHrLhuBKoFF_LHGMNrkhdg/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/62944/quic-v1/webtransport/certhash/uEiA7AqLmuT2XCMKR8iyyKp0sA7Jd52pkLzEJQ8HIO68qkA/certhash/uEiBqsnAPJFVD6px40uiyY160OQm5O8F2pNQJSg0sSGfxug/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/65196/quic-v1/p2p/12D3KooWL5XHj1nVhLrxWSE8gUqVwHBRUowgx5WsUi7jcdi11Dgc
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+    blockchain_test.go:137: Transaction pool sorted correctly
+--- PASS: TestSortTransactionPool (0.00s)
+=== RUN   TestValidateBlock
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53269/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/53326/quic-v1/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/53409/webrtc-direct/certhash/uEiD88csbSMqCGaxCTrtxBBUunpQJWl7Hp-zVJrw9FqXFmA/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/65389/quic-v1/webtransport/certhash/uEiD5uYuKQPn6rPxqVat1CN2PFb3omLHDY3rnu4YnlEOdCg/certhash/uEiDRbhdXZnYlEo_06YNZnBeQJTRu07EFejqQi5LfFwNeqw/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53269/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/53326/quic-v1/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/53409/webrtc-direct/certhash/uEiD88csbSMqCGaxCTrtxBBUunpQJWl7Hp-zVJrw9FqXFmA/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/65389/quic-v1/webtransport/certhash/uEiD5uYuKQPn6rPxqVat1CN2PFb3omLHDY3rnu4YnlEOdCg/certhash/uEiDRbhdXZnYlEo_06YNZnBeQJTRu07EFejqQi5LfFwNeqw/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53270/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/51068/quic-v1/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/51689/quic-v1/webtransport/certhash/uEiD5uYuKQPn6rPxqVat1CN2PFb3omLHDY3rnu4YnlEOdCg/certhash/uEiDRbhdXZnYlEo_06YNZnBeQJTRu07EFejqQi5LfFwNeqw/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/58085/webrtc-direct/certhash/uEiD88csbSMqCGaxCTrtxBBUunpQJWl7Hp-zVJrw9FqXFmA/p2p/12D3KooWMY4FFCZh74M46kmc3jzJyYY8ne8ygXnqvipr4dNSJrR4
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Validating transaction from NCy6DQJYl4rqL01GRtLNxP8D4GV0vlBW965A5dwqnnc= to receiver2
+Block validated successfully
+Invalid block: no transactions
+--- PASS: TestValidateBlock (0.01s)
+=== RUN   TestMultiSignatureTransaction
+--- PASS: TestMultiSignatureTransaction (0.00s)
+=== RUN   TestAchieveConsensusBasic
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53271/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/59332/quic-v1/webtransport/certhash/uEiDP8IlQDS5v4nf8m3-QOR7oTM9vJLDJ55JFd61lZWMwzA/certhash/uEiB-0pbAFzOU0TRMHfWyvDqjKn1HfLNGeM0CWtgrDU0dwA/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/60101/quic-v1/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/60979/webrtc-direct/certhash/uEiCGl98_LdnU1AKPhY2md31lsWtKY7o-aOzt8_cNEtQ1Sw/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53271/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/59332/quic-v1/webtransport/certhash/uEiDP8IlQDS5v4nf8m3-QOR7oTM9vJLDJ55JFd61lZWMwzA/certhash/uEiB-0pbAFzOU0TRMHfWyvDqjKn1HfLNGeM0CWtgrDU0dwA/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/60101/quic-v1/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/60979/webrtc-direct/certhash/uEiCGl98_LdnU1AKPhY2md31lsWtKY7o-aOzt8_cNEtQ1Sw/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53272/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/51281/quic-v1/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53379/quic-v1/webtransport/certhash/uEiDP8IlQDS5v4nf8m3-QOR7oTM9vJLDJ55JFd61lZWMwzA/certhash/uEiB-0pbAFzOU0TRMHfWyvDqjKn1HfLNGeM0CWtgrDU0dwA/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53423/webrtc-direct/certhash/uEiCGl98_LdnU1AKPhY2md31lsWtKY7o-aOzt8_cNEtQ1Sw/p2p/12D3KooWPU8mthdXDZaTepBVymygCu2uYCdB3VTJP8Utjg5VCCGr
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Delegate delegate1 voted true on the block
+Delegate delegate2 voted true on the block
+Delegate delegate3 voted true on the block
+Consensus achieved with 3 yes votes out of 3
+Finalizing block with hash: acb49f0e58cb49eafaa1eb9d0e75eacbe26ad1143a07df233527aee7466cbfca
+    blockchain_test.go:255: Consensus achieved successfully
+--- PASS: TestAchieveConsensusBasic (0.00s)
+=== RUN   TestSharding
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53273/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/52768/webrtc-direct/certhash/uEiBiuStiV-Pc7EtizQV1l-hkmYRTsTWhXqt5EgteuqIEYA/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/54202/quic-v1/webtransport/certhash/uEiBckk7_Bol532d8GLiq5xL3P4gax4Em1j2n96-TecM6VQ/certhash/uEiDnyXsm2KENtVQQOXQePGXmmt8m_lvvvH783oCDDFacCw/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/64577/quic-v1/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53273/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/52768/webrtc-direct/certhash/uEiBiuStiV-Pc7EtizQV1l-hkmYRTsTWhXqt5EgteuqIEYA/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/54202/quic-v1/webtransport/certhash/uEiBckk7_Bol532d8GLiq5xL3P4gax4Em1j2n96-TecM6VQ/certhash/uEiDnyXsm2KENtVQQOXQePGXmmt8m_lvvvH783oCDDFacCw/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/64577/quic-v1/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53274/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/50797/webrtc-direct/certhash/uEiBiuStiV-Pc7EtizQV1l-hkmYRTsTWhXqt5EgteuqIEYA/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/52123/quic-v1/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/62912/quic-v1/webtransport/certhash/uEiBckk7_Bol532d8GLiq5xL3P4gax4Em1j2n96-TecM6VQ/certhash/uEiDnyXsm2KENtVQQOXQePGXmmt8m_lvvvH783oCDDFacCw/p2p/12D3KooWM44G134HFaSc161RnrAN9iymeFJecsW3TCyAQmSuUHxY
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Initialized 3 shards
+Assigned transaction {Sender:A Receiver:B Amount:10 Signatures:[] RequiredSigs:0 Nonce:0} to shard 1
+Assigned transaction {Sender:C Receiver:D Amount:20 Signatures:[] RequiredSigs:0 Nonce:0} to shard 1
+Assigned transaction {Sender:E Receiver:F Amount:30 Signatures:[] RequiredSigs:0 Nonce:0} to shard 2
+Shard 0 transactions: []
+Shard 1 transactions: [{Sender:A Receiver:B Amount:10 Signatures:[] RequiredSigs:0 Nonce:0} {Sender:C Receiver:D Amount:20 Signatures:[] RequiredSigs:0 Nonce:0}]
+Shard 2 transactions: [{Sender:E Receiver:F Amount:30 Signatures:[] RequiredSigs:0 Nonce:0}]
+--- PASS: TestSharding (0.00s)
+=== RUN   TestParallelTransactionValidation
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53275/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/50084/quic-v1/webtransport/certhash/uEiASx134UZDhEVgRURs4fIg3IpAY0nBAv7-z9DTCTbbPGg/certhash/uEiDCUGCc82Usabf2t00vAz73mNgK5IwaFt42maR-rdKLsw/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/50790/quic-v1/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/56129/webrtc-direct/certhash/uEiCVp4J--zZLekhPjQISizn1oQTmrY27WhV6BjkI3aSBMQ/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53275/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/50084/quic-v1/webtransport/certhash/uEiASx134UZDhEVgRURs4fIg3IpAY0nBAv7-z9DTCTbbPGg/certhash/uEiDCUGCc82Usabf2t00vAz73mNgK5IwaFt42maR-rdKLsw/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/50790/quic-v1/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/56129/webrtc-direct/certhash/uEiCVp4J--zZLekhPjQISizn1oQTmrY27WhV6BjkI3aSBMQ/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53276/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/54763/webrtc-direct/certhash/uEiCVp4J--zZLekhPjQISizn1oQTmrY27WhV6BjkI3aSBMQ/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/62704/quic-v1/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/64628/quic-v1/webtransport/certhash/uEiASx134UZDhEVgRURs4fIg3IpAY0nBAv7-z9DTCTbbPGg/certhash/uEiDCUGCc82Usabf2t00vAz73mNgK5IwaFt42maR-rdKLsw/p2p/12D3KooWNsGv8hCv5nHWtwhd6yg6R3doL5uKKTa9z8H1FmF3s9MT
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+0/100 transactions are valid
+--- PASS: TestParallelTransactionValidation (0.00s)
+=== RUN   TestNodeRecovery
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53277/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/51205/quic-v1/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/55980/quic-v1/webtransport/certhash/uEiC7PsB0q2McXXTN4soPSbEhw9WbDZXesiJvwdFzTqZ1wA/certhash/uEiCNa4Ihp0XfdoGr-FvEYA30g6uDRcIFGUEaUaVRD0GDpg/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/58732/webrtc-direct/certhash/uEiANKwzQl8Obl9TOAEDKpd6zDuLW2p6bagOLCp8bAZG4Xg/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53277/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/51205/quic-v1/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/55980/quic-v1/webtransport/certhash/uEiC7PsB0q2McXXTN4soPSbEhw9WbDZXesiJvwdFzTqZ1wA/certhash/uEiCNa4Ihp0XfdoGr-FvEYA30g6uDRcIFGUEaUaVRD0GDpg/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/58732/webrtc-direct/certhash/uEiANKwzQl8Obl9TOAEDKpd6zDuLW2p6bagOLCp8bAZG4Xg/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53278/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/50399/quic-v1/webtransport/certhash/uEiC7PsB0q2McXXTN4soPSbEhw9WbDZXesiJvwdFzTqZ1wA/certhash/uEiCNa4Ihp0XfdoGr-FvEYA30g6uDRcIFGUEaUaVRD0GDpg/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57426/quic-v1/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57884/webrtc-direct/certhash/uEiANKwzQl8Obl9TOAEDKpd6zDuLW2p6bagOLCp8bAZG4Xg/p2p/12D3KooWCeN1xspJm9QY13nkvPgBHkVYydQw39CGnN1jqU2zXXXa
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: node1-blockchain
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53279/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/52832/webrtc-direct/certhash/uEiCH7_ePBK7Z1NdMbW6DcyiTKdJBb7Ml4tehwZ2pE_XvkQ/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/54611/quic-v1/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/55048/quic-v1/webtransport/certhash/uEiBvGVrQwB39QkYTm5moPnmhDrqRpw_-ECq6onR9ex8m9w/certhash/uEiD_WDZCouIqTp8_6NFQd_C4KNw0mDKO8Y6K1PBn1S7h3A/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53279/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/52832/webrtc-direct/certhash/uEiCH7_ePBK7Z1NdMbW6DcyiTKdJBb7Ml4tehwZ2pE_XvkQ/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/54611/quic-v1/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/55048/quic-v1/webtransport/certhash/uEiBvGVrQwB39QkYTm5moPnmhDrqRpw_-ECq6onR9ex8m9w/certhash/uEiD_WDZCouIqTp8_6NFQd_C4KNw0mDKO8Y6K1PBn1S7h3A/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53280/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53168/webrtc-direct/certhash/uEiCH7_ePBK7Z1NdMbW6DcyiTKdJBb7Ml4tehwZ2pE_XvkQ/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57358/quic-v1/webtransport/certhash/uEiBvGVrQwB39QkYTm5moPnmhDrqRpw_-ECq6onR9ex8m9w/certhash/uEiD_WDZCouIqTp8_6NFQd_C4KNw0mDKO8Y6K1PBn1S7h3A/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/61437/quic-v1/p2p/12D3KooWAVe4tvicxxPyNKzfHDcj9nm6mvVTjapgK6FK7rMr64Th
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: node2-blockchain
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Node node2 syncing blockchain from peer node1
+Node node2 successfully synced blockchain
+--- PASS: TestNodeRecovery (0.01s)
+=== RUN   TestForkResolution
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53281/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/52614/webrtc-direct/certhash/uEiCAB9ebxACJwYX9qjDeTmnzo3g2rQ3mbwmxEGaFyMUWZQ/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/62753/quic-v1/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/63206/quic-v1/webtransport/certhash/uEiC660R9eJU2DjxQw1WDZC7g8uR1aDv3B__T67MF-XXtrQ/certhash/uEiBmlM32_y5eLP9CzRNd2To1aIKMRknSr-S6zSGbmVjq7A/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53281/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/52614/webrtc-direct/certhash/uEiCAB9ebxACJwYX9qjDeTmnzo3g2rQ3mbwmxEGaFyMUWZQ/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/62753/quic-v1/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/63206/quic-v1/webtransport/certhash/uEiC660R9eJU2DjxQw1WDZC7g8uR1aDv3B__T67MF-XXtrQ/certhash/uEiBmlM32_y5eLP9CzRNd2To1aIKMRknSr-S6zSGbmVjq7A/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53282/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/56116/webrtc-direct/certhash/uEiCAB9ebxACJwYX9qjDeTmnzo3g2rQ3mbwmxEGaFyMUWZQ/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/64438/quic-v1/webtransport/certhash/uEiC660R9eJU2DjxQw1WDZC7g8uR1aDv3B__T67MF-XXtrQ/certhash/uEiBmlM32_y5eLP9CzRNd2To1aIKMRknSr-S6zSGbmVjq7A/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/65504/quic-v1/p2p/12D3KooWJZCf5ibTfeuNw7YHsQHpz8jwAkFfZtkdgVuyfHHyYiGc
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: bc1-blockchain
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53283/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/54024/quic-v1/webtransport/certhash/uEiDd4Od_yu8PV1hkeXQNH_6r0ImgKb4Bg37ESVGN7181bg/certhash/uEiDF2tgvY3YMpkgltcYTo52CKxiPsUx3nHT82Pu5WfEriw/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/56658/quic-v1/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/59503/webrtc-direct/certhash/uEiAiamQGzuTL62zLU0n0lGXW5YrsxhZoaoGWASHxJXreEA/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53283/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/54024/quic-v1/webtransport/certhash/uEiDd4Od_yu8PV1hkeXQNH_6r0ImgKb4Bg37ESVGN7181bg/certhash/uEiDF2tgvY3YMpkgltcYTo52CKxiPsUx3nHT82Pu5WfEriw/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/56658/quic-v1/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/59503/webrtc-direct/certhash/uEiAiamQGzuTL62zLU0n0lGXW5YrsxhZoaoGWASHxJXreEA/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53284/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/52282/quic-v1/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57162/quic-v1/webtransport/certhash/uEiDd4Od_yu8PV1hkeXQNH_6r0ImgKb4Bg37ESVGN7181bg/certhash/uEiDF2tgvY3YMpkgltcYTo52CKxiPsUx3nHT82Pu5WfEriw/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/64831/webrtc-direct/certhash/uEiAiamQGzuTL62zLU0n0lGXW5YrsxhZoaoGWASHxJXreEA/p2p/12D3KooW9woHMYwm8Zf3Qcvqa88YnFenPezNKKZRoQzPnGjQHWVJ
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: bc2-blockchain
+2026-05-16T18:09:51.082+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.083+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Replacing current chain with the longer valid chain
+--- PASS: TestForkResolution (0.01s)
+=== RUN   TestProspectusLimit_UnderCap
+--- PASS: TestProspectusLimit_UnderCap (0.00s)
+=== RUN   TestProspectusLimit_AtCap
+--- PASS: TestProspectusLimit_AtCap (0.00s)
+=== RUN   TestProspectusLimit_ProfessionalExcluded
+--- PASS: TestProspectusLimit_ProfessionalExcluded (0.00s)
+=== RUN   TestProspectusLimit_PerJurisdiction
+--- PASS: TestProspectusLimit_PerJurisdiction (0.00s)
+=== RUN   TestSuitability_Pass
+--- PASS: TestSuitability_Pass (0.00s)
+=== RUN   TestSuitability_Fail
+--- PASS: TestSuitability_Fail (0.00s)
+=== RUN   TestSuitability_Missing
+--- PASS: TestSuitability_Missing (0.00s)
+=== RUN   TestSuitability_NotRequired
+--- PASS: TestSuitability_NotRequired (0.00s)
+=== RUN   TestJurisdictionRule_MinTicket
+--- PASS: TestJurisdictionRule_MinTicket (0.00s)
+=== RUN   TestJurisdictionRule_BlockedAssetType
+--- PASS: TestJurisdictionRule_BlockedAssetType (0.00s)
+=== RUN   TestJurisdictionRule_Allowed
+--- PASS: TestJurisdictionRule_Allowed (0.00s)
+=== RUN   TestUpdateRetailCounts_Accurate
+--- PASS: TestUpdateRetailCounts_Accurate (0.00s)
+=== RUN   TestUpdateRetailCounts_ZeroBalance
+--- PASS: TestUpdateRetailCounts_ZeroBalance (0.00s)
+=== RUN   TestNewCorporateAction_Valid
+--- PASS: TestNewCorporateAction_Valid (0.00s)
+=== RUN   TestRecordResponse_Exercise
+--- PASS: TestRecordResponse_Exercise (0.00s)
+=== RUN   TestRecordResponse_Waive
+--- PASS: TestRecordResponse_Waive (0.00s)
+=== RUN   TestRecordResponse_Expired
+--- PASS: TestRecordResponse_Expired (0.00s)
+=== RUN   TestTallyROFR_AllWaive
+--- PASS: TestTallyROFR_AllWaive (0.00s)
+=== RUN   TestTallyROFR_Partial
+--- PASS: TestTallyROFR_Partial (0.00s)
+=== RUN   TestCheckROFR_Triggered
+--- PASS: TestCheckROFR_Triggered (0.00s)
+=== RUN   TestCheckROFR_NotApplicable
+--- PASS: TestCheckROFR_NotApplicable (0.00s)
+=== RUN   TestExecuteDragAlong_ProducesTransactions
+--- PASS: TestExecuteDragAlong_ProducesTransactions (0.00s)
+=== RUN   TestCorporateAction_Lapsed
+--- PASS: TestCorporateAction_Lapsed (0.00s)
+=== RUN   TestTagAlong_MinorityJoins
+--- PASS: TestTagAlong_MinorityJoins (0.00s)
+=== RUN   TestVoteForDelegates
+Locked 50.000000 currency from wallet 62f5ea908adefa3b7b4a98a0676603211f1529a8b7c58d774ad3f953759848a7. New wallet balance: 50.000000. Locked wallet balance: 50.000000
+Locked 100.000000 currency from wallet 3d49191349c7a04b633a78795a03fbd306bb66375fb0bb9f2d4bf3c30e79f518. New wallet balance: 100.000000. Locked wallet balance: 100.000000
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53285/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/49420/quic-v1/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/59528/webrtc-direct/certhash/uEiDYArkjFKLNOBvLO28givwmKfR04K9ubZeaKAffBf_oMg/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/64993/quic-v1/webtransport/certhash/uEiBuONfNEP0AeFvb0Gw79Am729IJkJFwvByUW8WMPjs9Zw/certhash/uEiDr13y13wbswyBATEiTqWFrXScVG4f9OW_tJcuVwGSMxg/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53285/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/49420/quic-v1/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/59528/webrtc-direct/certhash/uEiDYArkjFKLNOBvLO28givwmKfR04K9ubZeaKAffBf_oMg/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/64993/quic-v1/webtransport/certhash/uEiBuONfNEP0AeFvb0Gw79Am729IJkJFwvByUW8WMPjs9Zw/certhash/uEiDr13y13wbswyBATEiTqWFrXScVG4f9OW_tJcuVwGSMxg/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53286/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/51185/quic-v1/webtransport/certhash/uEiBuONfNEP0AeFvb0Gw79Am729IJkJFwvByUW8WMPjs9Zw/certhash/uEiDr13y13wbswyBATEiTqWFrXScVG4f9OW_tJcuVwGSMxg/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57475/webrtc-direct/certhash/uEiDYArkjFKLNOBvLO28givwmKfR04K9ubZeaKAffBf_oMg/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/60574/quic-v1/p2p/12D3KooWGMBct1WfzF8FLSKtNaoQp83YDbSD7BjuuKhrx44T2UVD
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.087+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.088+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-topic
+2026-05-16T18:09:51.088+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.088+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Delegate node1 received 50 votes
+Delegate node2 received 100 votes
+Speaker for view 0 is node1
+Invalid block: no transactions
+Proposed block is invalid. Consensus cannot proceed.
+--- PASS: TestVoteForDelegates (0.00s)
+=== RUN   TestAchieveConsensus
+Delegate delegate1 voted true on the block
+Delegate delegate2 voted true on the block
+Delegate delegate3 voted true on the block
+Consensus achieved with 3 yes votes out of 3
+Finalizing block with hash: c1c15717fef8c73e8c4c15cfe09a474dfc191924cd33ab535c37f20811e6551f
+--- PASS: TestAchieveConsensus (0.00s)
+=== RUN   TestCreateBlock
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53287/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/53000/quic-v1/webtransport/certhash/uEiDTpRc0I4YFEsSUgvtw0qEI5KMHjY1VmsSIOr6j45q8CA/certhash/uEiCQPk9HJR3FzUPbP5peg6W1746Mz0CLlR82e4f1q2wVsA/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/56059/webrtc-direct/certhash/uEiCJYKCggqPFtFlPv1b1a6P_zz8ps6uvsyQoflAcUicspQ/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/58056/quic-v1/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53287/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/53000/quic-v1/webtransport/certhash/uEiDTpRc0I4YFEsSUgvtw0qEI5KMHjY1VmsSIOr6j45q8CA/certhash/uEiCQPk9HJR3FzUPbP5peg6W1746Mz0CLlR82e4f1q2wVsA/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/56059/webrtc-direct/certhash/uEiCJYKCggqPFtFlPv1b1a6P_zz8ps6uvsyQoflAcUicspQ/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/58056/quic-v1/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53288/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/50977/webrtc-direct/certhash/uEiCJYKCggqPFtFlPv1b1a6P_zz8ps6uvsyQoflAcUicspQ/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/51616/quic-v1/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/63802/quic-v1/webtransport/certhash/uEiDTpRc0I4YFEsSUgvtw0qEI5KMHjY1VmsSIOr6j45q8CA/certhash/uEiCQPk9HJR3FzUPbP5peg6W1746Mz0CLlR82e4f1q2wVsA/p2p/12D3KooWFBVtuUgJPy6S4iEaxWAR6wv9c4BD2U4D9s8VfCeDFhRX
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-topic
+2026-05-16T18:09:51.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.091+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Initialized 3 shards
+Attempting to add transaction: {Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:10 Signatures:[] RequiredSigs:0 Nonce:1778951391091201000}
+Transaction assigned to shard 0: {Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:10 Signatures:[] RequiredSigs:0 Nonce:1778951391091201000}
+Attempting to add transaction: {Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:20 Signatures:[] RequiredSigs:0 Nonce:1778951391091297000}
+Transaction assigned to shard 0: {Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:20 Signatures:[] RequiredSigs:0 Nonce:1778951391091297000}
+    dBFT_test.go:139: Initial blockchain state: &{Blocks:[{Transactions:[] AssetTransactions:[] OrderTransactions:[] CredentialTransactions:[] PrevHash:0000000000000000 Nonce:0 Signatures:[]}] Nodes:[] LockedWallets:map[] Delegates:[{ID:delegate1 IsDelegate:false Stake:0 Votes:0 PrivateKey:[] PublicKey:[] Inbox:<nil> VotingStrategy:0x103b872a0 Blockchain:0x14000441d48} {ID:delegate2 IsDelegate:false Stake:0 Votes:0 PrivateKey:[] PublicKey:[] Inbox:<nil> VotingStrategy:0x103b872a0 Blockchain:0x14000441d48}] PublicKeyToID:map[] UserIDToDelegateID:map[] currentView:{Number:0} currentSpeaker:0 Wallets:map[wallet1:0x140011ed2c0 wallet2:0x140011ed308] Nonce:0 TransactionPool:[] Shards:[0x1400154ec00 0x1400154ec40 0x1400154ec80] P2PNode:0x140011fa730 Assets:map[] Holdings:map[] OrderBooks:map[] Trades:[] Credentials:map[] PendingInstructions:map[] ConfirmedPayments:map[] PendingSettlements:map[] PendingAssetTransactions:[] PaymentProvider:0x1400057c6f0 IdentityRegistry:0x1400057c738 OracleService:0x140003d74a0 SettlementRouter:map[] WindowManager:0x140003d7480 WindowResults:[] SPVs:map[] PendingCorporateActions:map[] ProspectusExemptions:map[] SuitabilityAssessments:map[] JurisdictionRules:map[GB:0x14001570f00] CostBasisTracker:0x1400007c558 ValuationOracle:0x140003d7490 Deals:map[] LegalDocAmendments:map[] DividendHoldingSnapshots:map[] AMLScreener:0x140007cc6c0 PendingSARs:map[] RegulatoryReports:[] Events:0x14000212e00}
+2/2 transactions are valid
+Transaction pool before block creation: [{Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:10 Signatures:[] RequiredSigs:0 Nonce:1778951391091201000} {Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:20 Signatures:[] RequiredSigs:0 Nonce:1778951391091297000}]
+Delegate delegate1 voted true on the block
+Delegate delegate2 voted true on the block
+Consensus achieved with 2 yes votes out of 2
+Finalizing block with hash: 8ca0ae31566c1060137d5f2d3a7e1e4bf3664f0bdf8494318ac4f73946539702
+Block 2 created with signatures: [[100 101 108 101 103 97 116 101 49] [100 101 108 101 103 97 116 101 50]]
+Speaker for view 1 is delegate2
+    dBFT_test.go:162: Final blockchain state: &{Blocks:[{Transactions:[] AssetTransactions:[] OrderTransactions:[] CredentialTransactions:[] PrevHash:0000000000000000 Nonce:0 Signatures:[]} {Transactions:[{Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:10 Signatures:[] RequiredSigs:0 Nonce:1778951391091201000} {Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:20 Signatures:[] RequiredSigs:0 Nonce:1778951391091297000}] AssetTransactions:[] OrderTransactions:[] CredentialTransactions:[] PrevHash:686a65da9f82dc73c80efe98558d25fc9d4ba08202d759c331e8355f420a313a Nonce:0 Signatures:[[100 101 108 101 103 97 116 101 49] [100 101 108 101 103 97 116 101 50]]} {Transactions:[{Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:10 Signatures:[] RequiredSigs:0 Nonce:1778951391091201000} {Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:20 Signatures:[] RequiredSigs:0 Nonce:1778951391091297000}] AssetTransactions:[] OrderTransactions:[] CredentialTransactions:[] PrevHash:8ca0ae31566c1060137d5f2d3a7e1e4bf3664f0bdf8494318ac4f73946539702 Nonce:0 Signatures:[[100 101 108 101 103 97 116 101 49] [100 101 108 101 103 97 116 101 50]]}] Nodes:[] LockedWallets:map[] Delegates:[{ID:delegate1 IsDelegate:false Stake:0 Votes:0 PrivateKey:[] PublicKey:[] Inbox:<nil> VotingStrategy:0x103b872a0 Blockchain:0x14000441d48} {ID:delegate2 IsDelegate:false Stake:0 Votes:0 PrivateKey:[] PublicKey:[] Inbox:<nil> VotingStrategy:0x103b872a0 Blockchain:0x14000441d48}] PublicKeyToID:map[] UserIDToDelegateID:map[] currentView:{Number:1} currentSpeaker:1 Wallets:map[wallet1:0x140011ed2c0 wallet2:0x140011ed308] Nonce:1 TransactionPool:[{Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:10 Signatures:[] RequiredSigs:0 Nonce:1778951391091201000} {Sender:aJb0EyCJnRuMhFyCQ17FyerAhQ4rHcQdCEMhgyhv7rQ= Receiver:wallet2 Amount:20 Signatures:[] RequiredSigs:0 Nonce:1778951391091297000}] Shards:[0x1400154ec00 0x1400154ec40 0x1400154ec80] P2PNode:0x140011fa730 Assets:map[] Holdings:map[] OrderBooks:map[] Trades:[] Credentials:map[] PendingInstructions:map[] ConfirmedPayments:map[] PendingSettlements:map[] PendingAssetTransactions:[] PaymentProvider:0x1400057c6f0 IdentityRegistry:0x1400057c738 OracleService:0x140003d74a0 SettlementRouter:map[] WindowManager:0x140003d7480 WindowResults:[] SPVs:map[] PendingCorporateActions:map[] ProspectusExemptions:map[] SuitabilityAssessments:map[] JurisdictionRules:map[GB:0x14001570f00] CostBasisTracker:0x1400007c558 ValuationOracle:0x140003d7490 Deals:map[] LegalDocAmendments:map[] DividendHoldingSnapshots:map[] AMLScreener:0x140007cc6c0 PendingSARs:map[] RegulatoryReports:[] Events:0x14000212e00}
+--- PASS: TestCreateBlock (0.00s)
+=== RUN   TestNetworkConsensus
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53289/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/52022/webrtc-direct/certhash/uEiBnTKUI0r0mBq_n0Yb8PBPrxKr6Gdf5F_SunG48YG7MHA/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/55760/quic-v1/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/57036/quic-v1/webtransport/certhash/uEiCu1NfXp3kcizcjGOmFPSD--0buLf5R0nd_oL9ku_r3hA/certhash/uEiBNTzeMFlxEk51BXGaDMbVdp3wmv3tvTmFfWXhNlkoxew/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53289/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/52022/webrtc-direct/certhash/uEiBnTKUI0r0mBq_n0Yb8PBPrxKr6Gdf5F_SunG48YG7MHA/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/55760/quic-v1/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/57036/quic-v1/webtransport/certhash/uEiCu1NfXp3kcizcjGOmFPSD--0buLf5R0nd_oL9ku_r3hA/certhash/uEiBNTzeMFlxEk51BXGaDMbVdp3wmv3tvTmFfWXhNlkoxew/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53290/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/55133/quic-v1/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57613/quic-v1/webtransport/certhash/uEiCu1NfXp3kcizcjGOmFPSD--0buLf5R0nd_oL9ku_r3hA/certhash/uEiBNTzeMFlxEk51BXGaDMbVdp3wmv3tvTmFfWXhNlkoxew/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/65117/webrtc-direct/certhash/uEiBnTKUI0r0mBq_n0Yb8PBPrxKr6Gdf5F_SunG48YG7MHA/p2p/12D3KooWHWN8836ysrpn3Xt8ZWySyi5rDLxFegS6dSKndKDDn23U
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-topic
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Speaker for view 0 is node1
+Invalid block: no transactions
+Proposed block is invalid. Consensus cannot proceed.
+--- PASS: TestNetworkConsensus (0.00s)
+=== RUN   TestVoteOnBlock
+--- PASS: TestVoteOnBlock (0.00s)
+=== RUN   TestAchieveConsensusWithMixedVotes
+Delegate delegate1 voted true on the block
+Delegate delegate2 voted true on the block
+Delegate delegate3 voted false on the block
+Consensus achieved with 2 yes votes out of 3
+Finalizing block with hash: c1c15717fef8c73e8c4c15cfe09a474dfc191924cd33ab535c37f20811e6551f
+Delegate delegate1 voted true on the block
+Delegate delegate2 voted false on the block
+Delegate delegate3 voted false on the block
+Consensus not achieved. Yes votes: 1, No votes: 2
+--- PASS: TestAchieveConsensusWithMixedVotes (0.00s)
+=== RUN   TestNewDeal_Valid
+--- PASS: TestNewDeal_Valid (0.00s)
+=== RUN   TestNewDeal_InvalidFraction
+--- PASS: TestNewDeal_InvalidFraction (0.00s)
+=== RUN   TestAttachAnchor_Valid
+--- PASS: TestAttachAnchor_Valid (0.00s)
+=== RUN   TestAttachAnchor_BelowMinimum
+--- PASS: TestAttachAnchor_BelowMinimum (0.00s)
+=== RUN   TestAttachAnchor_RetailInvestor
+--- PASS: TestAttachAnchor_RetailInvestor (0.00s)
+=== RUN   TestAttachAnchor_ExpiredCredential
+--- PASS: TestAttachAnchor_ExpiredCredential (0.00s)
+=== RUN   TestAddCoInvestor_Valid
+--- PASS: TestAddCoInvestor_Valid (0.00s)
+=== RUN   TestAddCoInvestor_DealNotAnchored
+--- PASS: TestAddCoInvestor_DealNotAnchored (0.00s)
+=== RUN   TestTotalCommitted_SumCorrect
+--- PASS: TestTotalCommitted_SumCorrect (0.00s)
+=== RUN   TestIsOversubscribed_True
+--- PASS: TestIsOversubscribed_True (0.00s)
+=== RUN   TestCheckAnchorDeadline_Fails
+--- PASS: TestCheckAnchorDeadline_Fails (0.00s)
+=== RUN   TestCheckAnchorDeadline_NotYet
+--- PASS: TestCheckAnchorDeadline_NotYet (0.00s)
+=== RUN   TestNewCredential_Valid
+--- PASS: TestNewCredential_Valid (0.00s)
+=== RUN   TestNewCredential_InvalidJurisdiction
+--- PASS: TestNewCredential_InvalidJurisdiction (0.00s)
+=== RUN   TestNewCredential_EmptyWalletKey
+--- PASS: TestNewCredential_EmptyWalletKey (0.00s)
+=== RUN   TestNewCredential_NilRegistryKey
+--- PASS: TestNewCredential_NilRegistryKey (0.00s)
+=== RUN   TestNewCredential_InvalidDays
+--- PASS: TestNewCredential_InvalidDays (0.00s)
+=== RUN   TestCredentialExpiry
+--- PASS: TestCredentialExpiry (0.00s)
+=== RUN   TestCredentialToAttestation
+--- PASS: TestCredentialToAttestation (0.00s)
+=== RUN   TestCredentialSignatureTampering
+--- PASS: TestCredentialSignatureTampering (0.00s)
+=== RUN   TestCredentialVerifySignature_WrongKey
+--- PASS: TestCredentialVerifySignature_WrongKey (0.00s)
+=== RUN   TestAttestationIsValid
+--- PASS: TestAttestationIsValid (0.00s)
+=== RUN   TestAttestationIsAccredited
+--- PASS: TestAttestationIsAccredited (0.00s)
+=== RUN   TestMockRegistry_IssueAndVerify
+--- PASS: TestMockRegistry_IssueAndVerify (0.00s)
+=== RUN   TestMockRegistry_VerifyUnknownWallet
+--- PASS: TestMockRegistry_VerifyUnknownWallet (0.00s)
+=== RUN   TestMockRegistry_RegistryPublicKey
+--- PASS: TestMockRegistry_RegistryPublicKey (0.00s)
+=== RUN   TestCheckTransferEligibility_NoRestrictions
+--- PASS: TestCheckTransferEligibility_NoRestrictions (0.00s)
+=== RUN   TestCheckTransferEligibility_Accredited
+--- PASS: TestCheckTransferEligibility_Accredited (0.00s)
+=== RUN   TestCheckTransferEligibility_RetailBlocked
+--- PASS: TestCheckTransferEligibility_RetailBlocked (0.00s)
+=== RUN   TestCheckTransferEligibility_JurisdictionBlocked
+--- PASS: TestCheckTransferEligibility_JurisdictionBlocked (0.00s)
+=== RUN   TestCheckTransferEligibility_NoCredentialForAccreditedAsset
+--- PASS: TestCheckTransferEligibility_NoCredentialForAccreditedAsset (0.00s)
+=== RUN   TestAssetValidationWithCredentials
+--- PASS: TestAssetValidationWithCredentials (0.00s)
+=== RUN   TestLocalKeyProvider_SignVerify
+--- PASS: TestLocalKeyProvider_SignVerify (0.00s)
+=== RUN   TestLocalKeyProvider_CrossVerify
+--- PASS: TestLocalKeyProvider_CrossVerify (0.00s)
+=== RUN   TestKMSKeyProvider_SignRecordsCall
+--- PASS: TestKMSKeyProvider_SignRecordsCall (0.00s)
+=== RUN   TestKMSKeyProvider_VerifyRecordsCall
+--- PASS: TestKMSKeyProvider_VerifyRecordsCall (0.00s)
+=== RUN   TestKeyProvider_Interface
+--- PASS: TestKeyProvider_Interface (0.00s)
+=== RUN   TestVaultKeyProvider_New_InvalidParams
+--- PASS: TestVaultKeyProvider_New_InvalidParams (0.00s)
+=== RUN   TestVaultKeyProvider_NewFromEnv_MissingCreds
+--- PASS: TestVaultKeyProvider_NewFromEnv_MissingCreds (0.00s)
+=== RUN   TestVaultKeyProvider_NewFromEnv_Valid
+--- PASS: TestVaultKeyProvider_NewFromEnv_Valid (0.00s)
+=== RUN   TestVaultKeyProvider_Sign
+--- PASS: TestVaultKeyProvider_Sign (0.00s)
+=== RUN   TestVaultKeyProvider_Sign_HTTPError
+--- PASS: TestVaultKeyProvider_Sign_HTTPError (0.00s)
+=== RUN   TestVaultKeyProvider_Sign_BadSignatureFormat
+--- PASS: TestVaultKeyProvider_Sign_BadSignatureFormat (0.00s)
+=== RUN   TestVaultKeyProvider_Verify_Valid
+--- PASS: TestVaultKeyProvider_Verify_Valid (0.00s)
+=== RUN   TestVaultKeyProvider_Verify_Invalid
+--- PASS: TestVaultKeyProvider_Verify_Invalid (0.00s)
+=== RUN   TestVaultKeyProvider_Verify_HTTPError
+--- PASS: TestVaultKeyProvider_Verify_HTTPError (0.00s)
+=== RUN   TestVaultKeyProvider_PublicKeyString
+--- PASS: TestVaultKeyProvider_PublicKeyString (0.00s)
+=== RUN   TestVaultKeyProvider_PublicKeyString_HTTPError
+--- PASS: TestVaultKeyProvider_PublicKeyString_HTTPError (0.00s)
+=== RUN   TestVaultKeyProvider_ImplementsKeyProvider
+--- PASS: TestVaultKeyProvider_ImplementsKeyProvider (0.00s)
+=== RUN   TestGeneratePrivateKey
+--- PASS: TestGeneratePrivateKey (0.00s)
+=== RUN   TestPrivateKeySign
+--- PASS: TestPrivateKeySign (0.00s)
+=== RUN   TestPublicKeyFromString
+--- PASS: TestPublicKeyFromString (0.00s)
+=== RUN   TestNewLiquidityWindow_Valid
+--- PASS: TestNewLiquidityWindow_Valid (0.00s)
+=== RUN   TestNewLiquidityWindow_InvalidDates
+--- PASS: TestNewLiquidityWindow_InvalidDates (0.00s)
+=== RUN   TestNewLiquidityWindow_PastOpen
+--- PASS: TestNewLiquidityWindow_PastOpen (0.00s)
+=== RUN   TestWindowManager_ScheduleWindow
+--- PASS: TestWindowManager_ScheduleWindow (0.00s)
+=== RUN   TestWindowManager_NoOverlap
+--- PASS: TestWindowManager_NoOverlap (0.00s)
+=== RUN   TestWindowManager_Tick_Opens
+--- PASS: TestWindowManager_Tick_Opens (0.00s)
+=== RUN   TestWindowManager_Tick_Closes
+--- PASS: TestWindowManager_Tick_Closes (0.00s)
+=== RUN   TestMatchingSuppressedOutsideWindow
+Finalizing block with hash: bbd232cf5cc9376ce2332f78c7944754a8d6e97f96cb4f08bbdd81e10f2643b9
+--- PASS: TestMatchingSuppressedOutsideWindow (0.00s)
+=== RUN   TestMatchingRunsOnWindowClose
+Finalizing block with hash: bbd232cf5cc9376ce2332f78c7944754a8d6e97f96cb4f08bbdd81e10f2643b9
+--- PASS: TestMatchingRunsOnWindowClose (0.00s)
+=== RUN   TestWindowResult_VWAP
+--- PASS: TestWindowResult_VWAP (0.00s)
+=== RUN   TestMultipleAssets_IndependentWindows
+--- PASS: TestMultipleAssets_IndependentWindows (0.00s)
+=== RUN   TestOperatorRegistry_ImplementsInterface
+--- PASS: TestOperatorRegistry_ImplementsInterface (0.00s)
+=== RUN   TestOperatorRegistry_NilRegistryKey
+--- PASS: TestOperatorRegistry_NilRegistryKey (0.00s)
+=== RUN   TestOperatorRegistry_RequestKYC
+--- PASS: TestOperatorRegistry_RequestKYC (0.00s)
+=== RUN   TestOperatorRegistry_ApproveKYC
+--- PASS: TestOperatorRegistry_ApproveKYC (0.00s)
+=== RUN   TestOperatorRegistry_ApproveKYC_NoPending
+--- PASS: TestOperatorRegistry_ApproveKYC_NoPending (0.00s)
+=== RUN   TestOperatorRegistry_IssueCredential_DirectIssuance
+--- PASS: TestOperatorRegistry_IssueCredential_DirectIssuance (0.00s)
+=== RUN   TestOperatorRegistry_VerifyCredential
+--- PASS: TestOperatorRegistry_VerifyCredential (0.00s)
+=== RUN   TestOperatorRegistry_VerifyCredential_Unknown
+--- PASS: TestOperatorRegistry_VerifyCredential_Unknown (0.00s)
+=== RUN   TestOperatorRegistry_ListPendingRequests
+--- PASS: TestOperatorRegistry_ListPendingRequests (0.00s)
+=== RUN   TestOperatorRegistry_DuplicateRequest_Overwrites
+--- PASS: TestOperatorRegistry_DuplicateRequest_Overwrites (0.00s)
+=== RUN   TestOperatorRegistry_RequestKYC_InvalidInputs
+--- PASS: TestOperatorRegistry_RequestKYC_InvalidInputs (0.00s)
+=== RUN   TestNewOrder_Valid
+--- PASS: TestNewOrder_Valid (0.00s)
+=== RUN   TestNewOrder_InvalidPrice
+--- PASS: TestNewOrder_InvalidPrice (0.00s)
+=== RUN   TestNewOrder_NegativePrice
+--- PASS: TestNewOrder_NegativePrice (0.00s)
+=== RUN   TestNewOrder_InvalidQuantity
+--- PASS: TestNewOrder_InvalidQuantity (0.00s)
+=== RUN   TestNewOrder_NilKey
+--- PASS: TestNewOrder_NilKey (0.00s)
+=== RUN   TestOrder_Remaining
+--- PASS: TestOrder_Remaining (0.00s)
+=== RUN   TestOrder_IsExpired_GTC
+--- PASS: TestOrder_IsExpired_GTC (0.00s)
+=== RUN   TestOrder_IsExpired_Future
+--- PASS: TestOrder_IsExpired_Future (0.00s)
+=== RUN   TestOrder_IsExpired_Past
+--- PASS: TestOrder_IsExpired_Past (0.00s)
+=== RUN   TestOrder_VerifySignature_Tampered
+--- PASS: TestOrder_VerifySignature_Tampered (0.00s)
+=== RUN   TestOrderBookAddBid
+--- PASS: TestOrderBookAddBid (0.00s)
+=== RUN   TestOrderBookAddAsk
+--- PASS: TestOrderBookAddAsk (0.00s)
+=== RUN   TestOrderBookTimePriority
+--- PASS: TestOrderBookTimePriority (0.00s)
+=== RUN   TestAddOrder_InvalidSignature
+--- PASS: TestAddOrder_InvalidSignature (0.00s)
+=== RUN   TestAddOrder_Expired
+--- PASS: TestAddOrder_Expired (0.00s)
+=== RUN   TestCancelOrder
+--- PASS: TestCancelOrder (0.00s)
+=== RUN   TestCancelOrder_WrongCanceller
+--- PASS: TestCancelOrder_WrongCanceller (0.00s)
+=== RUN   TestCancelOrder_NotFound
+--- PASS: TestCancelOrder_NotFound (0.00s)
+=== RUN   TestCancelAsk
+--- PASS: TestCancelAsk (0.00s)
+=== RUN   TestMatchOrders_FullFill
+--- PASS: TestMatchOrders_FullFill (0.00s)
+=== RUN   TestMatchOrders_NoMatch
+--- PASS: TestMatchOrders_NoMatch (0.00s)
+=== RUN   TestMatchOrders_ExecuteAtAskPrice
+--- PASS: TestMatchOrders_ExecuteAtAskPrice (0.00s)
+=== RUN   TestMatchOrders_PartialFill
+--- PASS: TestMatchOrders_PartialFill (0.00s)
+=== RUN   TestMatchOrders_MultipleMatches
+--- PASS: TestMatchOrders_MultipleMatches (0.00s)
+=== RUN   TestMatchOrders_ProducesAssetTransactions
+--- PASS: TestMatchOrders_ProducesAssetTransactions (0.00s)
+=== RUN   TestOrderBookEmptyAfterFill
+--- PASS: TestOrderBookEmptyAfterFill (0.00s)
+=== RUN   TestOrderExpiry
+--- PASS: TestOrderExpiry (0.00s)
+=== RUN   TestMatchOrders_TradeIDs_Unique
+--- PASS: TestMatchOrders_TradeIDs_Unique (0.00s)
+=== RUN   TestNewOrderBook
+--- PASS: TestNewOrderBook (0.00s)
+=== RUN   TestNewP2PNode
+Genesis block added to the blockchain.
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53309/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/55652/quic-v1/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/56337/webrtc-direct/certhash/uEiACjX3_cJM1QnjSLivndQgjS2--3SWjeu_4fuwAUWV4MA/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/62004/quic-v1/webtransport/certhash/uEiB-iggvWE5HZ3PudhQjLSOWd-OblB1p-HH75_3VFrNgiA/certhash/uEiA2UpeSD6wmCuR2FdXzsGVdWAFzPpbQBZMgOpRmMrPIzw/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53309/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/55652/quic-v1/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/56337/webrtc-direct/certhash/uEiACjX3_cJM1QnjSLivndQgjS2--3SWjeu_4fuwAUWV4MA/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/62004/quic-v1/webtransport/certhash/uEiB-iggvWE5HZ3PudhQjLSOWd-OblB1p-HH75_3VFrNgiA/certhash/uEiA2UpeSD6wmCuR2FdXzsGVdWAFzPpbQBZMgOpRmMrPIzw/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53310/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53005/quic-v1/webtransport/certhash/uEiB-iggvWE5HZ3PudhQjLSOWd-OblB1p-HH75_3VFrNgiA/certhash/uEiA2UpeSD6wmCuR2FdXzsGVdWAFzPpbQBZMgOpRmMrPIzw/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57948/webrtc-direct/certhash/uEiACjX3_cJM1QnjSLivndQgjS2--3SWjeu_4fuwAUWV4MA/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/60249/quic-v1/p2p/12D3KooWKW4ghhEqhRJnsXgeADwv3zESzwV6KXB2if145avq2KMS
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-blockchain
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53311/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/55664/webrtc-direct/certhash/uEiAu6qt6poPIPGfo0EgynJFHlVnMyT2kvuDyhWJ_yN-SzA/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/58794/quic-v1/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/62652/quic-v1/webtransport/certhash/uEiBmdkA-8RrHGPlcayaSrDqgU02sX0R7HtB6eVnWyoFmHg/certhash/uEiDCk4E9qz6xWz8fnUSdMwEQ8p85n2KL-nvR-agnG13yuA/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53311/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/55664/webrtc-direct/certhash/uEiAu6qt6poPIPGfo0EgynJFHlVnMyT2kvuDyhWJ_yN-SzA/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/58794/quic-v1/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/62652/quic-v1/webtransport/certhash/uEiBmdkA-8RrHGPlcayaSrDqgU02sX0R7HtB6eVnWyoFmHg/certhash/uEiDCk4E9qz6xWz8fnUSdMwEQ8p85n2KL-nvR-agnG13yuA/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53312/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/50266/webrtc-direct/certhash/uEiAu6qt6poPIPGfo0EgynJFHlVnMyT2kvuDyhWJ_yN-SzA/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/52276/quic-v1/webtransport/certhash/uEiBmdkA-8RrHGPlcayaSrDqgU02sX0R7HtB6eVnWyoFmHg/certhash/uEiDCk4E9qz6xWz8fnUSdMwEQ8p85n2KL-nvR-agnG13yuA/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/52986/quic-v1/p2p/12D3KooWQ7bTfYiguoytStNuvNg7y2fcpdsk5QSQEcysjjsDxsqy
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-topic
+2026-05-16T18:09:51.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:51 mDNS discovery service started
+2026-05-16T18:09:51.120+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+    p2p_test.go:40: P2PNode initialized successfully
+--- PASS: TestNewP2PNode (0.01s)
+=== RUN   TestBroadcastTransaction
+MockP2PNode: Initialized
+MockP2PNode: BroadcastTransaction called
+MockTopic: Publish called
+--- PASS: TestBroadcastTransaction (0.00s)
+=== RUN   TestBroadcastBlock
+MockP2PNode: Initialized
+MockP2PNode: BroadcastBlock called
+MockTopic: Publish called
+--- PASS: TestBroadcastBlock (0.00s)
+=== RUN   TestHandleMessages
+MockP2PNode: Initialized
+MockP2PNode: HandleMessages called
+MockTopic: Publish called
+MockTopic: Publish called
+MockTopic: Publish called
+MockTopic: Publish called
+    p2p_test.go:142: All message types handled successfully
+--- PASS: TestHandleMessages (2.00s)
+=== RUN   TestPeerDiscovery_Local
+Genesis block added to the blockchain.
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53314/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/49954/webrtc-direct/certhash/uEiBaybX_otoCOD4-M63A4X3hyKGlNjfk00FiBuDXpd9NMw/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/60564/quic-v1/webtransport/certhash/uEiDcad1mXz5gv7iu64Rg2nO5Ol61fL4Z9agLwowI_YvDOQ/certhash/uEiDk7svjrXhI7NH5EtF8HyroKpa65FlUyAgfKeR1Fn54UA/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/61601/quic-v1/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53314/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/49954/webrtc-direct/certhash/uEiBaybX_otoCOD4-M63A4X3hyKGlNjfk00FiBuDXpd9NMw/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/60564/quic-v1/webtransport/certhash/uEiDcad1mXz5gv7iu64Rg2nO5Ol61fL4Z9agLwowI_YvDOQ/certhash/uEiDk7svjrXhI7NH5EtF8HyroKpa65FlUyAgfKeR1Fn54UA/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/61601/quic-v1/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53315/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/52740/quic-v1/webtransport/certhash/uEiDcad1mXz5gv7iu64Rg2nO5Ol61fL4Z9agLwowI_YvDOQ/certhash/uEiDk7svjrXhI7NH5EtF8HyroKpa65FlUyAgfKeR1Fn54UA/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/53763/quic-v1/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/63725/webrtc-direct/certhash/uEiBaybX_otoCOD4-M63A4X3hyKGlNjfk00FiBuDXpd9NMw/p2p/12D3KooWQ2H7Z9vzPW8ek23ihD2kXyZfhd66KyVEzFb3bvDLvuJd
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: node1
+2026-05-16T18:09:53.130+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:53 mDNS discovery service started
+2026-05-16T18:09:53.131+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+Genesis block added to the blockchain.
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53316/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/50086/webrtc-direct/certhash/uEiCFS9cmEpL_GOeI5VOnb0CdqX3MAglK7CvvSDoyE1TCww/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/61942/quic-v1/webtransport/certhash/uEiBf7Fnx-NXyqXKw37dfQmxk4USFHYxZHHx5aQnH9nEG0w/certhash/uEiDtI__FTepQVNBMGBCYIvu-mlkUBf26HrsIvZc57Vg_Sg/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/64926/quic-v1/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53316/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/50086/webrtc-direct/certhash/uEiCFS9cmEpL_GOeI5VOnb0CdqX3MAglK7CvvSDoyE1TCww/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/61942/quic-v1/webtransport/certhash/uEiBf7Fnx-NXyqXKw37dfQmxk4USFHYxZHHx5aQnH9nEG0w/certhash/uEiDtI__FTepQVNBMGBCYIvu-mlkUBf26HrsIvZc57Vg_Sg/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/64926/quic-v1/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53317/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/52915/webrtc-direct/certhash/uEiCFS9cmEpL_GOeI5VOnb0CdqX3MAglK7CvvSDoyE1TCww/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/58020/quic-v1/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/60998/quic-v1/webtransport/certhash/uEiBf7Fnx-NXyqXKw37dfQmxk4USFHYxZHHx5aQnH9nEG0w/certhash/uEiDtI__FTepQVNBMGBCYIvu-mlkUBf26HrsIvZc57Vg_Sg/p2p/12D3KooWRFPhPc5rGFN5Xjo8tC3k296VxDouNDYNxouQozKjTPbB
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: node2
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:53 mDNS discovery service started
+2026-05-16T18:09:53.138+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53318/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/56358/quic-v1/webtransport/certhash/uEiAeSMTb0d2v4HEeq_aq6CNKVjX2szV8fThk3-5SozhA6A/certhash/uEiB3qruM5n0n6dvMjc1ave-wet_p3ueBqgLKArKCuqpR4g/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/57500/quic-v1/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/61217/webrtc-direct/certhash/uEiAPqnbEUJT68e2gC9e7mDpgnKcrNDC7D8Nqb9390CW_Iw/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53318/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/56358/quic-v1/webtransport/certhash/uEiAeSMTb0d2v4HEeq_aq6CNKVjX2szV8fThk3-5SozhA6A/certhash/uEiB3qruM5n0n6dvMjc1ave-wet_p3ueBqgLKArKCuqpR4g/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/57500/quic-v1/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/61217/webrtc-direct/certhash/uEiAPqnbEUJT68e2gC9e7mDpgnKcrNDC7D8Nqb9390CW_Iw/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53319/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/56763/quic-v1/webtransport/certhash/uEiAeSMTb0d2v4HEeq_aq6CNKVjX2szV8fThk3-5SozhA6A/certhash/uEiB3qruM5n0n6dvMjc1ave-wet_p3ueBqgLKArKCuqpR4g/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/58338/quic-v1/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/61079/webrtc-direct/certhash/uEiAPqnbEUJT68e2gC9e7mDpgnKcrNDC7D8Nqb9390CW_Iw/p2p/12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-discovery
+2026-05-16T18:09:53.145+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:53 mDNS discovery service started
+2026-05-16T18:09:53.146+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53320/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/51981/quic-v1/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/55720/quic-v1/webtransport/certhash/uEiDxl_l5m2oGWA_e11KQqpLXoBOUCDBOiOC8oxEpV7pXag/certhash/uEiBLeLeaAAJszzwbuwscOkXbqp43UXIx_yQtythmCDU-Gg/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/61479/webrtc-direct/certhash/uEiCbID-ppO6FOwLYw9uTrlB6T8SxuuYMyQZMkzrypdfOKQ/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53320/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/51981/quic-v1/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/55720/quic-v1/webtransport/certhash/uEiDxl_l5m2oGWA_e11KQqpLXoBOUCDBOiOC8oxEpV7pXag/certhash/uEiBLeLeaAAJszzwbuwscOkXbqp43UXIx_yQtythmCDU-Gg/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/61479/webrtc-direct/certhash/uEiCbID-ppO6FOwLYw9uTrlB6T8SxuuYMyQZMkzrypdfOKQ/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53321/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57350/webrtc-direct/certhash/uEiCbID-ppO6FOwLYw9uTrlB6T8SxuuYMyQZMkzrypdfOKQ/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57460/quic-v1/webtransport/certhash/uEiDxl_l5m2oGWA_e11KQqpLXoBOUCDBOiOC8oxEpV7pXag/certhash/uEiBLeLeaAAJszzwbuwscOkXbqp43UXIx_yQtythmCDU-Gg/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/57806/quic-v1/p2p/12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-discovery
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:53 mDNS discovery service started
+2026-05-16T18:09:53.151+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+    p2p_test.go:180: nodeB (12D3KooWQTLMb9hwgbGov7EQX9z7pHbqDXaQsbm7hZbBgEeDJXMD) discovered nodeA (12D3KooWLJ2RbXkJ6RUtv1CWSEmvzi2HfBtNP3NxRQW3rs67NuVc)
+2026/05/16 18:09:53 Shutting down P2PNode...
+2026/05/16 18:09:53 Closing PubSub subscription...
+2026/05/16 18:09:53 Closing PubSub topic...
+2026/05/16 18:09:53 Closing libp2p host...
+2026/05/16 18:09:53 P2PNode shutdown complete.
+2026/05/16 18:09:53 Shutting down P2PNode...
+2026/05/16 18:09:53 Closing PubSub subscription...
+2026/05/16 18:09:53 Closing PubSub topic...
+2026/05/16 18:09:53 Closing libp2p host...
+2026/05/16 18:09:53 P2PNode shutdown complete.
+--- PASS: TestPeerDiscovery_Local (0.04s)
+=== RUN   TestSendMessage
+MockP2PNode: Initialized
+MockP2PNode: Initialized
+MockP2PNode: SendMessage called to peer mock-node-1778951393156658000 with message: Hello, peer!
+    p2p_test.go:199: Message sent successfully from MockNode1 (mock-node-1778951393156656000) to MockNode2 (mock-node-1778951393156658000)
+--- PASS: TestSendMessage (0.00s)
+=== RUN   TestMockP2PNodeInitialization
+MockP2PNode: Initialized
+    p2p_test.go:213: MockP2PNode initialized with ID: mock-node-1778951393156700000
+--- PASS: TestMockP2PNodeInitialization (0.00s)
+=== RUN   TestHandleMessagesWithStructuredMessages
+MockP2PNode: Initialized
+MockP2PNode: HandleMessages called
+MockTopic: Publish called
+    p2p_test.go:245: Structured message handled successfully
+--- PASS: TestHandleMessagesWithStructuredMessages (1.00s)
+=== RUN   TestPingAndAck
+MockP2PNode: Initialized
+MockP2PNode: SendPing called to peer mock-peer-id
+MockP2PNode: HandleMessages called
+    p2p_test.go:267: Ping and acknowledgment messages handled successfully
+--- PASS: TestPingAndAck (1.00s)
+=== RUN   TestP2PNodeShutdown
+MockP2PNode: Initialized
+MockP2PNode: Shutdown called
+    p2p_test.go:282: P2PNode shutdown successfully
+--- PASS: TestP2PNodeShutdown (0.00s)
+=== RUN   TestRealPeersCommunication
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53322/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/53988/quic-v1/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/54280/webrtc-direct/certhash/uEiCsUhI1Fw-Lztg5uOnjo1PWfjI9bS-s9U_qbpWewwgUZA/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/64104/quic-v1/webtransport/certhash/uEiAopQApj411XOkX9dtzL183nl7FEpC4b0PK8vgJVYXMpQ/certhash/uEiClMVkrNjXg16BiqEqSI8dSRBCMMh0aqQ9sfIXXkOMlkw/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53322/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/53988/quic-v1/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/54280/webrtc-direct/certhash/uEiCsUhI1Fw-Lztg5uOnjo1PWfjI9bS-s9U_qbpWewwgUZA/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/64104/quic-v1/webtransport/certhash/uEiAopQApj411XOkX9dtzL183nl7FEpC4b0PK8vgJVYXMpQ/certhash/uEiClMVkrNjXg16BiqEqSI8dSRBCMMh0aqQ9sfIXXkOMlkw/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53323/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/51435/quic-v1/webtransport/certhash/uEiAopQApj411XOkX9dtzL183nl7FEpC4b0PK8vgJVYXMpQ/certhash/uEiClMVkrNjXg16BiqEqSI8dSRBCMMh0aqQ9sfIXXkOMlkw/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/59611/quic-v1/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/60732/webrtc-direct/certhash/uEiCsUhI1Fw-Lztg5uOnjo1PWfjI9bS-s9U_qbpWewwgUZA/p2p/12D3KooWP5YQpH47zP2ixV5zmEtd176rpfUoeqjhPyLHRAjTj2bR
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-topic
+2026-05-16T18:09:55.162+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:55 mDNS discovery service started
+2026-05-16T18:09:55.163+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:208	Libp2p host created with ID: 12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:219	DHT initialized in client mode for peer discovery
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/tcp/53324/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/50075/webrtc-direct/certhash/uEiAAifFH-6JIgkaJI5b-N0xoxuqNW_IlnEJM2r1VXM89Pw/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/52189/quic-v1/webtransport/certhash/uEiCpdABn4BDG16OEggWQ8-72bRYzHAtnBYRv4JU7wVakhw/certhash/uEiDrNQReH_lUbRpKS8hw2I4TW-TNUy1U368TEoGRDLgBSQ/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/127.0.0.1/udp/64229/quic-v1/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/tcp/53324/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/50075/webrtc-direct/certhash/uEiAAifFH-6JIgkaJI5b-N0xoxuqNW_IlnEJM2r1VXM89Pw/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/52189/quic-v1/webtransport/certhash/uEiCpdABn4BDG16OEggWQ8-72bRYzHAtnBYRv4JU7wVakhw/certhash/uEiDrNQReH_lUbRpKS8hw2I4TW-TNUy1U368TEoGRDLgBSQ/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip4/192.168.1.92/udp/64229/quic-v1/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/tcp/53325/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/49714/webrtc-direct/certhash/uEiAAifFH-6JIgkaJI5b-N0xoxuqNW_IlnEJM2r1VXM89Pw/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/55912/quic-v1/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:223	Listening on: /ip6/::1/udp/60403/quic-v1/webtransport/certhash/uEiCpdABn4BDG16OEggWQ8-72bRYzHAtnBYRv4JU7wVakhw/certhash/uEiDrNQReH_lUbRpKS8hw2I4TW-TNUy1U368TEoGRDLgBSQ/p2p/12D3KooWKp6zTb9FdDzSWKLM5TK8saoddcQ2zp5ejan7NH6w2LG1
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:259	DHT bootstrapped successfully
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:312	PubSub service initialized
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:319	Joined topic: test-topic
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:326	Subscribed to topic
+2026/05/16 18:09:55 mDNS discovery service started
+2026-05-16T18:09:55.166+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:348	Stream handler set for direct messaging
+2026-05-16T18:09:56.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.012+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.012+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.018+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.018+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.035+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.035+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.040+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.040+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.046+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.046+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.050+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.050+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.055+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.055+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.059+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.059+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.063+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.063+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.068+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.068+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.071+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.071+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.074+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.074+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.077+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.077+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.083+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.083+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.083+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.088+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.088+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.088+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.090+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.090+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.094+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.094+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.116+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.116+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+2026-05-16T18:09:56.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:264	DHT routing table now has 0 peers
+2026-05-16T18:09:56.119+0100	INFO	p2pnode	GreenHouse.web3/p2p.go:268	Advertising rendezvous point: greenhouse-p2p-network
+2026-05-16T18:09:56.119+0100	WARN	p2pnode	GreenHouse.web3/p2p.go:280	Failed to advertise rendezvous point: failed to find any peer in table
+    p2p_test.go:320: Real peer communication test passed
+2026/05/16 18:09:57 Shutting down P2PNode...
+2026/05/16 18:09:57 Closing PubSub subscription...
+2026/05/16 18:09:57 Closing PubSub topic...
+2026/05/16 18:09:57 Closing libp2p host...
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 P2PNode shutdown complete.
+2026/05/16 18:09:57 Shutting down P2PNode...
+2026/05/16 18:09:57 Closing PubSub subscription...
+2026/05/16 18:09:57 Closing PubSub topic...
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Closing libp2p host...
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+2026/05/16 18:09:57 P2PNode shutdown complete.
+2026/05/16 18:09:57 Error reading message: subscription cancelled
+--- PASS: TestRealPeersCommunication (2.01s)
+2026/05/16 18:09:57 Stopping message handling.
+=== RUN   TestAllowlistGater_OpenWhenEmpty
+--- PASS: TestAllowlistGater_OpenWhenEmpty (0.00s)
+=== RUN   TestAllowlistGater_Permits
+--- PASS: TestAllowlistGater_Permits (0.00s)
+=== RUN   TestAllowlistGater_Blocks
+--- PASS: TestAllowlistGater_Blocks (0.00s)
+=== RUN   TestAllowlistGater_AllowPeer_ValidSig
+--- PASS: TestAllowlistGater_AllowPeer_ValidSig (0.00s)
+=== RUN   TestAllowlistGater_AllowPeer_InvalidSig
+--- PASS: TestAllowlistGater_AllowPeer_InvalidSig (0.00s)
+=== RUN   TestAllowlistGater_RevokePeer
+--- PASS: TestAllowlistGater_RevokePeer (0.00s)
+=== RUN   TestMockPaymentProvider_CreateVirtualAccount
+--- PASS: TestMockPaymentProvider_CreateVirtualAccount (0.00s)
+=== RUN   TestMockPaymentProvider_CreateVirtualAccount_Idempotent
+--- PASS: TestMockPaymentProvider_CreateVirtualAccount_Idempotent (0.00s)
+=== RUN   TestMockPaymentProvider_CreateVirtualAccount_DifferentWallets
+--- PASS: TestMockPaymentProvider_CreateVirtualAccount_DifferentWallets (0.00s)
+=== RUN   TestMockPaymentProvider_CreateVirtualAccount_EmptyWallet
+--- PASS: TestMockPaymentProvider_CreateVirtualAccount_EmptyWallet (0.00s)
+=== RUN   TestMockPaymentProvider_GetPaymentStatus_Unknown
+--- PASS: TestMockPaymentProvider_GetPaymentStatus_Unknown (0.00s)
+=== RUN   TestMockPaymentProvider_ConfirmPayment
+--- PASS: TestMockPaymentProvider_ConfirmPayment (0.00s)
+=== RUN   TestMockPaymentProvider_ConfirmPayment_ZeroAmount
+--- PASS: TestMockPaymentProvider_ConfirmPayment_ZeroAmount (0.00s)
+=== RUN   TestMockPaymentProvider_ConfirmPayment_EmptyReference
+--- PASS: TestMockPaymentProvider_ConfirmPayment_EmptyReference (0.00s)
+=== RUN   TestMockOracleService_SignInstruction
+--- PASS: TestMockOracleService_SignInstruction (0.00s)
+=== RUN   TestMockOracleService_VerifyInstruction_Valid
+--- PASS: TestMockOracleService_VerifyInstruction_Valid (0.00s)
+=== RUN   TestMockOracleService_VerifyInstruction_Tampered
+--- PASS: TestMockOracleService_VerifyInstruction_Tampered (0.00s)
+=== RUN   TestMockOracleService_VerifyInstruction_NoSignature
+--- PASS: TestMockOracleService_VerifyInstruction_NoSignature (0.00s)
+=== RUN   TestMockOracleService_VerifyInstruction_NilInstruction
+--- PASS: TestMockOracleService_VerifyInstruction_NilInstruction (0.00s)
+=== RUN   TestMockOracleService_VerifyInstruction_WrongOracle
+--- PASS: TestMockOracleService_VerifyInstruction_WrongOracle (0.00s)
+=== RUN   TestMockOracleService_SignConfirmation
+--- PASS: TestMockOracleService_SignConfirmation (0.00s)
+=== RUN   TestMockOracleService_VerifyConfirmation_Valid
+--- PASS: TestMockOracleService_VerifyConfirmation_Valid (0.00s)
+=== RUN   TestMockOracleService_VerifyConfirmation_Tampered
+--- PASS: TestMockOracleService_VerifyConfirmation_Tampered (0.00s)
+=== RUN   TestMockOracleService_VerifyConfirmation_NilConfirmation
+--- PASS: TestMockOracleService_VerifyConfirmation_NilConfirmation (0.00s)
+=== RUN   TestMockOracleService_OraclePublicKey
+--- PASS: TestMockOracleService_OraclePublicKey (0.00s)
+=== RUN   TestPaymentFlow_InstructionToConfirmation
+--- PASS: TestPaymentFlow_InstructionToConfirmation (0.00s)
+=== RUN   TestGenerateHoldingsReport_SingleAsset
+--- PASS: TestGenerateHoldingsReport_SingleAsset (0.00s)
+=== RUN   TestGenerateHoldingsReport_MultiAsset
+--- PASS: TestGenerateHoldingsReport_MultiAsset (0.00s)
+=== RUN   TestGenerateHoldingsReport_EmptyWallet
+--- PASS: TestGenerateHoldingsReport_EmptyWallet (0.00s)
+=== RUN   TestCostBasisTracker_FIFO
+--- PASS: TestCostBasisTracker_FIFO (0.00s)
+=== RUN   TestCostBasisTracker_PartialLot
+--- PASS: TestCostBasisTracker_PartialLot (0.00s)
+=== RUN   TestCostBasisTracker_InsufficientUnits
+--- PASS: TestCostBasisTracker_InsufficientUnits (0.00s)
+=== RUN   TestGenerateTaxReport_Gain
+--- PASS: TestGenerateTaxReport_Gain (0.00s)
+=== RUN   TestGenerateTaxReport_Loss
+--- PASS: TestGenerateTaxReport_Loss (0.00s)
+=== RUN   TestGenerateTaxReport_GBExemptAmount
+--- PASS: TestGenerateTaxReport_GBExemptAmount (0.00s)
+=== RUN   TestGenerateTaxReport_FXConversion
+--- PASS: TestGenerateTaxReport_FXConversion (0.00s)
+=== RUN   TestGenerateTaxReport_FiltersByYear
+--- PASS: TestGenerateTaxReport_FiltersByYear (0.00s)
+=== RUN   TestMarshalFiDA_HoldingsReport
+--- PASS: TestMarshalFiDA_HoldingsReport (0.00s)
+=== RUN   TestNewSPVWrapper_Valid
+--- PASS: TestNewSPVWrapper_Valid (0.00s)
+=== RUN   TestNewSPVWrapper_MissingFields
+=== RUN   TestNewSPVWrapper_MissingFields/empty_name
+=== RUN   TestNewSPVWrapper_MissingFields/empty_company
+=== RUN   TestNewSPVWrapper_MissingFields/empty_share_class
+=== RUN   TestNewSPVWrapper_MissingFields/empty_legal_doc
+--- PASS: TestNewSPVWrapper_MissingFields (0.00s)
+    --- PASS: TestNewSPVWrapper_MissingFields/empty_name (0.00s)
+    --- PASS: TestNewSPVWrapper_MissingFields/empty_company (0.00s)
+    --- PASS: TestNewSPVWrapper_MissingFields/empty_share_class (0.00s)
+    --- PASS: TestNewSPVWrapper_MissingFields/empty_legal_doc (0.00s)
+=== RUN   TestSPVWrapper_UpdateNAV
+--- PASS: TestSPVWrapper_UpdateNAV (0.00s)
+=== RUN   TestApplySPVTransaction_Dividend
+--- PASS: TestApplySPVTransaction_Dividend (0.00s)
+=== RUN   TestApplySPVTransaction_ZeroBalance
+--- PASS: TestApplySPVTransaction_ZeroBalance (0.00s)
+=== RUN   TestSPVAssetLink
+--- PASS: TestSPVAssetLink (0.00s)
+=== RUN   TestSPVSignatureTampering
+--- PASS: TestSPVSignatureTampering (0.00s)
+=== RUN   TestNewSPVTransaction_Valid
+--- PASS: TestNewSPVTransaction_Valid (0.00s)
+=== RUN   TestApplySPVTransaction_CapitalCall
+--- PASS: TestApplySPVTransaction_CapitalCall (0.00s)
+=== RUN   TestNewWallet
+Created new wallet with PublicKey: 36918aa00908b1408a02420779174c4f9feb95528fac075aea4a89ce61e1f81c and initial Balance: 0.000000
+--- PASS: TestNewWallet (0.00s)
+=== RUN   TestCreateTransaction
+Created new wallet with PublicKey: b3bce2375d69e42b357214ffb5f63725d9491fb5b50d710ae5344704bb0efea3 and initial Balance: 0.000000
+Created new wallet with PublicKey: db7cd79a7edd7ec59a775664d49891eafdd55afadfbc6863f4e946ac47f58339 and initial Balance: 0.000000
+Created transaction from s7ziN11p5Cs1chT/tfY3JdlJH7W1DXEK5TRHBLsO/qM= to 23zXmn7dfsWad1Zk1JiR6v3VWvrfvGhj9OlGrEf1gzk= for amount 100.000000
+--- PASS: TestCreateTransaction (0.00s)
+=== RUN   TestVerifyTransaction
+Created new wallet with PublicKey: 6d78567ae3ded1e7b79d920d2cca29b556fd52f9800cabfaeb1993b4f3b8d156 and initial Balance: 0.000000
+Created new wallet with PublicKey: 476f54b788f6b1e8d35e3bf9c16807508dcf7c4be917237ca8931b358b8493ad and initial Balance: 0.000000
+Created transaction from bXhWeuPe0ee3nZINLMoptVb9UvmADKv66xmTtPO40VY= to R29Ut4j2sejTXjv5wWgHUI3PfEvpFyN8qJMbNYuEk60= for amount 100.000000
+--- PASS: TestVerifyTransaction (0.00s)
+=== RUN   TestLockAndUnlockCurrency
+Created new wallet with PublicKey: 27dfdb714af9e9d33eb64e0a6b6b53c2993d3c867b87e0ce64730d39fb3d9df2 and initial Balance: 0.000000
+Locked 50.000000 currency from wallet 27dfdb714af9e9d33eb64e0a6b6b53c2993d3c867b87e0ce64730d39fb3d9df2. New wallet balance: 50.000000. Locked wallet balance: 50.000000
+Unlocked 30.000000 currency to wallet 27dfdb714af9e9d33eb64e0a6b6b53c2993d3c867b87e0ce64730d39fb3d9df2. New wallet balance: 80.000000. Locked wallet balance: 20.000000
+--- PASS: TestLockAndUnlockCurrency (0.00s)
+=== RUN   TestLockCurrency
+Created new wallet with PublicKey: 77e002bf96d4005e0439b092311680cf1cc39fef4f443188bd98b15fc2ffce1b and initial Balance: 0.000000
+Locked 50.000000 currency from wallet 77e002bf96d4005e0439b092311680cf1cc39fef4f443188bd98b15fc2ffce1b. New wallet balance: 50.000000. Locked wallet balance: 50.000000
+--- PASS: TestLockCurrency (0.00s)
+=== RUN   TestUnlockCurrency
+Created new wallet with PublicKey: 15c2c92ca4e48524839ee2bb5bba3b303bdad119baf951b092d110b8df87b4b9 and initial Balance: 0.000000
+Locked 50.000000 currency from wallet 15c2c92ca4e48524839ee2bb5bba3b303bdad119baf951b092d110b8df87b4b9. New wallet balance: 50.000000. Locked wallet balance: 50.000000
+Unlocked 30.000000 currency to wallet 15c2c92ca4e48524839ee2bb5bba3b303bdad119baf951b092d110b8df87b4b9. New wallet balance: 80.000000. Locked wallet balance: 20.000000
+Unlocked 20.000000 currency to wallet 15c2c92ca4e48524839ee2bb5bba3b303bdad119baf951b092d110b8df87b4b9. New wallet balance: 100.000000. Locked wallet balance: 0.000000
+--- PASS: TestUnlockCurrency (0.00s)
+=== RUN   TestLockCurrencyInsufficientBalance
+Created new wallet with PublicKey: 4ad09244a1ff64397647bfa9a09e79fd3e14ceef744947da8395b5fc6d05d0f6 and initial Balance: 0.000000
+--- PASS: TestLockCurrencyInsufficientBalance (0.00s)
+=== RUN   TestUnlockCurrencyInsufficientLockedBalance
+Created new wallet with PublicKey: cac1a9a65b0901a845ca509b963b78e1c8242071be507746bebe7dbda5b8a8e4 and initial Balance: 0.000000
+Locked 50.000000 currency from wallet cac1a9a65b0901a845ca509b963b78e1c8242071be507746bebe7dbda5b8a8e4. New wallet balance: 50.000000. Locked wallet balance: 50.000000
+--- PASS: TestUnlockCurrencyInsufficientLockedBalance (0.00s)
+PASS
+ok  	gonetwork	(cached)
+?   	gonetwork/api	[no test files]
+?   	gonetwork/cmd/api	[no test files]
+?   	gonetwork/cmd/bootstrap	[no test files]
+?   	gonetwork/cmd/node	[no test files]
+?   	gonetwork/cmd/operator	[no test files]
+?   	gonetwork/simulation	[no test files]

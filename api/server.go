@@ -42,6 +42,16 @@ type Server struct {
 	// When nil, POST /v1/webhooks/payment accepts without verifying the HMAC.
 	ModulrProvider *gonetwork.ModulrPaymentProvider
 
+	// Optional: set to enable the Pontes CeBM settlement webhook.
+	// When nil, POST /v1/webhooks/pontes returns 501.
+	// Register via Blockchain.RegisterSettlementProvider(SettlementCeBM, PontesProvider)
+	// once Eurosystem operator credentials are issued (Pontes pilot Q3 2026).
+	PontesProvider *gonetwork.PontesPaymentProvider
+
+	// Optional: set to enable the EURC on-chain settlement webhook.
+	// When nil, POST /v1/webhooks/eurc returns 501.
+	EURCProvider *gonetwork.EURCPaymentProvider
+
 	// wsHub fans blockchain events out to all connected WebSocket clients.
 	wsHub *hub
 
@@ -160,12 +170,21 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/suitability", s.jwtAdmin(http.HandlerFunc(s.handleSubmitSuitability)))
 	mux.Handle("GET /v1/suitability/{walletKey}/{assetID}", s.jwt(http.HandlerFunc(s.handleGetSuitability)))
 
+	// Legal document amendment trail (A-03)
+	mux.Handle("POST /v1/assets/{id}/legal-doc", s.jwt(http.HandlerFunc(s.handleAddLegalDocAmendment)))
+	mux.Handle("GET /v1/assets/{id}/legal-doc/history", s.jwt(http.HandlerFunc(s.handleGetLegalDocHistory)))
+
+	// Participation note countersignature — SPV admin only (A-04)
+	mux.Handle("POST /v1/assets/{id}/countersign", s.jwt(http.HandlerFunc(s.handleCounterSignAsset)))
+
 	// Trade approvals (mobile co-signing)
 	mux.Handle("GET /v1/trades/pending", s.jwt(http.HandlerFunc(s.handleListPendingTrades)))
 	mux.Handle("POST /v1/trades/{id}/approve", s.jwt(http.HandlerFunc(s.handleApproveTrade)))
 
 	// Payment webhook — no JWT; authenticated via HMAC signature from Modulr
 	mux.HandleFunc("POST /v1/webhooks/payment", s.handlePaymentWebhook)
+	mux.HandleFunc("POST /v1/webhooks/pontes", s.handlePontesWebhook)
+	mux.HandleFunc("POST /v1/webhooks/eurc", s.handleEURCWebhook)
 
 	// KYC webhook — no JWT; authenticated via HMAC from Onfido
 	mux.HandleFunc("POST /v1/webhooks/kyc", s.handleKYCWebhook)
@@ -176,6 +195,15 @@ func (s *Server) Routes() http.Handler {
 	// Dev-mode endpoints (disabled when GREENHOUSE_ADMIN_WALLET_KEYS is set)
 	mux.HandleFunc("GET /v1/dev/state", s.handleDevState)
 	mux.HandleFunc("GET /v1/dev/stream", s.handleDevStream)
+
+	// G-09: SAR (Suspicious Activity Report) management — admin only
+	mux.Handle("GET /v1/compliance/sar", s.jwtAdmin(http.HandlerFunc(s.handleListSARs)))
+	mux.Handle("POST /v1/compliance/sar/{id}/resolve", s.jwtAdmin(http.HandlerFunc(s.handleResolveSAR)))
+
+	// G-10: Regulatory report log — admin read; admin write for jurisdiction rules
+	mux.Handle("GET /v1/compliance/reports", s.jwtAdmin(http.HandlerFunc(s.handleListRegulatoryReports)))
+	mux.Handle("GET /v1/compliance/jurisdictions/{code}", s.jwt(http.HandlerFunc(s.handleGetJurisdictionRule)))
+	mux.Handle("POST /v1/compliance/jurisdictions", s.jwtAdmin(http.HandlerFunc(s.handleUpsertJurisdictionRule)))
 
 	return LoggingMiddleware(CORSMiddleware(RateLimitMiddleware(mux)))
 }

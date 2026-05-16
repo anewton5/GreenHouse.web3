@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"gonetwork"
 )
 
 // isDevMode reports whether the server is running without configured admin
@@ -88,11 +90,11 @@ func (s *Server) handleDevState(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		orderBookSnapshot = append(orderBookSnapshot, map[string]any{
-			"asset_id":   assetID,
-			"bid_count":  bidCount,
-			"ask_count":  askCount,
-			"bids":       ob.Bids,
-			"asks":       ob.Asks,
+			"asset_id":  assetID,
+			"bid_count": bidCount,
+			"ask_count": askCount,
+			"bids":      ob.Bids,
+			"asks":      ob.Asks,
 		})
 	}
 
@@ -128,24 +130,97 @@ func (s *Server) handleDevState(w http.ResponseWriter, r *http.Request) {
 		pendingPayments = append(pendingPayments, p)
 	}
 
+	// SPVs (A-04)
+	spvList := make([]any, 0, len(s.bc.SPVs))
+	for _, spv := range s.bc.SPVs {
+		spvList = append(spvList, spv)
+	}
+
+	// Participation notes awaiting SPV admin countersignature (A-04)
+	pendingCountersign := 0
+	for _, a := range s.bc.Assets {
+		if a.AssetType == gonetwork.AssetTypeParticipationNote && a.CirculatingSupply == 0 {
+			pendingCountersign++
+		}
+	}
+
+	// Legal document amendment log (A-03)
+	totalAmendments := 0
+	for _, list := range s.bc.LegalDocAmendments {
+		totalAmendments += len(list)
+	}
+
+	// Flatten amendment list for the dashboard (most recent first across all assets)
+	amendmentList := make([]any, 0, totalAmendments)
+	for assetID, list := range s.bc.LegalDocAmendments {
+		for _, am := range list {
+			amendmentList = append(amendmentList, map[string]any{
+				"id":                am.ID,
+				"asset_id":          assetID,
+				"previous_doc_hash": am.PreviousDocHash,
+				"new_doc_hash":      am.NewDocHash,
+				"amended_at":        am.AmendedAt,
+				"issuer_key":        am.IssuerKey,
+				"admin_key":         am.AdminKey,
+			})
+		}
+	}
+
+	// ── Part II compliance state ─────────────────────────────────────────
+
+	// Pending SARs (G-09)
+	pendingSARs := make([]any, 0, len(s.bc.PendingSARs))
+	for _, sar := range s.bc.PendingSARs {
+		if sar.Status == gonetwork.SARStatusPending {
+			pendingSARs = append(pendingSARs, sar)
+		}
+	}
+
+	// Recent regulatory reports — last 50 (G-10)
+	allReports := s.bc.RegulatoryReports
+	reportStart := 0
+	if len(allReports) > 50 {
+		reportStart = len(allReports) - 50
+	}
+	recentReports := make([]any, 0, len(allReports)-reportStart)
+	for _, rep := range allReports[reportStart:] {
+		recentReports = append(recentReports, rep)
+	}
+
+	// Jurisdiction rules snapshot (G-11)
+	jurisdictions := make(map[string]any, len(s.bc.JurisdictionRules))
+	for code, rule := range s.bc.JurisdictionRules {
+		jurisdictions[code] = rule
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"timestamp":         time.Now().UTC().Unix(),
-		"block_count":       len(s.bc.Blocks),
-		"blocks":            blocks,
-		"asset_count":       len(s.bc.Assets),
-		"assets":            assets,
-		"trade_count":       len(s.bc.Trades),
-		"trades":            s.bc.Trades,
-		"open_bid_count":    openBids,
-		"open_ask_count":    openAsks,
-		"order_books":       orderBookSnapshot,
-		"credential_count":  len(s.bc.Credentials),
-		"credentials":       credentials,
-		"deal_count":        len(s.bc.Deals),
-		"deals":             deals,
-		"corporate_actions": corpActions,
-		"liquidity_windows": liquidityWindows,
-		"pending_payments":  pendingPayments,
+		"timestamp":                 time.Now().UTC().Unix(),
+		"block_count":               len(s.bc.Blocks),
+		"blocks":                    blocks,
+		"asset_count":               len(s.bc.Assets),
+		"assets":                    assets,
+		"trade_count":               len(s.bc.Trades),
+		"trades":                    s.bc.Trades,
+		"open_bid_count":            openBids,
+		"open_ask_count":            openAsks,
+		"order_books":               orderBookSnapshot,
+		"credential_count":          len(s.bc.Credentials),
+		"credentials":               credentials,
+		"deal_count":                len(s.bc.Deals),
+		"deals":                     deals,
+		"corporate_actions":         corpActions,
+		"liquidity_windows":         liquidityWindows,
+		"pending_payments":          pendingPayments,
+		"spvs":                      spvList,
+		"pending_countersign_count": pendingCountersign,
+		"amendment_count":           totalAmendments,
+		"amendments":                amendmentList,
+		// Part II compliance
+		"pending_sar_count":       len(pendingSARs),
+		"pending_sars":            pendingSARs,
+		"regulatory_report_count": len(allReports),
+		"regulatory_reports":      recentReports,
+		"jurisdiction_rules":      jurisdictions,
 	})
 }
 

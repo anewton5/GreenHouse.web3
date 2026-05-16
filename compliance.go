@@ -59,6 +59,16 @@ type JurisdictionRule struct {
 	BlockedAssetTypes   []AssetType // asset types that may not be distributed in this country
 	MinTicketSizeEUR    float64     // 0 = no minimum
 	MaxTicketSizeEUR    float64     // 0 = no limit
+
+	// G-11: UK Financial Promotion Order fields
+	// FPOExemptionType is the Financial Promotion Order 2005 article under which
+	// this promotion is exempt from FCA authorisation (e.g. "fpo_art19" for
+	// certified high-net-worth individuals, "fpo_art50" for sophisticated investors).
+	// An empty string means no FPO exemption is claimed.
+	FPOExemptionType string `json:"fpo_exemption_type,omitempty"`
+	// RequiresRiskWarning indicates that a prescribed risk warning must be displayed
+	// to retail investors before they can invest (required for all UK retail offerings).
+	RequiresRiskWarning bool `json:"requires_risk_warning,omitempty"`
 }
 
 // SuitabilityKey returns the canonical map key for a suitability assessment.

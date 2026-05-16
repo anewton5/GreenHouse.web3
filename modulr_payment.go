@@ -222,6 +222,61 @@ func (m *ModulrPaymentProvider) CreateVirtualAccount(walletID string) (string, e
 	return "", fmt.Errorf("modulr: account created (id: %s) but no IBAN or sort code returned", result.ID)
 }
 
+// CreateEURVirtualAccount creates a named EUR virtual account in Modulr for a
+// participant wallet. It uses the same product code as the GBP account but
+// requests EUR currency, which creates a SEPA-enabled IBAN. This method exists
+// alongside CreateVirtualAccount (GBP) to preserve backward compatibility.
+// customerID and productCode must be set on the provider.
+func (m *ModulrPaymentProvider) CreateEURVirtualAccount(walletID string) (string, error) {
+	if m.customerID == "" {
+		return "", fmt.Errorf("modulr: customerID must be set to create virtual accounts; set MODULR_CUSTOMER_ID")
+	}
+	if m.productCode == "" {
+		return "", fmt.Errorf("modulr: productCode must be set to create virtual accounts; set MODULR_PRODUCT_CODE (find it via GET /customers/%s/accounts)", m.customerID)
+	}
+	payload := modulrAccountRequest{
+		Name:              walletID + "-EUR",
+		Currency:          "EUR",
+		ExternalReference: walletID + "-EUR",
+		ProductCode:       m.productCode,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("modulr: failed to marshal EUR account request: %w", err)
+	}
+
+	endpoint := m.baseURL + "/customers/" + m.customerID + "/accounts"
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("modulr: failed to build EUR account request: %w", err)
+	}
+	if err := m.addAuthHeaders(req); err != nil {
+		return "", err
+	}
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("modulr: CreateEURVirtualAccount request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("modulr: CreateEURVirtualAccount returned %d: %s", resp.StatusCode, string(b))
+	}
+
+	var result modulrAccountResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("modulr: failed to decode EUR account response: %w", err)
+	}
+	for _, id := range result.Identifiers {
+		if id.IBAN != "" {
+			return id.IBAN, nil
+		}
+	}
+	return "", fmt.Errorf("modulr: EUR account created (id: %s) but no IBAN returned", result.ID)
+}
+
 // GetPaymentStatus looks up an inbound payment by its external reference and
 // maps the Modulr status string to our internal PaymentStatus type. Returns
 // PaymentStatusPending (not an error) when no matching payment is found.

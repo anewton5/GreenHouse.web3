@@ -178,6 +178,39 @@ func (m *MockAMLScreener) ScreenTransaction(
 	return nil, nil
 }
 
+// EventSARCreated is the stream event type emitted when a flagged AML alert
+// creates a Suspicious Activity Report draft for compliance review.
+const EventSARCreated = "sar_created"
+
+// SARStatus tracks the lifecycle of a Suspicious Activity Report draft.
+type SARStatus string
+
+const (
+	SARStatusPending   SARStatus = "pending"
+	SARStatusFiled     SARStatus = "filed"
+	SARStatusDismissed SARStatus = "dismissed"
+)
+
+// SARDraft is an on-chain record created when an AML flag-severity alert fires.
+// A compliance officer must review and either file the report with the NCA/FinCEN
+// or dismiss it. No further token transfers from/to the flagged wallets are
+// blocked while the SAR is pending — only the initial transaction is affected.
+type SARDraft struct {
+	ID          string    `json:"id"`
+	SenderKey   string    `json:"sender_key"`
+	ReceiverKey string    `json:"receiver_key"`
+	AssetID     string    `json:"asset_id"`
+	Amount      float64   `json:"amount"`
+	Currency    string    `json:"currency"`
+	Reason      string    `json:"reason"`
+	MatchedList string    `json:"matched_list"`
+	CreatedAt   int64     `json:"created_at"`
+	ResolvedAt  int64     `json:"resolved_at,omitempty"`
+	ResolvedBy  string    `json:"resolved_by,omitempty"`
+	Status      SARStatus `json:"status"`
+	Notes       string    `json:"notes,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // ProspectusWarning
 // ---------------------------------------------------------------------------

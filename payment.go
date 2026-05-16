@@ -22,6 +22,11 @@ const (
 	SettlementFasterPay SettlementMethod = "faster_payments"
 	SettlementSWIFT     SettlementMethod = "swift_gpi"
 	SettlementEURC      SettlementMethod = "eurc_on_chain"
+	// SettlementCeBM uses the Eurosystem Pontes bridge to settle trades in
+	// tokenised Central Bank Money (CeBM) via T2 (wholesale RTGS). This is the
+	// primary EUR rail once the Pontes pilot launches (Q3 2026). Register a
+	// PontesPaymentProvider for this method via Blockchain.RegisterSettlementProvider.
+	SettlementCeBM SettlementMethod = "pontes_cbm"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,6 +50,14 @@ type PaymentInstruction struct {
 	Reference        string // unique reference for payment matching
 	ExpiresAt        int64  // Unix timestamp — trade reverts if unpaid
 	OracleSignature  []byte // Ed25519 sig from OracleService
+
+	// CeBM / Pontes fields — populated when Method == SettlementCeBM.
+	// PontesTransactionID is the identifier returned by the Pontes bridge when
+	// the DLT delivery leg is registered via PontesPaymentProvider.RegisterSettlement.
+	PontesTransactionID string `json:"pontes_transaction_id,omitempty"`
+	// SettlementNetwork identifies the DLT network on which the asset delivery leg
+	// is settled. Set to "eurosystem-pontes" for CeBM and "ethereum" for EURC.
+	SettlementNetwork string `json:"settlement_network,omitempty"`
 }
 
 // PaymentConfirmation is broadcast on-chain when fiat payment is confirmed.
@@ -98,6 +111,32 @@ type OracleService interface {
 
 	// OraclePublicKey returns the oracle's public key for external verification.
 	OraclePublicKey() *PublicKey
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// DefaultSettlementMethod returns the preferred payment rail for the given
+// trade currency. The returned method is used as the default when creating a
+// PaymentInstruction unless overridden by the caller.
+//
+//   - GBP  → SettlementFasterPay (Faster Payments via Modulr)
+//   - EUR  → SettlementEURC      (Circle EURC stablecoin; upgrade to SettlementCeBM
+//     once a PontesPaymentProvider is registered via Blockchain.RegisterSettlementProvider)
+//   - USD, CHF → SettlementSWIFT (SWIFT GPI)
+//   - default   → SettlementSEPA
+func DefaultSettlementMethod(currency string) SettlementMethod {
+	switch currency {
+	case "GBP":
+		return SettlementFasterPay
+	case "EUR":
+		return SettlementEURC
+	case "USD", "CHF":
+		return SettlementSWIFT
+	default:
+		return SettlementSEPA
+	}
 }
 
 // ---------------------------------------------------------------------------

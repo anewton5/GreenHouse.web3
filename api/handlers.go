@@ -153,12 +153,18 @@ func (s *Server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
 
 	// Map asset_class string to AssetType.
 	classMap := map[string]gonetwork.AssetType{
-		"equity":      gonetwork.AssetTypeEquity,
-		"bond":        gonetwork.AssetTypeDebt,
-		"fund":        gonetwork.AssetTypeFundUnit,
-		"real_estate": gonetwork.AssetTypeEquity,
-		"commodity":   gonetwork.AssetTypeEquity,
-		"other":       gonetwork.AssetTypeEquity,
+		"equity":             gonetwork.AssetTypeEquity,
+		"bond":               gonetwork.AssetTypeDebt,
+		"debt":               gonetwork.AssetTypeDebt,
+		"fund":               gonetwork.AssetTypeFundUnit,
+		"fund_unit":          gonetwork.AssetTypeFundUnit,
+		"warrant":            gonetwork.AssetTypeWarrant,
+		"convertible":        gonetwork.AssetTypeConvertible,
+		"participation_note": gonetwork.AssetTypeParticipationNote,
+		"depositary_receipt": gonetwork.AssetTypeDepositaryReceipt,
+		"real_estate":        gonetwork.AssetTypeEquity,
+		"commodity":          gonetwork.AssetTypeEquity,
+		"other":              gonetwork.AssetTypeEquity,
 	}
 	assetType, ok := classMap[req.AssetClass]
 	if !ok {
@@ -186,15 +192,20 @@ func (s *Server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	s.bc.Assets[assetID] = a
 
-	// Create the issuer's initial holding at full supply so they can immediately
-	// place ask orders and initiate transfers to investors.
-	issuerHoldingKey := gonetwork.HoldingKey(walletKey, assetID)
-	s.bc.Holdings[issuerHoldingKey] = &gonetwork.AssetHolding{
-		AssetID:  assetID,
-		HolderID: walletKey,
-		Balance:  req.TotalSupply,
+	// A-04: Participation notes require SPV admin countersignature before supply
+	// is released. Leave CirculatingSupply = 0 and create no issuer holding.
+	// The POST /v1/assets/{id}/countersign endpoint releases supply.
+	if assetType != gonetwork.AssetTypeParticipationNote {
+		// For all other asset types, create the issuer's initial holding at full
+		// supply so they can immediately place ask orders and initiate transfers.
+		issuerHoldingKey := gonetwork.HoldingKey(walletKey, assetID)
+		s.bc.Holdings[issuerHoldingKey] = &gonetwork.AssetHolding{
+			AssetID:  assetID,
+			HolderID: walletKey,
+			Balance:  req.TotalSupply,
+		}
+		a.CirculatingSupply = req.TotalSupply
 	}
-	a.CirculatingSupply = req.TotalSupply
 
 	s.bc.SealBlock(
 		[]gonetwork.AssetTransaction{{AssetID: assetID, TxType: gonetwork.AssetTxTypeIssue}},
@@ -281,8 +292,15 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "asset_id is required")
 		return
 	}
-	if _, ok := s.bc.Assets[req.AssetID]; !ok {
+	asset, ok := s.bc.Assets[req.AssetID]
+	if !ok {
 		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	// A-04: Block ask orders on participation notes that have not yet been
+	// countersigned by the SPV administrator.
+	if asset.AssetType == gonetwork.AssetTypeParticipationNote && asset.CirculatingSupply == 0 && req.Side == "sell" {
+		writeError(w, http.StatusConflict, "asset awaiting SPV admin countersignature: ask orders not permitted until supply is released")
 		return
 	}
 	if req.Quantity <= 0 {
@@ -699,6 +717,31 @@ func (s *Server) handleAdminKYCApprove(w http.ResponseWriter, r *http.Request) {
 	// is immediately usable for transfer eligibility checks.
 	s.bc.Credentials[req.WalletKey] = att
 
+	// G-07: for professional and eligible-counterparty investors, auto-derive a
+	// positive suitability assessment for all existing complex instruments so they
+	// are not blocked at the transfer gate.  Do not overwrite an existing assessment.
+	if att.InvestorClass == gonetwork.InvestorClassProfessional ||
+		att.InvestorClass == gonetwork.InvestorClassEligibleCP {
+		for assetID, asset := range s.bc.Assets {
+			if asset.AssetType == gonetwork.AssetTypeWarrant ||
+				asset.AssetType == gonetwork.AssetTypeConvertible {
+				key := gonetwork.SuitabilityKey(req.WalletKey, assetID)
+				if _, exists := s.bc.SuitabilityAssessments[key]; !exists {
+					s.bc.SuitabilityAssessments[key] = &gonetwork.SuitabilityAssessment{
+						WalletPublicKey:         req.WalletKey,
+						AssetID:                 assetID,
+						InstrumentClass:         asset.AssetType,
+						HasSufficientKnowledge:  true,
+						HasSufficientExperience: true,
+						CanAbsorbLoss:           true,
+						Suitable:                true,
+						AssessedAt:              time.Now().Unix(),
+					}
+				}
+			}
+		}
+	}
+
 	s.bc.EmitEvent(gonetwork.EventCredentialIssued, map[string]any{
 		"wallet_key":     att.WalletPublicKey,
 		"investor_class": att.InvestorClass,
@@ -754,10 +797,110 @@ func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if event.Type == "PAYMENT_RECEIVED" && event.Reference != "" {
-		// Errors here are intentionally swallowed — returning a non-200 to
-		// Modulr would trigger automatic retries for events that may already
-		// be processed or are not applicable (e.g. wrong reference format).
-		_ = s.bc.PaymentProvider.ConfirmPayment(event.Reference, event.Amount, event.Currency)
+		// ConfirmAndSettle confirms the payment AND applies the DVP asset transfer
+		// if the corresponding PaymentInstruction is pending. Errors are swallowed
+		// so Modulr does not retry events that are already processed or unknown.
+		_ = s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// handlePontesWebhook receives Eurosystem Pontes CeBM settlement confirmations.
+// POST /v1/webhooks/pontes
+//
+// The Pontes bridge signs each callback with HMAC-SHA256; the signature is in
+// the X-Pontes-Signature header. When PontesProvider is nil this endpoint
+// returns 501.
+func (s *Server) handlePontesWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.PontesProvider == nil {
+		writeError(w, http.StatusNotImplemented, "Pontes CeBM provider not configured")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	sig := r.Header.Get("X-Pontes-Signature")
+	if sig == "" {
+		writeError(w, http.StatusUnauthorized, "missing X-Pontes-Signature header")
+		return
+	}
+	if !s.PontesProvider.VerifyWebhookSignature(body, sig) {
+		writeError(w, http.StatusUnauthorized, "invalid Pontes webhook signature")
+		return
+	}
+
+	var event struct {
+		Type      string  `json:"type"`
+		Reference string  `json:"externalReference"`
+		Amount    float64 `json:"amount"`
+		Currency  string  `json:"currency"`
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid webhook payload")
+		return
+	}
+
+	if event.Type == "settlement.confirmed" && event.Reference != "" {
+		_ = s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleEURCWebhook receives Circle EURC on-chain transfer confirmations.
+// POST /v1/webhooks/eurc
+//
+// Circle signs each notification with HMAC-SHA256; the signature is in the
+// Circle-Signature header. When EURCProvider is nil this endpoint returns 501.
+func (s *Server) handleEURCWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.EURCProvider == nil {
+		writeError(w, http.StatusNotImplemented, "EURC provider not configured")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	sig := r.Header.Get("Circle-Signature")
+	if sig == "" {
+		writeError(w, http.StatusUnauthorized, "missing Circle-Signature header")
+		return
+	}
+	if !s.EURCProvider.VerifyWebhookSignature(body, sig) {
+		writeError(w, http.StatusUnauthorized, "invalid EURC webhook signature")
+		return
+	}
+
+	// Circle uses a notifications envelope; extract the transfer event.
+	var envelope struct {
+		NotificationType string `json:"notificationType"`
+		Transfer         *struct {
+			ExternalRef string  `json:"externalRef"`
+			Amount      float64 `json:"amount,string"`
+			Currency    string  `json:"currency"`
+		} `json:"transfer"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid webhook payload")
+		return
+	}
+
+	if envelope.NotificationType == "transfer.complete" &&
+		envelope.Transfer != nil &&
+		envelope.Transfer.ExternalRef != "" {
+		_ = s.bc.ConfirmAndSettle(
+			envelope.Transfer.ExternalRef,
+			envelope.Transfer.Amount,
+			envelope.Transfer.Currency,
+		)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -950,6 +1093,112 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fillQty := found.Quantity - found.Filled
+
+	// ---------------------------------------------------------------------------
+	// Part II compliance gate (G-06, G-07, G-08, G-09, G-11)
+	// ---------------------------------------------------------------------------
+
+	// Look up the buyer's credential (may be nil for uncredentialled wallets).
+	buyerCred := s.bc.Credentials[found.PlacedBy]
+
+	// G-08: reject transfers to wallets with an expired credential.
+	if buyerCred != nil && buyerCred.ExpiresAt > 0 && time.Now().Unix() > buyerCred.ExpiresAt {
+		writeError(w, http.StatusForbidden, fmt.Sprintf(
+			"buyer KYC credential has expired (expired at unix %d): re-KYC required",
+			buyerCred.ExpiresAt,
+		))
+		return
+	}
+
+	// G-07: MiFID II suitability check for complex instruments (warrants, convertibles).
+	if err := gonetwork.CheckSuitability(found.PlacedBy, asset, s.bc.SuitabilityAssessments); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	// G-06: prospectus exemption cap — reject if the buyer would breach the
+	// per-jurisdiction retail holder limit.
+	if exemption, hasExemption := s.bc.ProspectusExemptions[found.AssetID]; hasExemption {
+		if err := gonetwork.CheckProspectusLimits(buyerCred, exemption); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
+	// G-11: jurisdiction-specific rules.
+	if buyerCred != nil {
+		if rule, hasRule := s.bc.JurisdictionRules[buyerCred.Jurisdiction]; hasRule {
+			if err := gonetwork.ApplyJurisdictionRule(rule, nil, buyerCred, asset, 0); err != nil {
+				writeError(w, http.StatusForbidden, err.Error())
+				return
+			}
+		}
+	}
+
+	// G-09: FATF Travel Rule — transfers ≥ EUR 1,000 equivalent must carry
+	// originator/beneficiary information. Parse an optional request body so
+	// callers can supply travel_rule_data when required.
+	var fillReq struct {
+		TravelRuleData *gonetwork.TravelRulePayload `json:"travel_rule_data,omitempty"`
+	}
+	// Attempt to decode; ignore errors (body is optional for small transfers).
+	_ = json.NewDecoder(r.Body).Decode(&fillReq)
+
+	tradeValueEUR := fillQty * found.Price
+	if tradeValueEUR >= 1000.0 {
+		if fillReq.TravelRuleData == nil {
+			writeError(w, http.StatusUnprocessableEntity,
+				"FATF Travel Rule: travel_rule_data is required for transfers ≥ EUR 1,000")
+			return
+		}
+		if err := fillReq.TravelRuleData.Validate(); err != nil {
+			writeError(w, http.StatusUnprocessableEntity,
+				"travel_rule_data invalid: "+err.Error())
+			return
+		}
+	}
+
+	// G-09: AML screening via the configured screener.
+	if s.bc.AMLScreener != nil {
+		alert, err := s.bc.AMLScreener.ScreenTransaction(
+			issuerKey, found.PlacedBy, found.AssetID, fillQty, asset.Currency,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "AML screening failed: "+err.Error())
+			return
+		}
+		if alert != nil && alert.Severity == gonetwork.AMLSeverityBlock {
+			writeError(w, http.StatusForbidden, "transfer blocked by AML screening: "+alert.Reason)
+			return
+		}
+		if alert != nil && alert.Severity == gonetwork.AMLSeverityFlag {
+			// Create a SAR draft for compliance review; transfer is permitted.
+			sarID := fmt.Sprintf("sar-%s-%d", orderID[:8], time.Now().UnixNano())
+			s.bc.PendingSARs[sarID] = &gonetwork.SARDraft{
+				ID:          sarID,
+				SenderKey:   issuerKey,
+				ReceiverKey: found.PlacedBy,
+				AssetID:     found.AssetID,
+				Amount:      fillQty,
+				Currency:    asset.Currency,
+				Reason:      alert.Reason,
+				MatchedList: alert.MatchedList,
+				CreatedAt:   time.Now().Unix(),
+				Status:      gonetwork.SARStatusPending,
+			}
+			s.bc.EmitEvent(gonetwork.EventSARCreated, map[string]any{
+				"sar_id":       sarID,
+				"order_id":     orderID,
+				"asset_id":     found.AssetID,
+				"matched_list": alert.MatchedList,
+				"reason":       alert.Reason,
+			})
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// End compliance gate
+	// ---------------------------------------------------------------------------
 
 	// Credit the buyer's holding.
 	buyerKey := gonetwork.HoldingKey(found.PlacedBy, found.AssetID)
@@ -1332,39 +1581,83 @@ func (s *Server) handleListSPV(w http.ResponseWriter, r *http.Request) {
 // POST /v1/spv
 // Body: { signed_spv: <SPVWrapper> }
 func (s *Server) handleCreateSPV(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		SignedSPV *gonetwork.SPVWrapper `json:"signed_spv"`
-	}
+	walletKey := walletFromCtx(r)
+
+	// Accept two body shapes:
+	//   (a) { "signed_spv": <SPVWrapper> }  — pre-signed by the caller (legacy / SDK)
+	//   (b) { "name": "...", "jurisdiction": "LU", "underlying_company_id": "...",
+	//          "underlying_share_class": "...", "legal_doc_hash": "..." }
+	//       — unsigned; SPVAdminKey is derived from the JWT wallet claim.
+	var raw map[string]json.RawMessage
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := json.Unmarshal(body, &raw); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if req.SignedSPV == nil {
-		writeError(w, http.StatusBadRequest, "signed_spv is required")
-		return
+
+	var spv *gonetwork.SPVWrapper
+
+	if _, hasSignedSPV := raw["signed_spv"]; hasSignedSPV {
+		// Path (a): full signed wrapper supplied by caller
+		var req struct {
+			SignedSPV *gonetwork.SPVWrapper `json:"signed_spv"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil || req.SignedSPV == nil {
+			writeError(w, http.StatusBadRequest, "invalid signed_spv")
+			return
+		}
+		pubKey, err := gonetwork.PublicKeyFromString(req.SignedSPV.SPVAdminKey)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid SPVAdminKey in signed_spv")
+			return
+		}
+		if !req.SignedSPV.VerifySignature(pubKey) {
+			writeError(w, http.StatusUnauthorized, "signed_spv signature verification failed")
+			return
+		}
+		spv = req.SignedSPV
+	} else {
+		// Path (b): plain fields — build the wrapper server-side, ownership proven by JWT
+		var fields struct {
+			Name                 string `json:"name"`
+			Jurisdiction         string `json:"jurisdiction"`
+			UnderlyingCompanyID  string `json:"underlying_company_id"`
+			UnderlyingShareClass string `json:"underlying_share_class"`
+			LegalDocHash         string `json:"legal_doc_hash"`
+		}
+		if err := json.Unmarshal(body, &fields); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON fields")
+			return
+		}
+		if fields.Name == "" || fields.Jurisdiction == "" ||
+			fields.UnderlyingCompanyID == "" || fields.UnderlyingShareClass == "" ||
+			fields.LegalDocHash == "" {
+			writeError(w, http.StatusBadRequest, "name, jurisdiction, underlying_company_id, underlying_share_class and legal_doc_hash are required")
+			return
+		}
+		spv = &gonetwork.SPVWrapper{
+			Name:                 fields.Name,
+			Jurisdiction:         gonetwork.SPVJurisdiction(fields.Jurisdiction),
+			UnderlyingCompanyID:  fields.UnderlyingCompanyID,
+			UnderlyingShareClass: fields.UnderlyingShareClass,
+			SPVAdminKey:          walletKey,
+			LegalDocHash:         fields.LegalDocHash,
+			NAVUpdatedAt:         0,
+		}
+		// Deterministic ID: sha3-256(adminKey || name || jurisdiction || companyID)
+		spv.ID = gonetwork.SPVDeterministicID(walletKey, fields.Name, fields.Jurisdiction, fields.UnderlyingCompanyID)
 	}
 
-	pubKey, err := gonetwork.PublicKeyFromString(req.SignedSPV.SPVAdminKey)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid SPVAdminKey in signed_spv")
-		return
-	}
-	if !req.SignedSPV.VerifySignature(pubKey) {
-		writeError(w, http.StatusUnauthorized, "signed_spv signature verification failed")
-		return
-	}
-
-	if _, exists := s.bc.SPVs[req.SignedSPV.ID]; exists {
+	if _, exists := s.bc.SPVs[spv.ID]; exists {
 		writeError(w, http.StatusConflict, "SPV with this ID already exists")
 		return
 	}
-	s.bc.SPVs[req.SignedSPV.ID] = req.SignedSPV
-	writeJSON(w, http.StatusCreated, req.SignedSPV)
+	s.bc.SPVs[spv.ID] = spv
+	writeJSON(w, http.StatusCreated, spv)
 }
 
 // handleUpdateSPVNAV updates the NAV of an SPV the authenticated wallet administers.
@@ -1547,4 +1840,359 @@ func (s *Server) handleGetSuitability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sa)
+}
+
+// ---------------------------------------------------------------------------
+// Legal document amendment endpoints (A-03)
+// ---------------------------------------------------------------------------
+
+// handleAddLegalDocAmendment appends a signed legal document amendment to the
+// on-chain amendment log for an asset.
+// POST /v1/assets/{id}/legal-doc
+// Body: {"previous_doc_hash":"<hex>","new_doc_hash":"<hex>","issuer_signature":"<base64>"}
+//
+// For AssetTypeParticipationNote the body must also include:
+//
+//	{"admin_key":"<base64>","admin_signature":"<base64>"}
+func (s *Server) handleAddLegalDocAmendment(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+	walletKey := walletFromCtx(r)
+
+	asset, ok := s.bc.Assets[assetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if asset.Issuer != walletKey {
+		writeError(w, http.StatusForbidden, "only the asset issuer may amend the legal document")
+		return
+	}
+
+	var req struct {
+		PreviousDocHash string `json:"previous_doc_hash"`
+		NewDocHash      string `json:"new_doc_hash"`
+		IssuerSignature string `json:"issuer_signature"` // base64
+		AdminKey        string `json:"admin_key,omitempty"`
+		AdminSignature  string `json:"admin_signature,omitempty"` // base64
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.PreviousDocHash == "" || req.NewDocHash == "" {
+		writeError(w, http.StatusBadRequest, "previous_doc_hash and new_doc_hash are required")
+		return
+	}
+	if req.PreviousDocHash == req.NewDocHash {
+		writeError(w, http.StatusBadRequest, "new_doc_hash must differ from previous_doc_hash")
+		return
+	}
+	if req.IssuerSignature == "" {
+		writeError(w, http.StatusBadRequest, "issuer_signature is required")
+		return
+	}
+
+	issuerSig, err := base64.StdEncoding.DecodeString(req.IssuerSignature)
+	if err != nil {
+		issuerSig, err = base64.RawURLEncoding.DecodeString(req.IssuerSignature)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "issuer_signature is not valid base64")
+			return
+		}
+	}
+
+	// Derive a deterministic ID (mirrors NewLegalDocAmendment logic without a private key).
+	h := sha3.New256()
+	h.Write([]byte(assetID))
+	h.Write([]byte(req.PreviousDocHash))
+	h.Write([]byte(req.NewDocHash))
+	h.Write([]byte(walletKey))
+	amendID := hex.EncodeToString(h.Sum(nil))
+
+	amendment := &gonetwork.LegalDocAmendment{
+		ID:              amendID,
+		AssetID:         assetID,
+		PreviousDocHash: req.PreviousDocHash,
+		NewDocHash:      req.NewDocHash,
+		AmendedAt:       time.Now().UTC().Unix(),
+		IssuerKey:       walletKey,
+		IssuerSignature: issuerSig,
+	}
+
+	if req.AdminKey != "" && req.AdminSignature != "" {
+		adminSig, err := base64.StdEncoding.DecodeString(req.AdminSignature)
+		if err != nil {
+			adminSig, err = base64.RawURLEncoding.DecodeString(req.AdminSignature)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "admin_signature is not valid base64")
+				return
+			}
+		}
+		amendment.AdminKey = req.AdminKey
+		amendment.AdminSignature = adminSig
+	}
+
+	if err := gonetwork.ApplyAmendment(
+		amendment,
+		s.bc.Assets,
+		s.bc.SPVs,
+		s.bc.LegalDocAmendments,
+	); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	s.bc.EmitEvent(gonetwork.EventLegalDocAmended, map[string]any{
+		"asset_id":          assetID,
+		"amendment_id":      amendment.ID,
+		"previous_doc_hash": amendment.PreviousDocHash,
+		"new_doc_hash":      amendment.NewDocHash,
+	})
+	s.bc.SealBlock(nil, nil, nil)
+
+	writeJSON(w, http.StatusCreated, amendment)
+}
+
+// handleGetLegalDocHistory returns the full amendment history for an asset's
+// legal document, along with the resolved current hash.
+// GET /v1/assets/{id}/legal-doc/history
+func (s *Server) handleGetLegalDocHistory(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+
+	asset, ok := s.bc.Assets[assetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+
+	amendments := s.bc.LegalDocAmendments[assetID]
+	if amendments == nil {
+		amendments = []*gonetwork.LegalDocAmendment{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id":         assetID,
+		"current_doc_hash": gonetwork.CurrentLegalDocHash(assetID, asset, s.bc.LegalDocAmendments),
+		"genesis_doc_hash": asset.Metadata.LegalDocHash,
+		"amendment_count":  len(amendments),
+		"amendments":       amendments,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Participation note countersignature endpoint (A-04)
+// ---------------------------------------------------------------------------
+
+// handleCounterSignAsset is called by the SPV administrator to countersign a
+// participation note asset, releasing its supply from 0 to TotalSupply.
+//
+// Until this endpoint is called:
+//   - CirculatingSupply == 0
+//   - Sell orders on the asset are rejected with 409
+//
+// POST /v1/assets/{id}/countersign
+// Body: {"spv_id":"...","admin_signature":"<base64>"}
+func (s *Server) handleCounterSignAsset(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+	walletKey := walletFromCtx(r)
+
+	asset, ok := s.bc.Assets[assetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	if asset.AssetType != gonetwork.AssetTypeParticipationNote {
+		writeError(w, http.StatusBadRequest, "countersignature only applies to participation_note assets")
+		return
+	}
+	if asset.CirculatingSupply > 0 {
+		writeError(w, http.StatusConflict, "asset has already been countersigned")
+		return
+	}
+
+	var req struct {
+		SPVID          string `json:"spv_id"`
+		AdminSignature string `json:"admin_signature"` // base64
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.SPVID == "" {
+		writeError(w, http.StatusBadRequest, "spv_id is required")
+		return
+	}
+	if req.AdminSignature == "" {
+		writeError(w, http.StatusBadRequest, "admin_signature is required")
+		return
+	}
+
+	spv, ok := s.bc.SPVs[req.SPVID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "SPV not found")
+		return
+	}
+	if spv.SPVAdminKey != walletKey {
+		writeError(w, http.StatusForbidden, "only the SPV administrator may countersign")
+		return
+	}
+
+	adminSig, err := base64.StdEncoding.DecodeString(req.AdminSignature)
+	if err != nil {
+		adminSig, err = base64.RawURLEncoding.DecodeString(req.AdminSignature)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "admin_signature is not valid base64")
+			return
+		}
+	}
+
+	// Verify the admin signature covers the asset ID (proving intentional countersign).
+	adminPub, err := gonetwork.PublicKeyFromString(spv.SPVAdminKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "SPV has an invalid admin key")
+		return
+	}
+	if !gonetwork.VerifySignatureBytes(adminPub, []byte(assetID), adminSig) {
+		writeError(w, http.StatusUnauthorized, "admin_signature is not valid over asset ID")
+		return
+	}
+
+	// Release supply: create issuer holding and set CirculatingSupply.
+	issuerHoldingKey := gonetwork.HoldingKey(asset.Issuer, assetID)
+	s.bc.Holdings[issuerHoldingKey] = &gonetwork.AssetHolding{
+		AssetID:  assetID,
+		HolderID: asset.Issuer,
+		Balance:  asset.TotalSupply,
+	}
+	asset.CirculatingSupply = asset.TotalSupply
+	asset.Metadata.ISIN = spv.ID // bind asset to the SPV
+
+	s.bc.SealBlock(
+		[]gonetwork.AssetTransaction{{AssetID: assetID, TxType: gonetwork.AssetTxTypeIssue}},
+		nil, nil,
+	)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id":           assetID,
+		"spv_id":             req.SPVID,
+		"circulating_supply": asset.CirculatingSupply,
+		"status":             "countersigned",
+	})
+}
+
+// ---------------------------------------------------------------------------
+// SAR (Suspicious Activity Report) endpoints   (G-09)
+// ---------------------------------------------------------------------------
+
+// handleListSARs returns all pending Suspicious Activity Report drafts.
+// Only compliance officers (jwtAdmin) may access this list.
+// GET /v1/compliance/sar
+func (s *Server) handleListSARs(w http.ResponseWriter, _ *http.Request) {
+	out := make([]*gonetwork.SARDraft, 0, len(s.bc.PendingSARs))
+	for _, sar := range s.bc.PendingSARs {
+		out = append(out, sar)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(out),
+		"sars":  out,
+	})
+}
+
+// handleResolveSAR allows a compliance officer to file or dismiss a SAR draft.
+// POST /v1/compliance/sar/{id}/resolve
+// Body: {"action":"file"|"dismiss","notes":"optional explanation"}
+func (s *Server) handleResolveSAR(w http.ResponseWriter, r *http.Request) {
+	sarID := r.PathValue("id")
+	resolverKey := walletFromCtx(r)
+
+	sar, ok := s.bc.PendingSARs[sarID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "SAR not found")
+		return
+	}
+	if sar.Status != gonetwork.SARStatusPending {
+		writeError(w, http.StatusConflict, fmt.Sprintf("SAR is already %s", sar.Status))
+		return
+	}
+
+	var req struct {
+		Action string `json:"action"` // "file" or "dismiss"
+		Notes  string `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	switch req.Action {
+	case "file":
+		sar.Status = gonetwork.SARStatusFiled
+	case "dismiss":
+		sar.Status = gonetwork.SARStatusDismissed
+	default:
+		writeError(w, http.StatusBadRequest, `action must be "file" or "dismiss"`)
+		return
+	}
+	sar.ResolvedAt = time.Now().Unix()
+	sar.ResolvedBy = resolverKey
+	sar.Notes = req.Notes
+
+	writeJSON(w, http.StatusOK, sar)
+}
+
+// ---------------------------------------------------------------------------
+// Regulatory reporting endpoints   (G-10)
+// ---------------------------------------------------------------------------
+
+// handleListRegulatoryReports returns generated regulatory reports, optionally
+// filtered by report_type or trade_id query parameters.
+// GET /v1/compliance/reports?report_type=mifir&trade_id=
+func (s *Server) handleListRegulatoryReports(w http.ResponseWriter, r *http.Request) {
+	typeFilter := r.URL.Query().Get("report_type")
+	tradeFilter := r.URL.Query().Get("trade_id")
+
+	var out []*gonetwork.RegulatoryReport
+	for _, rep := range s.bc.RegulatoryReports {
+		if typeFilter != "" && string(rep.ReportType) != typeFilter {
+			continue
+		}
+		if tradeFilter != "" && rep.TradeID != tradeFilter {
+			continue
+		}
+		out = append(out, rep)
+	}
+	if out == nil {
+		out = []*gonetwork.RegulatoryReport{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":   len(out),
+		"reports": out,
+	})
+}
+
+// handleGetJurisdictionRule returns the jurisdiction rule for a given country code.
+// GET /v1/compliance/jurisdictions/{code}
+func (s *Server) handleGetJurisdictionRule(w http.ResponseWriter, r *http.Request) {
+	code := r.PathValue("code")
+	rule, ok := s.bc.JurisdictionRules[code]
+	if !ok {
+		writeError(w, http.StatusNotFound, "no jurisdiction rule found for "+code)
+		return
+	}
+	writeJSON(w, http.StatusOK, rule)
+}
+
+// handleUpsertJurisdictionRule creates or replaces a JurisdictionRule.
+// POST /v1/compliance/jurisdictions
+func (s *Server) handleUpsertJurisdictionRule(w http.ResponseWriter, r *http.Request) {
+	var rule gonetwork.JurisdictionRule
+	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid jurisdiction rule payload")
+		return
+	}
+	if len(rule.CountryCode) != 2 {
+		writeError(w, http.StatusBadRequest, "country_code must be a 2-letter ISO 3166-1 alpha-2 code")
+		return
+	}
+	s.bc.JurisdictionRules[rule.CountryCode] = &rule
+	writeJSON(w, http.StatusOK, &rule)
 }

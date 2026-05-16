@@ -232,6 +232,10 @@ func (n *Node) VoteOnBlock(block Block) bool {
 	return true
 }
 func (bc *Blockchain) finalizeBlock(block Block) {
+	// Expire any PaymentInstructions whose deadline has passed before we match
+	// new orders. This prevents stale instructions from blocking order books.
+	bc.ExpireStaleInstructions()
+
 	fmt.Printf("Finalizing block with hash: %s\n", block.CalculateHash())
 
 	// 1. Append to chain
@@ -343,7 +347,7 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 				PricePerUnit:  trade.Price,
 				TotalAmount:   trade.Price * trade.Quantity,
 				Currency:      trade.Currency,
-				Method:        SettlementSEPA,
+				Method:        DefaultSettlementMethod(trade.Currency),
 				PayerWalletID: trade.BuyerID,
 				PayeeWalletID: trade.SellerID,
 				Reference:     fmt.Sprintf("GH-%s", trade.ID[:8]),
@@ -352,36 +356,28 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 			instruction, _ = bc.OracleService.SignInstruction(instruction)
 			bc.PendingInstructions[trade.ID] = instruction
 
-			// 7. Simulate payment confirmation (MockPaymentProvider confirms instantly)
-			_ = bc.PaymentProvider.ConfirmPayment(
+			// Store the DVP asset transaction so that ConfirmAndSettle can apply
+			// it when the payment confirmation arrives via webhook (async rails).
+			bc.PendingSettlements[trade.ID] = assetTxs[i]
+
+			// 7. Attempt immediate confirmation via the registered provider.
+			// MockPaymentProvider confirms synchronously so tests work without
+			// webhooks. Production providers (Modulr, EURC, Pontes) will return
+			// an error or leave the status as pending — the webhook handler calls
+			// bc.ConfirmAndSettle to apply the DVP transfer when payment arrives.
+			provider := bc.ProviderForMethod(instruction.Method)
+			_ = provider.ConfirmPayment(
 				instruction.Reference,
 				instruction.TotalAmount,
 				instruction.Currency,
 			)
-			status, _ := bc.PaymentProvider.GetPaymentStatus(instruction.Reference)
+			status, _ := provider.GetPaymentStatus(instruction.Reference)
 			if status == PaymentStatusConfirmed {
-				confirmation := &PaymentConfirmation{
-					InstructionID:   trade.ID,
-					Reference:       instruction.Reference,
-					ConfirmedAmount: instruction.TotalAmount,
-					Currency:        instruction.Currency,
-					ConfirmedAt:     time.Now().Unix(),
-				}
-				confirmation, _ = bc.OracleService.SignConfirmation(confirmation)
-				bc.ConfirmedPayments[trade.ID] = confirmation
-				bc.emitEvent(EventPaymentConfirmed, map[string]any{
-					"trade_id":  trade.ID,
-					"reference": instruction.Reference,
-					"amount":    instruction.TotalAmount,
-					"currency":  instruction.Currency,
-				})
-
-				// 8. DVP: apply asset transfer now that payment is confirmed
-				// AssetTransactions from MatchOrders are unsigned (seller key not in scope here).
-				// ApplyAssetTransaction is called directly, bypassing Validate's signature check.
-				atx := assetTxs[i]
-				if err := ApplyAssetTransaction(atx, bc.Assets, bc.Holdings); err != nil {
-					fmt.Printf("DVP apply failed for trade %s: %v\n", trade.ID, err)
+				// 8. DVP: apply asset transfer now that payment is confirmed.
+				// Use ConfirmAndSettle so the confirmation + DVP is idempotent even
+				// if a webhook fires later for the same reference.
+				if err := bc.ConfirmAndSettle(instruction.Reference, instruction.TotalAmount, instruction.Currency); err != nil {
+					fmt.Printf("DVP settle failed for trade %s: %v\n", trade.ID, err)
 				}
 			}
 		}

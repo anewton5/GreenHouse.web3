@@ -129,6 +129,19 @@ func NewSPVWrapper(
 	return s, nil
 }
 
+// SPVDeterministicID computes the deterministic SPV ID from the admin public key string
+// (any base64 variant), name, jurisdiction and underlying company ID.
+// This mirrors the ID computation in NewSPVWrapper and allows server-side creation
+// from plain fields when the caller is already authenticated via JWT.
+func SPVDeterministicID(adminPubKey, name, jurisdiction, underlyingCompanyID string) string {
+	h := sha3.New256()
+	h.Write([]byte(adminPubKey))
+	h.Write([]byte(name))
+	h.Write([]byte(jurisdiction))
+	h.Write([]byte(underlyingCompanyID))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // VerifySignature checks the SPV admin's Ed25519 signature over the wrapper's fields.
 func (s *SPVWrapper) VerifySignature(adminPubKey *PublicKey) bool {
 	sCopy := *s

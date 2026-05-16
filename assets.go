@@ -115,6 +115,9 @@ type AssetTransaction struct {
 	Tx      Transaction
 	AssetID string
 	TxType  AssetTxType
+	// TravelRuleData carries FATF Travel Rule originator/beneficiary information.
+	// Required (non-nil) when the transfer value is EUR 1,000 or above.
+	TravelRuleData *TravelRulePayload `json:"travel_rule_data,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -178,10 +181,18 @@ func NewAsset(
 }
 
 // VerifyIssuerSignature checks the issuer's Ed25519 signature against the asset's
-// current field values. Returns false if the asset has been tampered with.
+// immutable creation fields. Returns false if any tamper-sensitive field has been
+// modified since the asset was signed.
+//
+// CirculatingSupply is intentionally excluded from the hash: it is mutable state
+// that legitimately changes as issue/redeem transactions are applied, and was 0
+// at the time NewAsset() produced the signature. Tamper-proof coverage extends to
+// the fields that define the instrument: ID, Issuer, AssetType, TotalSupply,
+// Currency, Metadata, Restrictions, and CreatedAt.
 func (a *Asset) VerifyIssuerSignature(issuerPubKey *PublicKey) bool {
 	assetCopy := *a
 	assetCopy.IssuerSignature = nil
+	assetCopy.CirculatingSupply = 0 // mutable — excluded from the creation signature
 	data, err := json.Marshal(assetCopy)
 	if err != nil {
 		return false
@@ -295,6 +306,21 @@ func (at *AssetTransaction) Validate(
 		return fmt.Errorf("unknown asset ID: %s", at.AssetID)
 	}
 
+	// 1b. Issuer signature must be intact — detects any post-creation tampering of
+	// asset fields (e.g. TotalSupply inflation, metadata mutation).
+	// Assets created via NewAsset() carry a signature; assets built directly in
+	// the API handler (no private key available) have IssuerSignature == nil and
+	// skip this check, relying on JWT authentication as the identity anchor.
+	if len(asset.IssuerSignature) > 0 {
+		issuerPub, keyErr := PublicKeyFromString(asset.Issuer)
+		if keyErr != nil {
+			return fmt.Errorf("asset %s has a malformed issuer key: %w", asset.ID, keyErr)
+		}
+		if !asset.VerifyIssuerSignature(issuerPub) {
+			return fmt.Errorf("asset %s has an invalid issuer signature: record may have been tampered", asset.ID)
+		}
+	}
+
 	// 2. Quantity must be positive (also enforced by VerifyTransaction, but checked
 	// here first to give a cleaner error message in asset context).
 	if at.Tx.Amount <= 0 {
@@ -325,6 +351,15 @@ func (at *AssetTransaction) Validate(
 		if at.Tx.Sender != asset.Issuer {
 			return fmt.Errorf("only the asset issuer may issue tokens: sender %s is not issuer %s",
 				at.Tx.Sender, asset.Issuer)
+		}
+		// 5b. Participation notes require SPV admin countersignature before any tokens
+		// may be issued. CirculatingSupply starts at 0 and is only released by the
+		// handleCounterSignAsset endpoint once the SPV administrator countersigns.
+		if asset.AssetType == AssetTypeParticipationNote && asset.CirculatingSupply == 0 {
+			return fmt.Errorf(
+				"asset %s is a participation note awaiting SPV admin countersignature: issue transactions are blocked until supply is released",
+				asset.ID,
+			)
 		}
 
 	case AssetTxTypeTransfer, AssetTxTypeRedeem:
@@ -394,19 +429,32 @@ func (at *AssetTransaction) Validate(
 // a given asset based on the asset's transfer restrictions and the receiver's
 // on-chain credential. Called from Validate when credentials are present.
 //
-// If no restrictions require credential verification, the check passes immediately.
+// If no restrictions require credential verification, the check passes immediately
+// unless the receiver's credential is expired (G-08: any expired credential blocks
+// transfers regardless of asset type).
+//
 // If AccreditedOnly is set but no valid credential exists, the transfer is rejected.
 func CheckTransferEligibility(
 	receiverKey string,
 	asset *Asset,
 	credentials map[string]*CredentialAttestation,
 ) error {
-	// Fast path: no credential-dependent restrictions.
+	cred, exists := credentials[receiverKey]
+
+	// G-08: block transfers to wallets with an expired credential, regardless of
+	// asset type.  Re-KYC must be completed before the wallet can receive further
+	// regulated-security transfers.
+	if exists && cred.ExpiresAt > 0 && time.Now().Unix() > cred.ExpiresAt {
+		return fmt.Errorf(
+			"receiver KYC credential has expired (expired at unix %d): re-KYC required",
+			cred.ExpiresAt,
+		)
+	}
+
+	// Fast path: no credential-dependent restrictions beyond the expiry check above.
 	if !asset.Restrictions.AccreditedOnly && len(asset.Restrictions.BlockedJurisdictions) == 0 {
 		return nil
 	}
-
-	cred, exists := credentials[receiverKey]
 
 	// If AccreditedOnly is set, a valid credential is mandatory.
 	if asset.Restrictions.AccreditedOnly {

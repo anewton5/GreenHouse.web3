@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -141,12 +142,20 @@ type Blockchain struct {
 	// Payment layer
 	PendingInstructions      map[string]*PaymentInstruction  // tradeID → instruction
 	ConfirmedPayments        map[string]*PaymentConfirmation // tradeID → confirmation
+	PendingSettlements       map[string]*AssetTransaction    // tradeID → DVP asset tx awaiting payment
 	PendingAssetTransactions []AssetTransaction              // received via P2P, awaiting block inclusion
 
 	// Services (interfaces — swappable for live implementations)
 	PaymentProvider  PaymentProvider
 	IdentityRegistry IdentityRegistry
 	OracleService    OracleService
+
+	// SettlementRouter dispatches PaymentInstructions to per-method providers.
+	// Register providers via RegisterSettlementProvider. Falls back to
+	// PaymentProvider when no entry exists for a given SettlementMethod.
+	// Example: register a PontesPaymentProvider for SettlementCeBM once the
+	// ECB Pontes pilot launches (Q3 2026).
+	SettlementRouter map[SettlementMethod]PaymentProvider
 
 	// Phase 2: Liquidity Windows
 	WindowManager *WindowManager
@@ -170,10 +179,28 @@ type Blockchain struct {
 	// Phase 2: Deal Anchoring
 	Deals map[string]*Deal // dealID → Deal
 
+	// Part I: Legal doc amendment log — assetID → ordered list of amendments.
+	// Use CurrentLegalDocHash(assetID) to resolve the current document hash.
+	LegalDocAmendments map[string][]*LegalDocAmendment
+
+	// Part III: Dividend holding snapshots — actionID → holdings frozen at record date.
+	DividendHoldingSnapshots map[string]map[string]*AssetHolding
+
 	// Phase 3 / Track 5: AML screening — called from AssetTransaction.Validate
 	// before any other check. Defaults to MockAMLScreener (passes everything).
 	// Replace with ComplyAdvantageScreener / EllipticScreener before going live.
 	AMLScreener AMLScreener
+
+	// G-09: Suspicious Activity Report drafts — keyed by SAR ID.
+	// Created automatically when the AML screener returns a flag-severity alert.
+	// Compliance officers resolve them via POST /v1/compliance/sar/{id}/resolve.
+	PendingSARs map[string]*SARDraft
+
+	// G-10: Regulatory report log — append-only list of MiFIR/CMAR/AIFMD reports.
+	// A new entry is created by SealBlock for every trade in a block that has a
+	// reporting obligation.  In production, a reporter goroutine tails this list
+	// and submits reports to the relevant NCA/ARM.
+	RegulatoryReports []*RegulatoryReport
 
 	// Track 4: Real-time event stream
 	// Events is a buffered channel onto which the blockchain emits StreamEvents
@@ -199,12 +226,21 @@ type StreamEvent struct {
 
 // Stream event type constants.
 const (
-	EventBlockFinalised   = "block_finalised"
-	EventOrderPlaced      = "order_placed"
-	EventOrderCancelled   = "order_cancelled"
-	EventTradeExecuted    = "trade_executed"
-	EventPaymentConfirmed = "payment_confirmed"
-	EventCredentialIssued = "credential_issued"
+	EventBlockFinalised    = "block_finalised"
+	EventOrderPlaced       = "order_placed"
+	EventOrderCancelled    = "order_cancelled"
+	EventTradeExecuted     = "trade_executed"
+	EventPaymentConfirmed  = "payment_confirmed"
+	EventCredentialIssued  = "credential_issued"
+	EventCredentialExpired = "credential_expired"
+	EventSupplyMismatch    = "supply_mismatch"
+	EventLegalDocAmended   = "legal_doc_amended"
+	// G-10: emitted when a regulatory report (MiFIR, AIFMD, etc.) is generated.
+	EventRegulatoryReport = "regulatory_report"
+	// EventPaymentExpired is emitted when a PaymentInstruction passes its
+	// ExpiresAt deadline without a confirmed payment. The DVP asset transfer
+	// is not applied; the trade remains in a failed-settlement state.
+	EventPaymentExpired = "payment_expired"
 )
 
 // EmitEvent is the exported entry point for emitEvent, allowing external
@@ -213,7 +249,139 @@ func (bc *Blockchain) EmitEvent(eventType string, payload any) {
 	bc.emitEvent(eventType, payload)
 }
 
-// SealBlock anchors a set of specialised transactions into a new block and
+// ---------------------------------------------------------------------------
+// Settlement router helpers
+// ---------------------------------------------------------------------------
+
+// RegisterSettlementProvider registers a PaymentProvider for a specific
+// SettlementMethod. The provider will be used for all PaymentInstructions
+// whose Method matches. Call this after NewBlockchain and before the first
+// block is finalised.
+//
+// Example — enable CeBM settlement once the Pontes pilot is live:
+//
+//	pontes, _ := gonetwork.NewPontesPaymentProviderFromEnv()
+//	bc.RegisterSettlementProvider(gonetwork.SettlementCeBM, pontes)
+func (bc *Blockchain) RegisterSettlementProvider(method SettlementMethod, p PaymentProvider) {
+	bc.SettlementRouter[method] = p
+}
+
+// ProviderForMethod returns the PaymentProvider registered for the given
+// SettlementMethod. Falls back to bc.PaymentProvider when none is registered.
+func (bc *Blockchain) ProviderForMethod(method SettlementMethod) PaymentProvider {
+	if p, ok := bc.SettlementRouter[method]; ok {
+		return p
+	}
+	return bc.PaymentProvider
+}
+
+// ExpireStaleInstructions removes PendingInstructions whose ExpiresAt deadline
+// has passed without a confirmed payment. An EventPaymentExpired is emitted for
+// each expired instruction. The DVP asset transfer is not applied — the trade
+// remains in a failed-settlement state until the issuer manually resolves it.
+//
+// This is called at the start of each finalizeBlock to ensure no stale
+// instruction is left open indefinitely.
+func (bc *Blockchain) ExpireStaleInstructions() {
+	now := time.Now().Unix()
+	for tradeID, instr := range bc.PendingInstructions {
+		if instr.ExpiresAt <= 0 {
+			continue
+		}
+		if now <= instr.ExpiresAt {
+			continue
+		}
+		// Skip instructions that have already been settled (webhook may have
+		// arrived before the expiry sweep runs).
+		if _, settled := bc.ConfirmedPayments[tradeID]; settled {
+			continue
+		}
+		delete(bc.PendingInstructions, tradeID)
+		bc.emitEvent(EventPaymentExpired, map[string]any{
+			"trade_id":   tradeID,
+			"asset_id":   instr.AssetID,
+			"payer":      instr.PayerWalletID,
+			"payee":      instr.PayeeWalletID,
+			"amount":     instr.TotalAmount,
+			"currency":   instr.Currency,
+			"method":     string(instr.Method),
+			"expired_at": instr.ExpiresAt,
+		})
+	}
+}
+
+// ConfirmAndSettle marks a payment as confirmed and, if the corresponding
+// PaymentInstruction exists and has not already been settled, applies the DVP
+// asset transfer. It is the canonical entry point for payment confirmations
+// arriving via webhook (Modulr, Pontes, EURC) and replaces direct calls to
+// bc.PaymentProvider.ConfirmPayment from the webhook handlers.
+//
+// Returns nil if the reference is unknown (no-op is intentional — webhook
+// providers must not retry on unknown references).
+func (bc *Blockchain) ConfirmAndSettle(reference string, amount float64, currency string) error {
+	// Find the matching instruction by reference.
+	var instruction *PaymentInstruction
+	var tradeID string
+	for id, instr := range bc.PendingInstructions {
+		if instr.Reference == reference {
+			instruction = instr
+			tradeID = id
+			break
+		}
+	}
+	if instruction == nil {
+		// Unknown reference — not an error; the webhook may fire for a trade
+		// already settled or not yet registered.
+		return nil
+	}
+
+	// Idempotency: skip if already settled.
+	if _, settled := bc.ConfirmedPayments[tradeID]; settled {
+		return nil
+	}
+
+	// Record the confirmation via the registered provider.
+	provider := bc.ProviderForMethod(instruction.Method)
+	if err := provider.ConfirmPayment(reference, amount, currency); err != nil {
+		return fmt.Errorf("ConfirmAndSettle: provider confirm failed: %w", err)
+	}
+
+	// Build and oracle-sign the on-chain confirmation.
+	confirmation := &PaymentConfirmation{
+		InstructionID:   tradeID,
+		Reference:       reference,
+		ConfirmedAmount: amount,
+		Currency:        currency,
+		ConfirmedAt:     time.Now().Unix(),
+	}
+	confirmation, _ = bc.OracleService.SignConfirmation(confirmation)
+	bc.ConfirmedPayments[tradeID] = confirmation
+
+	bc.emitEvent(EventPaymentConfirmed, map[string]any{
+		"trade_id":  tradeID,
+		"reference": reference,
+		"amount":    amount,
+		"currency":  currency,
+	})
+
+	// DVP: apply the asset transfer now that payment is confirmed.
+	// The AssetTransaction was stored alongside the PaymentInstruction in
+	// bc.PendingSettlements when the order was matched. If no pending
+	// settlement exists we fall back to a direct holdings adjustment so
+	// that legacy paths (e.g. finalizeBlock mock flow) still work correctly.
+	if bc.PendingSettlements != nil {
+		if atx, ok := bc.PendingSettlements[tradeID]; ok {
+			if err := ApplyAssetTransaction(atx, bc.Assets, bc.Holdings); err != nil {
+				return fmt.Errorf("ConfirmAndSettle: DVP apply failed for trade %s: %w", tradeID, err)
+			}
+			delete(bc.PendingSettlements, tradeID)
+		}
+	}
+
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // immediately emits EventBlockFinalised. It is called by the API layer after
 // each state-mutating HTTP request so the chain grows in real time without
 // requiring a full dBFT consensus round.
@@ -224,6 +392,53 @@ func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTra
 	bc.Blocks[idx].OrderTransactions = orderTxs
 	bc.Blocks[idx].CredentialTransactions = credTxs
 	blk := bc.Blocks[idx]
+
+	// G-08: sweep credentials and downgrade any that have passed their expiry
+	// timestamp to KYCStatusExpired so CheckTransferEligibility rejects them.
+	now := time.Now().Unix()
+	for walletKey, cred := range bc.Credentials {
+		if cred.KYCStatus == KYCStatusVerified && cred.ExpiresAt > 0 && now > cred.ExpiresAt {
+			cred.KYCStatus = KYCStatusExpired
+			bc.emitEvent(EventCredentialExpired, map[string]any{
+				"wallet_key":     walletKey,
+				"expired_at":     cred.ExpiresAt,
+				"investor_class": string(cred.InvestorClass),
+			})
+		}
+	}
+
+	// G-06: rebuild prospectus retail-holder counts from live holdings/credentials
+	// and emit proximity warnings for any jurisdiction approaching the cap.
+	for _, exemption := range bc.ProspectusExemptions {
+		UpdateRetailCounts(exemption, bc.Holdings, bc.Credentials)
+	}
+	CheckProspectusThresholds(bc, bc.ProspectusExemptions)
+
+	// G-10: generate MiFIR / AIFMD transaction reports for every filled trade in
+	// this block.  Only trades with Status=="settled" (i.e. filled by handleFillOrder)
+	// need reporting; cancellations and open orders are excluded.
+	for _, otx := range orderTxs {
+		if otx.IsCancellation || otx.Order.Status != OrderStatusFilled {
+			continue
+		}
+		trade := Trade{
+			ID:         "block-trade-" + otx.Order.ID[:8],
+			AssetID:    otx.Order.AssetID,
+			BuyerID:    otx.Order.PlacedBy,
+			SellerID:   "", // issuer; not stored on Order — skip for block-sourced trades
+			Quantity:   otx.Order.Filled,
+			Price:      otx.Order.Price,
+			ExecutedAt: time.Now().Unix(),
+			Status:     "settled",
+		}
+		GenerateMiFIRReport(bc, trade, idx)
+		GenerateAIFMDReport(bc, trade, idx)
+	}
+
+	// A-01: verify CirculatingSupply is consistent with the holdings sum after
+	// every block. Divergence indicates a write path bypassing ApplyAssetTransaction.
+	bc.assertCirculatingSupplyConsistency()
+
 	bc.emitEvent(EventBlockFinalised, map[string]any{
 		"block_index":         idx,
 		"hash":                blk.CalculateHash(),
@@ -232,6 +447,41 @@ func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTra
 		"order_tx_count":      len(orderTxs),
 		"credential_tx_count": len(credTxs),
 	})
+}
+
+// assertCirculatingSupplyConsistency verifies that each asset's CirculatingSupply
+// equals the arithmetic sum of all holdings for that asset. Called from SealBlock
+// after every block is finalised.
+//
+// In development mode (GH_ENV != "production") any divergence panics so it is
+// caught immediately in testing. In production it emits EventSupplyMismatch and
+// logs a CRITICAL message rather than crashing a live node.
+func (bc *Blockchain) assertCirculatingSupplyConsistency() {
+	for assetID, asset := range bc.Assets {
+		var sum float64
+		suffix := ":" + assetID
+		for key, h := range bc.Holdings {
+			if strings.HasSuffix(key, suffix) {
+				sum += h.Balance
+			}
+		}
+		if math.Abs(sum-asset.CirculatingSupply) > 1e-9 {
+			msg := fmt.Sprintf(
+				"CRITICAL: CirculatingSupply mismatch for asset %s: recorded=%.9f actual=%.9f delta=%.9e",
+				assetID, asset.CirculatingSupply, sum, math.Abs(sum-asset.CirculatingSupply),
+			)
+			if os.Getenv("GH_ENV") != "production" {
+				panic(msg)
+			}
+			log.Println(msg)
+			bc.emitEvent(EventSupplyMismatch, map[string]any{
+				"asset_id":            assetID,
+				"recorded_supply":     asset.CirculatingSupply,
+				"actual_holdings_sum": sum,
+				"delta":               math.Abs(sum - asset.CirculatingSupply),
+			})
+		}
+	}
 }
 
 // emitEvent sends an event onto bc.Events without blocking.
@@ -557,6 +807,7 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc.Credentials = make(map[string]*CredentialAttestation)
 	bc.PendingInstructions = make(map[string]*PaymentInstruction)
 	bc.ConfirmedPayments = make(map[string]*PaymentConfirmation)
+	bc.PendingSettlements = make(map[string]*AssetTransaction)
 	bc.PendingAssetTransactions = []AssetTransaction{}
 
 	// Phase 2: Liquidity Windows
@@ -574,6 +825,17 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc.SuitabilityAssessments = make(map[string]*SuitabilityAssessment)
 	bc.JurisdictionRules = make(map[string]*JurisdictionRule)
 
+	// G-11: seed the GB jurisdiction rule (Financial Promotion Order 2005).
+	// All GreenHouse nodes apply the FPO Article 19 high-net-worth exemption and
+	// display the FCA-prescribed risk warning to retail investors in the UK.
+	bc.JurisdictionRules["GB"] = &JurisdictionRule{
+		CountryCode:         "GB",
+		MaxRetailHolders:    0,
+		RequiresSuitability: false,
+		FPOExemptionType:    "fpo_art19",
+		RequiresRiskWarning: true,
+	}
+
 	// Phase 2: FiDA Reporting
 	bc.CostBasisTracker = NewCostBasisTracker()
 	bc.ValuationOracle = NewMockValuationOracle()
@@ -581,13 +843,26 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	// Phase 2: Deal Anchoring
 	bc.Deals = make(map[string]*Deal)
 
+	// Part I: Legal doc amendment log
+	bc.LegalDocAmendments = make(map[string][]*LegalDocAmendment)
+
+	// Part III: Dividend holding snapshots
+	bc.DividendHoldingSnapshots = make(map[string]map[string]*AssetHolding)
+
 	// Track 4: Real-time event stream (256-event buffer)
 	bc.Events = make(chan StreamEvent, 256)
+
+	// Settlement router — populated by RegisterSettlementProvider after construction.
+	bc.SettlementRouter = make(map[SettlementMethod]PaymentProvider)
 
 	// Default to mock service implementations so existing tests need no changes
 	if bc.AMLScreener == nil {
 		bc.AMLScreener = NewMockAMLScreener()
 	}
+	// G-09: SAR draft store
+	bc.PendingSARs = make(map[string]*SARDraft)
+	// G-10: regulatory report log
+	bc.RegulatoryReports = []*RegulatoryReport{}
 	if bc.PaymentProvider == nil {
 		bc.PaymentProvider = NewMockPaymentProvider()
 	}
