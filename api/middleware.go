@@ -19,13 +19,53 @@ import (
 // CORSMiddleware
 // ---------------------------------------------------------------------------
 
-// CORSMiddleware sets appropriate CORS headers for the GreenHouse web client.
-// All origins are allowed in development; tighten AllowedOrigins for production.
+// allowedOrigins returns the set of permitted CORS origins.
+// Origins are read from the GREENHOUSE_ALLOWED_ORIGINS environment variable
+// (comma-separated). When the variable is not set, localhost development
+// origins are used. Set the variable to the exact production domain(s) before
+// deploying to a public environment.
+func allowedOrigins() map[string]struct{} {
+	raw := os.Getenv("GREENHOUSE_ALLOWED_ORIGINS")
+	if raw == "" {
+		raw = "http://localhost:3000,http://localhost:3001"
+	}
+	set := make(map[string]struct{})
+	for _, o := range strings.Split(raw, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			set[o] = struct{}{}
+		}
+	}
+	return set
+}
+
+// corsOrigins is initialised once at package load time.
+var corsOrigins = allowedOrigins()
+
+// CORSMiddleware validates the request Origin against the allowlist and, when
+// it matches, reflects the origin in the Access-Control-Allow-Origin header.
+// Requests from unlisted origins receive no CORS header and are therefore
+// blocked by the browser's same-origin policy.
+//
+// Security response headers (HSTS, X-Content-Type-Options, etc.) are added to
+// every response regardless of origin.
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		// Security headers — applied unconditionally to every response.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'")
+
+		// CORS — only allow explicitly listed origins.
+		origin := r.Header.Get("Origin")
+		if _, ok := corsOrigins[origin]; ok {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Vary", "Origin")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -102,6 +142,32 @@ func (rl *rateLimiter) allow(ip, method string) bool {
 }
 
 var globalRateLimiter = newRateLimiter()
+
+// authRateLimiter is a stricter per-IP limiter applied only to authentication
+// endpoints (challenge + verify). Limit: 10 requests/minute per IP.
+// This is 10× tighter than the general write limit and provides the first
+// layer of brute-force protection for Ed25519 challenge-response.
+var authRateLimiter = &rateLimiter{
+	windows:  make(map[string][]int64),
+	readMax:  10,
+	writeMax: 10,
+}
+
+// AuthRateLimitMiddleware wraps a single handler with the tighter auth rate limit.
+func AuthRateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+		if !authRateLimiter.allow(ip, r.Method) {
+			w.Header().Set("Retry-After", "60")
+			writeErrorPlain(w, http.StatusTooManyRequests, "too many authentication attempts — try again in 60 seconds")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // RateLimitMiddleware enforces per-IP rate limits.
 // Defaults: reads 300 req/min, writes 100 req/min.

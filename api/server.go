@@ -23,9 +23,11 @@ import (
 // ---------------------------------------------------------------------------
 
 // Server wraps the blockchain and exposes it over HTTP.
-// Authentication: Ed25519 challenge-response → short-lived JWT (15 min).
+// Authentication: Ed25519 challenge-response → short-lived access JWT (15 min)
+//   - long-lived refresh token (7 days, rotated on each use).
+//
 // All write endpoints require a valid JWT.
-// Rate limiting: 100 req/min per IP for reads; 20 req/min for writes.
+// Rate limiting: 300 req/min per IP for reads; 100 req/min for writes.
 type Server struct {
 	bc         *gonetwork.Blockchain
 	jwtSecret  []byte // 32 random bytes at startup; not persisted
@@ -34,34 +36,41 @@ type Server struct {
 	challengeMu sync.Mutex
 	challenges  map[string]challengeRecord // challenge hex → record
 
+	// Refresh token store.  Key = 64-hex-char random token.  Invalidated on use (rotation).
+	refreshMu     sync.Mutex
+	refreshTokens map[string]refreshTokenRecord
+
 	// Optional: set to enable the operator KYC approval workflow.
 	// When nil, POST /v1/admin/kyc/* and POST /v1/kyc/request return 501.
 	OperatorRegistry *gonetwork.OperatorIdentityRegistry
+
+	// RegistrationRegistry holds the full KYC/CDD onboarding records.
+	// Always non-nil; initialised in NewServer.
+	RegRegistry *gonetwork.RegistrationRegistry
 
 	// Optional: set to enable Modulr webhook signature verification.
 	// When nil, POST /v1/webhooks/payment accepts without verifying the HMAC.
 	ModulrProvider *gonetwork.ModulrPaymentProvider
 
 	// Optional: set to enable the Pontes CeBM settlement webhook.
-	// When nil, POST /v1/webhooks/pontes returns 501.
-	// Register via Blockchain.RegisterSettlementProvider(SettlementCeBM, PontesProvider)
-	// once Eurosystem operator credentials are issued (Pontes pilot Q3 2026).
 	PontesProvider *gonetwork.PontesPaymentProvider
 
 	// Optional: set to enable the EURC on-chain settlement webhook.
-	// When nil, POST /v1/webhooks/eurc returns 501.
 	EURCProvider *gonetwork.EURCPaymentProvider
 
 	// wsHub fans blockchain events out to all connected WebSocket clients.
 	wsHub *hub
 
 	// adminWalletKeys is the set of wallet public keys permitted to call /admin/* routes.
-	// Loaded from GREENHOUSE_ADMIN_WALLET_KEYS (comma-separated base64 keys) at startup.
-	// When empty, any authenticated wallet may call admin routes (single-operator dev mode).
 	adminWalletKeys map[string]bool
 }
 
 type challengeRecord struct {
+	expiresAt int64
+}
+
+type refreshTokenRecord struct {
+	walletKey string
 	expiresAt int64
 }
 
@@ -92,6 +101,8 @@ func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server {
 		jwtSecret:       secret,
 		listenAddr:      listenAddr,
 		challenges:      make(map[string]challengeRecord),
+		refreshTokens:   make(map[string]refreshTokenRecord),
+		RegRegistry:     gonetwork.NewRegistrationRegistry(),
 		adminWalletKeys: adminKeys,
 		wsHub:           newHub(),
 	}
@@ -109,8 +120,10 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	// Unauthenticated
-	mux.HandleFunc("POST /v1/auth/challenge", s.handleChallenge)
-	mux.HandleFunc("POST /v1/auth/verify", s.handleVerify)
+	mux.Handle("POST /v1/auth/challenge", AuthRateLimitMiddleware(http.HandlerFunc(s.handleChallenge)))
+	mux.Handle("POST /v1/auth/verify", AuthRateLimitMiddleware(http.HandlerFunc(s.handleVerify)))
+	mux.Handle("POST /v1/auth/refresh", AuthRateLimitMiddleware(http.HandlerFunc(s.handleRefreshToken)))
+	mux.HandleFunc("GET /v1/register/status", s.handleGetRegistrationStatus)
 	mux.HandleFunc("GET /v1/blocks", s.handleListBlocks)
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 
@@ -137,6 +150,12 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/kyc/request", s.jwt(http.HandlerFunc(s.handleKYCRequest)))
 	mux.Handle("GET /v1/admin/kyc/pending", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCList)))
 	mux.Handle("POST /v1/admin/kyc/approve", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCApprove)))
+
+	// Registration: full CDD onboarding workflow
+	mux.Handle("POST /v1/register", s.jwt(http.HandlerFunc(s.handleRegister)))
+	mux.Handle("POST /v1/terms/accept", s.jwt(http.HandlerFunc(s.handleAcceptTerms)))
+	mux.Handle("GET /v1/admin/registrations", s.jwtAdmin(http.HandlerFunc(s.handleAdminRegistrationList)))
+	mux.Handle("POST /v1/admin/registrations/{key}/review", s.jwtAdmin(http.HandlerFunc(s.handleAdminRegistrationReview)))
 
 	// Open orders for the authenticated wallet
 	mux.Handle("GET /v1/orders", s.jwt(http.HandlerFunc(s.handleListOrders)))
@@ -181,6 +200,10 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/trades/pending", s.jwt(http.HandlerFunc(s.handleListPendingTrades)))
 	mux.Handle("POST /v1/trades/{id}/approve", s.jwt(http.HandlerFunc(s.handleApproveTrade)))
 
+	// Settlement / payment instruction endpoints
+	mux.Handle("GET /v1/payments/pending", s.jwt(http.HandlerFunc(s.handleListPendingPayments)))
+	mux.Handle("GET /v1/payments/history", s.jwt(http.HandlerFunc(s.handleListPaymentHistory)))
+
 	// Payment webhook — no JWT; authenticated via HMAC signature from Modulr
 	mux.HandleFunc("POST /v1/webhooks/payment", s.handlePaymentWebhook)
 	mux.HandleFunc("POST /v1/webhooks/pontes", s.handlePontesWebhook)
@@ -212,20 +235,55 @@ func (s *Server) Routes() http.Handler {
 // JWT helpers
 // ---------------------------------------------------------------------------
 
+// jwtClaims is the payload of a GreenHouse access token.
+// Enhanced to include KYC and registration state so frontends can gate
+// features without an extra API round-trip on every page load.
 type jwtClaims struct {
-	Sub string `json:"sub"` // wallet public key (base64)
-	Iat int64  `json:"iat"`
-	Exp int64  `json:"exp"`
+	Sub                string `json:"sub"`
+	Iat                int64  `json:"iat"`
+	Exp                int64  `json:"exp"`
+	Iss                string `json:"iss"` // token issuer — always "greenhouse-api"
+	Aud                string `json:"aud"` // intended audience — always "greenhouse"
+	InvestorClass      string `json:"investor_class,omitempty"`      // from KYC credential
+	Jurisdiction       string `json:"jurisdiction,omitempty"`        // ISO 3166-1 alpha-2
+	KYCStatus          string `json:"kyc_status,omitempty"`          // mirrors KYCStatus enum
+	KYCExp             int64  `json:"kyc_exp,omitempty"`             // credential expiry
+	RegistrationStatus string `json:"registration_status,omitempty"` // mirrors RegistrationStatus enum
+	TermsAccepted      bool   `json:"terms_accepted"`
 }
-
 func b64url(b []byte) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (s *Server) issueJWT(walletKey string) (string, error) {
+	return s.issueJWTWithClaims(walletKey, "", "", "", 0, "", false)
+}
+
+// issueJWTWithClaims issues a 15-minute access token with full claims.
+func (s *Server) issueJWTWithClaims(
+	walletKey string,
+	investorClass string,
+	jurisdiction string,
+	kycStatus string,
+	kycExp int64,
+	registrationStatus string,
+	termsAccepted bool,
+) (string, error) {
 	now := time.Now().UTC().Unix()
 	header, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
-	claims, err := json.Marshal(jwtClaims{Sub: walletKey, Iat: now, Exp: now + 28800})
+	claims, err := json.Marshal(jwtClaims{
+		Sub:                walletKey,
+		Iat:                now,
+		Exp:                now + 900, // 15-minute access token
+		Iss:                "greenhouse-api",
+		Aud:                "greenhouse",
+		InvestorClass:      investorClass,
+		Jurisdiction:       jurisdiction,
+		KYCStatus:          kycStatus,
+		KYCExp:             kycExp,
+		RegistrationStatus: registrationStatus,
+		TermsAccepted:      termsAccepted,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -233,6 +291,45 @@ func (s *Server) issueJWT(walletKey string) (string, error) {
 	mac := hmac.New(sha256.New, s.jwtSecret)
 	mac.Write([]byte(sigInput))
 	return sigInput + "." + b64url(mac.Sum(nil)), nil
+}
+
+// issueRefreshToken generates a random 7-day refresh token bound to walletKey.
+func (s *Server) issueRefreshToken(walletKey string) (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(b)
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	// Evict expired tokens opportunistically.
+	now := time.Now().UTC().Unix()
+	for k, v := range s.refreshTokens {
+		if v.expiresAt < now {
+			delete(s.refreshTokens, k)
+		}
+	}
+	s.refreshTokens[token] = refreshTokenRecord{
+		walletKey: walletKey,
+		expiresAt: now + 7*24*3600, // 7 days
+	}
+	return token, nil
+}
+
+// consumeRefreshToken validates and invalidates (rotates) a refresh token.
+// Returns the wallet key on success.
+func (s *Server) consumeRefreshToken(token string) (string, bool) {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	rec, ok := s.refreshTokens[token]
+	if !ok {
+		return "", false
+	}
+	delete(s.refreshTokens, token) // single-use rotation
+	if time.Now().UTC().Unix() > rec.expiresAt {
+		return "", false
+	}
+	return rec.walletKey, true
 }
 
 // verifyJWT validates the token and returns the wallet key (sub claim) or an error.
@@ -258,6 +355,12 @@ func (s *Server) verifyJWT(token string) (string, error) {
 	}
 	if time.Now().UTC().Unix() > claims.Exp {
 		return "", fmt.Errorf("JWT has expired")
+	}
+	if claims.Iss != "greenhouse-api" {
+		return "", fmt.Errorf("invalid token issuer")
+	}
+	if claims.Aud != "greenhouse" {
+		return "", fmt.Errorf("invalid token audience")
 	}
 	return claims.Sub, nil
 }

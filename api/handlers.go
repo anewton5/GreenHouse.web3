@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -38,6 +39,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 // POST /v1/auth/verify
 // Body: {"wallet_key":"<base64>","challenge":"<hex>","signature":"<base64>"}
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4*1024) // 4 KB — prevents DoS via oversized payloads
 	var req struct {
 		WalletKey string `json:"wallet_key"`
 		Challenge string `json:"challenge"`
@@ -63,20 +65,69 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !s.consumeChallenge(req.Challenge) {
+		auditLog(AuditEntry{
+			Action:    AuditAuthFailure,
+			ActorKey:  auditKeyFingerprint(req.WalletKey),
+			Outcome:   "fail",
+			IPAddress: auditIP(r.RemoteAddr),
+			Details:   map[string]string{"reason": "challenge not found or expired"},
+		})
 		writeError(w, http.StatusUnauthorized, "challenge not found or expired")
 		return
 	}
-	// Verify Ed25519 sig over the raw challenge bytes (UTF-8 of the hex string)
 	if !gonetwork.VerifySignatureBytes(pub, []byte(req.Challenge), sig) {
+		auditLog(AuditEntry{
+			Action:    AuditAuthFailure,
+			ActorKey:  auditKeyFingerprint(req.WalletKey),
+			Outcome:   "fail",
+			IPAddress: auditIP(r.RemoteAddr),
+			Details:   map[string]string{"reason": "signature verification failed"},
+		})
 		writeError(w, http.StatusUnauthorized, "signature verification failed")
 		return
 	}
-	token, err := s.issueJWT(req.WalletKey)
+
+	// Enrich the access token with KYC and registration context.
+	var investorClass, jurisdiction, kycStatus, regStatus string
+	var kycExp int64
+	termsAccepted := false
+
+	if att, ok := s.bc.Credentials[req.WalletKey]; ok {
+		investorClass = string(att.InvestorClass)
+		jurisdiction = att.Jurisdiction
+		kycStatus = string(att.KYCStatus)
+		kycExp = att.ExpiresAt
+	}
+	if rec := s.RegRegistry.Get(req.WalletKey); rec != nil {
+		regStatus = string(rec.Status)
+		termsAccepted = rec.Consents.TermsOfServiceAcceptedAt > 0
+		if jurisdiction == "" {
+			jurisdiction = rec.Jurisdiction
+		}
+	}
+
+	token, err := s.issueJWTWithClaims(req.WalletKey, investorClass, jurisdiction,
+		kycStatus, kycExp, regStatus, termsAccepted)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to issue token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+	refreshToken, err := s.issueRefreshToken(req.WalletKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to issue refresh token")
+		return
+	}
+	auditLog(AuditEntry{
+		Action:    AuditAuthSuccess,
+		ActorKey:  auditKeyFingerprint(req.WalletKey),
+		Outcome:   "ok",
+		IPAddress: auditIP(r.RemoteAddr),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":         token,
+		"refresh_token": refreshToken,
+		"expires_in":    900,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +327,12 @@ func (s *Server) handleListTrades(w http.ResponseWriter, r *http.Request) {
 // Body: {"asset_id":"...","side":"buy","type":"limit","price":10.50,"quantity":100}
 func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 	walletKey := walletFromCtx(r)
+
+	// Require approved registration before any order can be placed.
+	if reg := s.RegRegistry.Get(walletKey); reg == nil || reg.Status != gonetwork.RegistrationStatusApproved {
+		writeError(w, http.StatusForbidden, "registration approval required to place orders")
+		return
+	}
 
 	var req struct {
 		AssetID  string  `json:"asset_id"`
@@ -904,6 +961,568 @@ func (s *Server) handleEURCWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// ---------------------------------------------------------------------------
+// Registration endpoints
+// ---------------------------------------------------------------------------
+
+// handleRefreshToken exchanges a valid refresh token for a new access token
+// and a rotated refresh token (single-use rotation).
+//
+// POST /v1/auth/refresh
+// Body: {"refresh_token":"<hex>"}
+func (s *Server) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1*1024) // 1 KB — refresh token is a 64-char hex string
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
+		writeError(w, http.StatusBadRequest, "refresh_token required")
+		return
+	}
+	walletKey, ok := s.consumeRefreshToken(req.RefreshToken)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "refresh token invalid or expired")
+		return
+	}
+	// Enrich with latest KYC / registration state.
+	var investorClass, jurisdiction, kycStatus, regStatus string
+	var kycExp int64
+	termsAccepted := false
+
+	if att, exists := s.bc.Credentials[walletKey]; exists {
+		investorClass = string(att.InvestorClass)
+		jurisdiction = att.Jurisdiction
+		kycStatus = string(att.KYCStatus)
+		kycExp = att.ExpiresAt
+	}
+	if rec := s.RegRegistry.Get(walletKey); rec != nil {
+		regStatus = string(rec.Status)
+		termsAccepted = rec.Consents.TermsOfServiceAcceptedAt > 0
+		if jurisdiction == "" {
+			jurisdiction = rec.Jurisdiction
+		}
+	}
+	token, err := s.issueJWTWithClaims(walletKey, investorClass, jurisdiction,
+		kycStatus, kycExp, regStatus, termsAccepted)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to issue token")
+		return
+	}
+	newRefresh, err := s.issueRefreshToken(walletKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to rotate refresh token")
+		return
+	}
+	auditLog(AuditEntry{
+		Action:    AuditTokenRefresh,
+		ActorKey:  auditKeyFingerprint(walletKey),
+		Outcome:   "ok",
+		IPAddress: auditIP(r.RemoteAddr),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":         token,
+		"refresh_token": newRefresh,
+		"expires_in":    900,
+	})
+}
+
+// handleGetRegistrationStatus returns the registration state for any wallet
+// without requiring a JWT.  Used by the frontend before login to decide
+// whether to show the registration wizard.
+//
+// GET /v1/register/status?wallet_key=<base64>
+func (s *Server) handleGetRegistrationStatus(w http.ResponseWriter, r *http.Request) {
+	walletKey := r.URL.Query().Get("wallet_key")
+	if walletKey == "" {
+		writeError(w, http.StatusBadRequest, "wallet_key query parameter required")
+		return
+	}
+	rec := s.RegRegistry.Get(walletKey)
+	if rec == nil {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": string(gonetwork.RegistrationStatusUnregistered),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       string(rec.Status),
+		"jurisdiction": rec.Jurisdiction,
+		"terms_accepted": rec.Consents.TermsOfServiceAcceptedAt > 0 &&
+			rec.Consents.PrivacyPolicyAcceptedAt > 0 &&
+			rec.Consents.RiskWarningsAcceptedAt > 0,
+		"submitted_at": rec.SubmittedAt,
+		"reviewed_at":  rec.ReviewedAt,
+	})
+}
+
+// handleAcceptTerms records T&C, Privacy Policy, and Risk Warning acceptances
+// for the authenticated wallet.  Must be called before submitting a full
+// registration.  May be called independently when new document versions are
+// released.
+//
+// POST /v1/terms/accept
+// Body: {"tos_version":"1.0","privacy_version":"1.0","risk_version":"1.0","marketing_consent":false}
+func (s *Server) handleAcceptTerms(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	var req struct {
+		TOSVersion       string `json:"tos_version"`
+		PrivacyVersion   string `json:"privacy_version"`
+		RiskVersion      string `json:"risk_version"`
+		MarketingConsent bool   `json:"marketing_consent"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.TOSVersion == "" || req.PrivacyVersion == "" || req.RiskVersion == "" {
+		writeError(w, http.StatusBadRequest, "tos_version, privacy_version and risk_version are required")
+		return
+	}
+	rec := s.RegRegistry.Get(walletKey)
+	if rec == nil {
+		rec = &gonetwork.RegistrationRecord{
+			WalletKey: walletKey,
+			Status:    gonetwork.RegistrationStatusUnregistered,
+		}
+	}
+	now := time.Now().Unix()
+	rec.Consents.TermsOfServiceAcceptedAt = now
+	rec.Consents.TermsOfServiceVersion = req.TOSVersion
+	rec.Consents.PrivacyPolicyAcceptedAt = now
+	rec.Consents.PrivacyPolicyVersion = req.PrivacyVersion
+	rec.Consents.RiskWarningsAcceptedAt = now
+	rec.Consents.RiskWarningsVersion = req.RiskVersion
+	rec.Consents.MarketingConsent = req.MarketingConsent
+	if rec.Status == gonetwork.RegistrationStatusUnregistered {
+		rec.Status = gonetwork.RegistrationStatusTermsAccepted
+	}
+	s.RegRegistry.Upsert(rec)
+	writeJSON(w, http.StatusOK, map[string]string{"status": string(rec.Status)})
+}
+
+// handleRegister submits or updates the full registration record for the
+// authenticated wallet.  All fields required by Validate() must be present.
+// On success the record moves to RegistrationStatusPendingReview and, if Onfido
+// is configured, automatically initiates the KYC check.
+//
+// POST /v1/register
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024) // 64 KB — prevents DoS via oversized payloads
+	walletKey := walletFromCtx(r)
+
+	// Existing record preserved (allows partial updates / resubmission after rejection).
+	rec := s.RegRegistry.Get(walletKey)
+	if rec == nil {
+		rec = &gonetwork.RegistrationRecord{
+			WalletKey: walletKey,
+			Status:    gonetwork.RegistrationStatusUnregistered,
+		}
+	}
+	// Block resubmission of already-approved or suspended accounts.
+	if rec.Status == gonetwork.RegistrationStatusApproved {
+		writeError(w, http.StatusConflict, "registration already approved")
+		return
+	}
+	if rec.Status == gonetwork.RegistrationStatusSuspended {
+		writeError(w, http.StatusForbidden, "account suspended — contact compliance")
+		return
+	}
+
+	var body struct {
+		Personal struct {
+			FullLegalName string `json:"full_legal_name"`
+			DateOfBirth   string `json:"date_of_birth"`
+			Nationality   string `json:"nationality"`
+			TaxResidency  string `json:"tax_residency"`
+			TaxIDNumber   string `json:"tax_id_number"`
+		} `json:"personal"`
+		Address struct {
+			Line1    string `json:"line1"`
+			Line2    string `json:"line2"`
+			City     string `json:"city"`
+			PostCode string `json:"post_code"`
+			Country  string `json:"country"`
+		} `json:"address"`
+		Document struct {
+			Type               string `json:"type"`
+			IssuingCountry     string `json:"issuing_country"`
+			ExpiryDate         string `json:"expiry_date"`
+			DocumentHash       string `json:"document_hash"`
+			ProofOfAddressHash string `json:"proof_of_address_hash"`
+		} `json:"document"`
+		Classification struct {
+			Class                 string `json:"class"`
+			LargeTradeFrequency   bool   `json:"large_trade_frequency"`
+			PortfolioQualifies    bool   `json:"portfolio_qualifies"`
+			ProfessionalExp       bool   `json:"professional_experience"`
+			RelevantQualification bool   `json:"relevant_qualification"`
+			NCAReg                string `json:"nca_reg"`
+		} `json:"classification"`
+		Consents struct {
+			SourceOfFunds   string `json:"source_of_funds"`
+			SourceOfWealth  string `json:"source_of_wealth"`
+			NotPEP          bool   `json:"not_pep"`
+			NotSanctioned   bool   `json:"not_sanctioned"`
+			NotUBOAnonymous bool   `json:"not_ubo_anonymous"`
+		} `json:"consents"`
+		Jurisdiction string `json:"jurisdiction"`
+		ValidForDays int    `json:"valid_for_days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Populate record fields.
+	rec.Personal = gonetwork.PersonalInfo{
+		FullLegalName: body.Personal.FullLegalName,
+		DateOfBirth:   body.Personal.DateOfBirth,
+		Nationality:   body.Personal.Nationality,
+		TaxResidency:  body.Personal.TaxResidency,
+		TaxIDNumber:   body.Personal.TaxIDNumber,
+	}
+	rec.Address = gonetwork.AddressInfo{
+		Line1:    body.Address.Line1,
+		Line2:    body.Address.Line2,
+		City:     body.Address.City,
+		PostCode: body.Address.PostCode,
+		Country:  body.Address.Country,
+	}
+	rec.Document = gonetwork.IdentityDocument{
+		Type:               body.Document.Type,
+		IssuingCountry:     body.Document.IssuingCountry,
+		ExpiryDate:         body.Document.ExpiryDate,
+		DocumentHash:       body.Document.DocumentHash,
+		ProofOfAddressHash: body.Document.ProofOfAddressHash,
+		UploadedAt:         time.Now().Unix(),
+	}
+	rec.Classification = gonetwork.InvestorClassificationRecord{
+		Class:                 gonetwork.InvestorClass(body.Classification.Class),
+		LargeTradeFrequency:   body.Classification.LargeTradeFrequency,
+		PortfolioQualifies:    body.Classification.PortfolioQualifies,
+		ProfessionalExp:       body.Classification.ProfessionalExp,
+		RelevantQualification: body.Classification.RelevantQualification,
+		NCAReg:                body.Classification.NCAReg,
+	}
+	// Merge AML consents (T&C timestamps already stored via /terms/accept).
+	rec.Consents.SourceOfFundsDeclaration = body.Consents.SourceOfFunds
+	rec.Consents.SourceOfWealthDeclaration = body.Consents.SourceOfWealth
+	rec.Consents.NotPEP = body.Consents.NotPEP
+	rec.Consents.NotSanctioned = body.Consents.NotSanctioned
+	rec.Consents.NotUBOAnonymous = body.Consents.NotUBOAnonymous
+	rec.Jurisdiction = body.Jurisdiction
+	if body.ValidForDays > 0 {
+		rec.ValidForDays = body.ValidForDays
+	} else {
+		rec.ValidForDays = 365
+	}
+
+	if errs := rec.Validate(); len(errs) > 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  "validation failed",
+			"fields": errs,
+		})
+		return
+	}
+
+	// Reject duplicate document submissions — the same document hash must not appear
+	// on more than one registration record. Prevents identity document reuse / fraud.
+	if docHash := rec.Document.DocumentHash; docHash != "" {
+		for _, existing := range s.RegRegistry.All() {
+			if existing.WalletKey != walletKey && existing.Document.DocumentHash == docHash {
+				writeError(w, http.StatusConflict, "document hash already registered to another account")
+				return
+			}
+		}
+	}
+
+	rec.Status = gonetwork.RegistrationStatusPendingReview
+	rec.SubmittedAt = time.Now().Unix()
+	s.RegRegistry.Upsert(rec)
+
+	// If the OperatorRegistry is configured and T&C timestamps are set,
+	// also enqueue a KYC request so the operator sees it in the KYC queue.
+	if s.OperatorRegistry != nil {
+		_ = s.OperatorRegistry.RequestKYC(
+			walletKey,
+			rec.Classification.Class,
+			rec.Jurisdiction,
+			rec.ValidForDays,
+		)
+	}
+
+	auditLog(AuditEntry{
+		Action:    AuditRegistrationSubmitted,
+		ActorKey:  auditKeyFingerprint(walletKey),
+		Outcome:   "ok",
+		IPAddress: auditIP(r.RemoteAddr),
+		Details:   map[string]string{"jurisdiction": rec.Jurisdiction},
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status":       string(rec.Status),
+		"submitted_at": rec.SubmittedAt,
+		"message":      "Registration submitted and under review.",
+	})
+}
+
+// handleAdminRegistrationList returns all pending registrations for operator review.
+//
+// GET /v1/admin/registrations
+func (s *Server) handleAdminRegistrationList(w http.ResponseWriter, r *http.Request) {
+	filter := r.URL.Query().Get("status")
+	var records []*gonetwork.RegistrationRecord
+	if filter == "" || filter == "pending_review" {
+		records = s.RegRegistry.ListPending()
+	} else {
+		all := s.RegRegistry.All()
+		for _, rec := range all {
+			if string(rec.Status) == filter {
+				records = append(records, rec)
+			}
+		}
+	}
+	// Redact PII before sending to admin UI — operator sees names and status but not doc hashes / TINs.
+	redacted := make([]*gonetwork.RegistrationRecord, len(records))
+	for i, r := range records {
+		redacted[i] = r.RedactPII()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":   len(redacted),
+		"records": redacted,
+	})
+}
+
+// handleAdminRegistrationReview approves or rejects a registration record.
+// On approval, the KYC credential is also issued if OperatorRegistry is set.
+//
+// POST /v1/admin/registrations/{key}/review
+// Body: {"action":"approve"|"reject","rejection_reason":"..."}
+func (s *Server) handleAdminRegistrationReview(w http.ResponseWriter, r *http.Request) {
+	targetKey := r.PathValue("key")
+	adminKey := walletFromCtx(r)
+
+	var req struct {
+		Action          string `json:"action"`           // "approve" | "reject"
+		RejectionReason string `json:"rejection_reason"` // required when action == "reject"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Action != "approve" && req.Action != "reject" {
+		writeError(w, http.StatusBadRequest, "action must be 'approve' or 'reject'")
+		return
+	}
+	if req.Action == "reject" && req.RejectionReason == "" {
+		writeError(w, http.StatusBadRequest, "rejection_reason is required when rejecting")
+		return
+	}
+
+	rec := s.RegRegistry.Get(targetKey)
+	if rec == nil {
+		writeError(w, http.StatusNotFound, "registration record not found")
+		return
+	}
+
+	if req.Action == "approve" {
+		if err := s.RegRegistry.UpdateStatus(targetKey,
+			gonetwork.RegistrationStatusApproved, adminKey, ""); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Issue the on-chain KYC credential.
+		var att *gonetwork.CredentialAttestation
+		if s.OperatorRegistry != nil {
+			var credErr error
+			att, credErr = s.OperatorRegistry.ApproveKYC(targetKey)
+			if credErr != nil {
+				// Non-fatal: registration is approved even if credential issuance fails transiently.
+				// Retry via /v1/admin/kyc/approve.
+				writeJSON(w, http.StatusOK, map[string]string{
+					"status":  "approved",
+					"warning": "registration approved but credential issuance failed: " + credErr.Error(),
+				})
+				return
+			}
+		} else {
+			// No OperatorRegistry configured: build the attestation directly from the
+			// approved registration record so transfer eligibility checks pass immediately.
+			validDays := rec.ValidForDays
+			if validDays <= 0 {
+				validDays = 365
+			}
+			att = &gonetwork.CredentialAttestation{
+				WalletPublicKey: targetKey,
+				InvestorClass:   gonetwork.InvestorClass(rec.Classification.Class),
+				KYCStatus:       gonetwork.KYCStatusVerified,
+				Jurisdiction:    rec.Jurisdiction,
+				ExpiresAt:       time.Now().Unix() + int64(validDays)*86400,
+			}
+		}
+		// Propagate credential to the blockchain so transfer eligibility checks pass.
+		s.bc.Credentials[targetKey] = att
+		// G-07: auto-derive suitability for complex instruments for pro/eligible-CP investors.
+		if att.InvestorClass == gonetwork.InvestorClassProfessional ||
+			att.InvestorClass == gonetwork.InvestorClassEligibleCP {
+			for assetID, asset := range s.bc.Assets {
+				if asset.AssetType == gonetwork.AssetTypeWarrant ||
+					asset.AssetType == gonetwork.AssetTypeConvertible {
+					key := gonetwork.SuitabilityKey(targetKey, assetID)
+					if _, exists := s.bc.SuitabilityAssessments[key]; !exists {
+						s.bc.SuitabilityAssessments[key] = &gonetwork.SuitabilityAssessment{
+							WalletPublicKey:         targetKey,
+							AssetID:                 assetID,
+							InstrumentClass:         asset.AssetType,
+							HasSufficientKnowledge:  true,
+							HasSufficientExperience: true,
+							CanAbsorbLoss:           true,
+							Suitable:                true,
+							AssessedAt:              time.Now().Unix(),
+						}
+					}
+				}
+			}
+		}
+		s.bc.EmitEvent(gonetwork.EventCredentialIssued, map[string]any{
+			"wallet_key":     att.WalletPublicKey,
+			"investor_class": att.InvestorClass,
+			"kyc_status":     att.KYCStatus,
+			"jurisdiction":   att.Jurisdiction,
+			"expires_at":     att.ExpiresAt,
+		})
+		auditLog(AuditEntry{
+			Action:     AuditRegistrationApproved,
+			ActorKey:   auditKeyFingerprint(adminKey),
+			SubjectKey: auditKeyFingerprint(targetKey),
+			Outcome:    "ok",
+			IPAddress:  auditIP(r.RemoteAddr),
+		})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+	} else {
+		if err := s.RegRegistry.UpdateStatus(targetKey,
+			gonetwork.RegistrationStatusRejected, adminKey, req.RejectionReason); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		auditLog(AuditEntry{
+			Action:     AuditRegistrationRejected,
+			ActorKey:   auditKeyFingerprint(adminKey),
+			SubjectKey: auditKeyFingerprint(targetKey),
+			Outcome:    "ok",
+			IPAddress:  auditIP(r.RemoteAddr),
+			Details:    map[string]string{"reason": req.RejectionReason},
+		})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Settlement / payment instruction endpoints
+// ---------------------------------------------------------------------------
+
+// pendingPaymentResponse is the per-instruction shape returned by
+// GET /v1/payments/pending.
+type pendingPaymentResponse struct {
+	TradeID             string  `json:"trade_id"`
+	AssetID             string  `json:"asset_id"`
+	Reference           string  `json:"reference"`
+	Amount              float64 `json:"amount"`
+	Currency            string  `json:"currency"`
+	Method              string  `json:"method"`
+	SettlementNetwork   string  `json:"settlement_network,omitempty"`
+	PontesTransactionID string  `json:"pontes_transaction_id,omitempty"`
+	ExpiresAt           int64   `json:"expires_at"`
+	Status              string  `json:"status"`
+}
+
+// handleListPendingPayments returns all pending PaymentInstructions for the
+// authenticated wallet in their role as payer (buyer). Includes instructions
+// that are already confirmed so the UI can show a complete picture.
+//
+// GET /v1/payments/pending
+func (s *Server) handleListPendingPayments(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	now := time.Now().Unix()
+
+	out := make([]pendingPaymentResponse, 0)
+	for tradeID, instr := range s.bc.PendingInstructions {
+		if instr.PayerWalletID != walletKey {
+			continue
+		}
+		status := "pending"
+		if _, settled := s.bc.ConfirmedPayments[tradeID]; settled {
+			status = "confirmed"
+		} else if instr.ExpiresAt > 0 && now > instr.ExpiresAt {
+			status = "expired"
+		}
+		out = append(out, pendingPaymentResponse{
+			TradeID:             tradeID,
+			AssetID:             instr.AssetID,
+			Reference:           instr.Reference,
+			Amount:              instr.TotalAmount,
+			Currency:            instr.Currency,
+			Method:              string(instr.Method),
+			SettlementNetwork:   instr.SettlementNetwork,
+			PontesTransactionID: instr.PontesTransactionID,
+			ExpiresAt:           instr.ExpiresAt,
+			Status:              status,
+		})
+	}
+	// Sort by status priority (pending first) then ExpiresAt ascending.
+	sort.Slice(out, func(i, j int) bool {
+		si, sj := out[i].Status, out[j].Status
+		if si != sj {
+			order := map[string]int{"pending": 0, "expired": 1, "confirmed": 2}
+			return order[si] < order[sj]
+		}
+		return out[i].ExpiresAt < out[j].ExpiresAt
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
+// settledTradeResponse is the per-trade shape returned by
+// GET /v1/payments/history.
+type settledTradeResponse struct {
+	gonetwork.Trade
+	SettlementMethod    string `json:"settlement_method"`
+	SettlementStatus    string `json:"settlement_status"`
+	SettlementReference string `json:"settlement_reference,omitempty"`
+	SettlementNetwork   string `json:"settlement_network,omitempty"`
+	ConfirmedAt         int64  `json:"confirmed_at,omitempty"`
+}
+
+// handleListPaymentHistory returns all trades for the authenticated wallet
+// enriched with settlement method and confirmation status. Useful for the
+// settlement history view and for reconciliation.
+//
+// GET /v1/payments/history
+func (s *Server) handleListPaymentHistory(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+
+	out := make([]settledTradeResponse, 0)
+	for _, trade := range s.bc.Trades {
+		if trade.BuyerID != walletKey && trade.SellerID != walletKey {
+			continue
+		}
+		row := settledTradeResponse{Trade: trade, SettlementStatus: "pending"}
+		if instr, ok := s.bc.PendingInstructions[trade.ID]; ok {
+			row.SettlementMethod = string(instr.Method)
+			row.SettlementReference = instr.Reference
+			row.SettlementNetwork = instr.SettlementNetwork
+		}
+		if conf, ok := s.bc.ConfirmedPayments[trade.ID]; ok {
+			row.SettlementStatus = "confirmed"
+			row.ConfirmedAt = conf.ConfirmedAt
+		}
+		out = append(out, row)
+	}
+	// Most recent trades first.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ExecutedAt > out[j].ExecutedAt
+	})
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ---------------------------------------------------------------------------
