@@ -242,8 +242,8 @@ type jwtClaims struct {
 	Sub                string `json:"sub"`
 	Iat                int64  `json:"iat"`
 	Exp                int64  `json:"exp"`
-	Iss                string `json:"iss"` // token issuer — always "greenhouse-api"
-	Aud                string `json:"aud"` // intended audience — always "greenhouse"
+	Iss                string `json:"iss"`                           // token issuer — always "greenhouse-api"
+	Aud                string `json:"aud"`                           // intended audience — always "greenhouse"
 	InvestorClass      string `json:"investor_class,omitempty"`      // from KYC credential
 	Jurisdiction       string `json:"jurisdiction,omitempty"`        // ISO 3166-1 alpha-2
 	KYCStatus          string `json:"kyc_status,omitempty"`          // mirrors KYCStatus enum
@@ -251,6 +251,7 @@ type jwtClaims struct {
 	RegistrationStatus string `json:"registration_status,omitempty"` // mirrors RegistrationStatus enum
 	TermsAccepted      bool   `json:"terms_accepted"`
 }
+
 func b64url(b []byte) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
