@@ -130,6 +130,32 @@ func HoldingKey(holderID, assetID string) string {
 	return holderID + ":" + assetID
 }
 
+// ValidateISIN returns an error if isin does not conform to ISO 6166.
+// An empty string is accepted (ISIN is optional on GreenHouse assets).
+// The check covers structure only (length, character set); Luhn-style checksum
+// verification is deferred to integration with an ANNA/NNA database lookup.
+func ValidateISIN(isin string) error {
+	if isin == "" {
+		return nil
+	}
+	if len(isin) != 12 {
+		return fmt.Errorf("ISIN must be exactly 12 characters (ISO 6166); got %d", len(isin))
+	}
+	for i, c := range isin {
+		switch {
+		case i < 2: // country code — uppercase alpha only
+			if c < 'A' || c > 'Z' {
+				return fmt.Errorf("ISIN country code (first 2 chars) must be uppercase alpha; position %d got %q", i, c)
+			}
+		default: // alphanumeric (uppercase)
+			if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+				return fmt.Errorf("ISIN position %d must be uppercase alphanumeric; got %q", i, c)
+			}
+		}
+	}
+	return nil
+}
+
 // NewAsset creates and cryptographically signs a new asset on behalf of the issuer.
 // The IssuerSignature covers all fields — any mutation of the asset is detectable.
 // CirculatingSupply starts at 0; it grows as issue transactions are applied.

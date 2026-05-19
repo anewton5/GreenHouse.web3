@@ -51,6 +51,12 @@ type PaymentInstruction struct {
 	ExpiresAt        int64  // Unix timestamp — trade reverts if unpaid
 	OracleSignature  []byte // Ed25519 sig from OracleService
 
+	// TravelRule carries the FATF Recommendation 16 / EU Transfer-of-Funds Regulation
+	// (TFR, Regulation 2023/1113) originator and beneficiary information.
+	// Populated automatically in finalizeBlock when TotalAmount >= TravelRuleThresholdEUR.
+	// Transmitted to the receiving payment provider alongside the instruction.
+	TravelRule *TravelRulePayload `json:"travel_rule,omitempty"`
+
 	// CeBM / Pontes fields — populated when Method == SettlementCeBM.
 	// PontesTransactionID is the identifier returned by the Pontes bridge when
 	// the DLT delivery leg is registered via PontesPaymentProvider.RegisterSettlement.
@@ -116,6 +122,11 @@ type OracleService interface {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// TravelRuleThresholdEUR is the minimum total transfer value (EUR-equivalent) at
+// which a TravelRulePayload must be attached to a PaymentInstruction.
+// Source: FATF Recommendation 16; EU TFR (Regulation 2023/1113), in force 30 Dec 2024.
+const TravelRuleThresholdEUR = 1_000.0
 
 // DefaultSettlementMethod returns the preferred payment rail for the given
 // trade currency. The returned method is used as the default when creating a

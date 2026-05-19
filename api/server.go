@@ -96,7 +96,7 @@ func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server {
 		}
 	}
 
-	return &Server{
+	s := &Server{
 		bc:              bc,
 		jwtSecret:       secret,
 		listenAddr:      listenAddr,
@@ -106,6 +106,10 @@ func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server {
 		adminWalletKeys: adminKeys,
 		wsHub:           newHub(),
 	}
+	// Wire the shared registry into the blockchain so Travel Rule lookups
+	// can resolve investor PII from registration records.
+	bc.RegistrationRegistry = s.RegRegistry
+	return s
 }
 
 // Start registers all routes, starts background goroutines, and begins serving.
@@ -228,6 +232,18 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/compliance/jurisdictions/{code}", s.jwt(http.HandlerFunc(s.handleGetJurisdictionRule)))
 	mux.Handle("POST /v1/compliance/jurisdictions", s.jwtAdmin(http.HandlerFunc(s.handleUpsertJurisdictionRule)))
 
+	// MAR Art 18: Insider list management
+	mux.Handle("GET /v1/assets/{id}/insiders", s.jwt(http.HandlerFunc(s.handleListInsiders)))
+	mux.Handle("POST /v1/assets/{id}/insiders", s.jwtAdmin(http.HandlerFunc(s.handleAddInsider)))
+	mux.Handle("DELETE /v1/assets/{id}/insiders/{recordID}", s.jwtAdmin(http.HandlerFunc(s.handleRemoveInsider)))
+
+	// MAR Art 16: STOR (Suspicious Transaction and Order Reports) management
+	mux.Handle("GET /v1/compliance/stor", s.jwtAdmin(http.HandlerFunc(s.handleListSTORs)))
+	mux.Handle("POST /v1/compliance/stor/{id}/resolve", s.jwtAdmin(http.HandlerFunc(s.handleResolveSTOR)))
+
+	// Block finality information — unauthenticated (public)
+	mux.HandleFunc("GET /v1/blocks/{index}/finality", s.handleGetBlockFinality)
+
 	return LoggingMiddleware(CORSMiddleware(RateLimitMiddleware(mux)))
 }
 
@@ -254,6 +270,16 @@ type jwtClaims struct {
 
 func b64url(b []byte) string {
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// generateID returns a random prefixed identifier for use within the API package.
+// Format: "<prefix>-<16 hex chars>" e.g. "INS-a3f7b2c19d4e5f6a".
+func generateID(prefix string) string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(b))
 }
 
 func (s *Server) issueJWT(walletKey string) (string, error) {

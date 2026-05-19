@@ -202,6 +202,22 @@ type Blockchain struct {
 	// and submits reports to the relevant NCA/ARM.
 	RegulatoryReports []*RegulatoryReport
 
+	// MAR Article 18: insider lists — keyed by assetID.
+	// A list is created automatically when a new asset is admitted to trading.
+	// Compliance officers maintain them; the NCA may request them at any time.
+	InsiderLists map[string]*InsiderList
+
+	// MAR Article 16: Suspicious Transaction and Order Report drafts — keyed by STOR ID.
+	// Auto-created by order/trade pattern detection; resolved by compliance officers
+	// via POST /v1/compliance/stor/{id}/resolve.
+	PendingSTORs map[string]*STORDraft
+
+	// RegistrationRegistry provides KYC-verified investor PII for FATF Travel Rule
+	// payload population. Set to the same registry used by the API server so that
+	// finalizeBlock can look up buyer/seller names and addresses inline.
+	// If nil, Travel Rule payloads are constructed with wallet keys only.
+	RegistrationRegistry *RegistrationRegistry
+
 	// Track 4: Real-time event stream
 	// Events is a buffered channel onto which the blockchain emits StreamEvents
 	// whenever significant state changes occur (blocks, trades, payments, credentials).
@@ -247,6 +263,40 @@ const (
 // packages (e.g. the API layer) to push events onto the stream channel.
 func (bc *Blockchain) EmitEvent(eventType string, payload any) {
 	bc.emitEvent(eventType, payload)
+}
+
+// ---------------------------------------------------------------------------
+// FATF Travel Rule helper
+// ---------------------------------------------------------------------------
+
+// buildTravelRule constructs a TravelRulePayload for a payment above the FATF
+// Recommendation 16 threshold. It tries to resolve originator and beneficiary
+// names and addresses from the RegistrationRegistry; if the registry is not set
+// or a record is absent, the wallet key is used as the account identifier only.
+//
+// The caller (finalizeBlock) is responsible for checking the EUR-equivalent amount
+// against TravelRuleThresholdEUR before calling this function.
+func (bc *Blockchain) buildTravelRule(payerKey, payeeKey, transferRef string) *TravelRulePayload {
+	p := &TravelRulePayload{
+		OriginatorAccount:  payerKey,
+		BeneficiaryAccount: payeeKey,
+		TransferRef:        transferRef,
+	}
+	if bc.RegistrationRegistry != nil {
+		if rec := bc.RegistrationRegistry.Get(payerKey); rec != nil {
+			p.OriginatorName        = rec.Personal.FullLegalName
+			p.OriginatorAddressLine = rec.Address.Line1
+			p.OriginatorCity        = rec.Address.City
+			p.OriginatorCountryCode = rec.Address.Country
+		}
+		if rec := bc.RegistrationRegistry.Get(payeeKey); rec != nil {
+			p.BeneficiaryName        = rec.Personal.FullLegalName
+			p.BeneficiaryAddressLine = rec.Address.Line1
+			p.BeneficiaryCity        = rec.Address.City
+			p.BeneficiaryCountryCode = rec.Address.Country
+		}
+	}
+	return p
 }
 
 // ---------------------------------------------------------------------------
@@ -863,6 +913,10 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc.PendingSARs = make(map[string]*SARDraft)
 	// G-10: regulatory report log
 	bc.RegulatoryReports = []*RegulatoryReport{}
+	// MAR Article 18: insider lists
+	bc.InsiderLists = make(map[string]*InsiderList)
+	// MAR Article 16: STOR drafts
+	bc.PendingSTORs = make(map[string]*STORDraft)
 	if bc.PaymentProvider == nil {
 		bc.PaymentProvider = NewMockPaymentProvider()
 	}

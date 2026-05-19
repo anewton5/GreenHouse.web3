@@ -201,6 +201,11 @@ func (s *Server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
 		meta.DividendTerms = req.Metadata["dividend_terms"]
 		meta.LegalDocHash = req.Metadata["legal_doc_hash"]
 	}
+	// ISO 6166 structural validation — rejects malformed ISINs at creation time.
+	if err := gonetwork.ValidateISIN(meta.ISIN); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Map asset_class string to AssetType.
 	classMap := map[string]gonetwork.AssetType{
@@ -2815,3 +2820,197 @@ func (s *Server) handleUpsertJurisdictionRule(w http.ResponseWriter, r *http.Req
 	s.bc.JurisdictionRules[rule.CountryCode] = &rule
 	writeJSON(w, http.StatusOK, &rule)
 }
+
+// ---------------------------------------------------------------------------
+// MAR Article 18 — Insider List endpoints
+// ---------------------------------------------------------------------------
+
+// handleListInsiders returns the insider list for an asset.
+// Compliance officers and the NCA may request this list at any time (MAR Art 18(7)).
+// GET /v1/assets/{id}/insiders
+func (s *Server) handleListInsiders(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+	if _, ok := s.bc.Assets[assetID]; !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	list := s.bc.InsiderLists[assetID]
+	if list == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"asset_id": assetID, "count": 0, "records": []any{}})
+		return
+	}
+	active := list.Active()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id": assetID,
+		"count":    len(active),
+		"records":  active,
+	})
+}
+
+// handleAddInsider adds a person to the MAR Article 18 insider list for an asset.
+// Only compliance officers (jwtAdmin) may add entries.
+// POST /v1/assets/{id}/insiders
+// Body: {"full_name":"...","role":"...","organisation":"...","reason":"..."}
+func (s *Server) handleAddInsider(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+	addedBy := walletFromCtx(r)
+
+	if _, ok := s.bc.Assets[assetID]; !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+
+	var req struct {
+		FullName     string `json:"full_name"`
+		Role         string `json:"role"`
+		Organisation string `json:"organisation"`
+		Reason       string `json:"reason"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.FullName == "" || req.Role == "" {
+		writeError(w, http.StatusBadRequest, "full_name and role are required")
+		return
+	}
+	if req.Reason == "" {
+		writeError(w, http.StatusBadRequest, "reason is required (describe the insider's access to inside information)")
+		return
+	}
+
+	record := &gonetwork.InsiderRecord{
+		ID:            generateID("INS"),
+		AssetID:       assetID,
+		FullName:      req.FullName,
+		Role:          req.Role,
+		Organisation:  req.Organisation,
+		Reason:        req.Reason,
+		AddedAt:       time.Now().Unix(),
+		AddedByWallet: addedBy,
+	}
+
+	list := s.bc.InsiderLists[assetID]
+	if list == nil {
+		list = &gonetwork.InsiderList{AssetID: assetID}
+		s.bc.InsiderLists[assetID] = list
+	}
+	list.Add(record)
+
+	writeJSON(w, http.StatusCreated, record)
+}
+
+// handleRemoveInsider soft-deletes an insider record (MAR Art 18: records must be
+// retained for 5 years and must show the date they were removed).
+// DELETE /v1/assets/{id}/insiders/{recordID}
+func (s *Server) handleRemoveInsider(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("id")
+	recordID := r.PathValue("recordID")
+
+	list := s.bc.InsiderLists[assetID]
+	if list == nil {
+		writeError(w, http.StatusNotFound, "insider list not found for asset")
+		return
+	}
+	if !list.Remove(recordID, time.Now().Unix()) {
+		writeError(w, http.StatusNotFound, "insider record not found or already removed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed", "record_id": recordID})
+}
+
+// ---------------------------------------------------------------------------
+// MAR Article 16 — STOR endpoints
+// ---------------------------------------------------------------------------
+
+// handleListSTORs returns all STOR drafts, optionally filtered by resolution.
+// Only compliance officers (jwtAdmin) may access this list.
+// GET /v1/compliance/stor?resolution=pending_review
+func (s *Server) handleListSTORs(w http.ResponseWriter, _ *http.Request) {
+	out := make([]*gonetwork.STORDraft, 0, len(s.bc.PendingSTORs))
+	for _, stor := range s.bc.PendingSTORs {
+		out = append(out, stor)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(out),
+		"stors": out,
+	})
+}
+
+// handleResolveSTOR allows a compliance officer to file or dismiss a STOR draft.
+// MAR Article 16(1) requires the report to be filed with the NCA "without delay".
+// POST /v1/compliance/stor/{id}/resolve
+// Body: {"action":"file"|"dismiss","nca_ref":"optional ref","notes":"optional"}
+func (s *Server) handleResolveSTOR(w http.ResponseWriter, r *http.Request) {
+	storID := r.PathValue("id")
+	resolverKey := walletFromCtx(r)
+
+	stor, ok := s.bc.PendingSTORs[storID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "STOR not found")
+		return
+	}
+	if stor.Resolution != gonetwork.STORResolutionPendingReview {
+		writeError(w, http.StatusConflict, fmt.Sprintf("STOR is already %s", stor.Resolution))
+		return
+	}
+
+	var req struct {
+		Action string `json:"action"` // "file" or "dismiss"
+		NCARef string `json:"nca_ref,omitempty"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	switch req.Action {
+	case "file":
+		stor.Resolution = gonetwork.STORResolutionFiledWithNCA
+		stor.NCARef = req.NCARef
+	case "dismiss":
+		stor.Resolution = gonetwork.STORResolutionDismissed
+	default:
+		writeError(w, http.StatusBadRequest, `action must be "file" or "dismiss"`)
+		return
+	}
+	stor.ResolvedAt = time.Now().Unix()
+	stor.ResolvedBy = resolverKey
+
+	writeJSON(w, http.StatusOK, stor)
+}
+
+// ---------------------------------------------------------------------------
+// Settlement finality certificate
+// ---------------------------------------------------------------------------
+
+// handleGetBlockFinality returns a finality certificate for the block at the
+// specified index. This gives external parties (custodians, transfer agents) a
+// machine-readable proof that settlement has reached dBFT finality.
+// GET /v1/blocks/{index}/finality
+func (s *Server) handleGetBlockFinality(w http.ResponseWriter, r *http.Request) {
+	indexStr := r.PathValue("index")
+	idx, err := strconv.Atoi(indexStr)
+	if err != nil || idx < 0 {
+		writeError(w, http.StatusBadRequest, "invalid block index")
+		return
+	}
+
+	blocks := s.bc.Blocks
+	if idx >= len(blocks) {
+		writeError(w, http.StatusNotFound, "block not found")
+		return
+	}
+	blk := blocks[idx]
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"block_index": idx,
+		"block_hash":  blk.CalculateHash(),
+		"prev_hash":   blk.PrevHash,
+		"tx_count":    len(blk.Transactions),
+		"finality":    "dbft", // deterministic finality — no forks possible
+		"queried_at":  time.Now().UTC().Unix(),
+	})
+}
+

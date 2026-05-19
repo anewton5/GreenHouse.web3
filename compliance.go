@@ -1,8 +1,11 @@
 package gonetwork
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -33,6 +36,15 @@ type ProspectusExemption struct {
 	MaxTicketSizeEUR            float64        // 0 = no limit
 	JurisdictionCoverage        []string       // ISO codes; empty = any EU jurisdiction
 	RetailHoldersByJurisdiction map[string]int // jurisdictionCode → current count
+
+	// TwelveMonthEURValue is the 12-month rolling total raised under this exemption
+	// in EUR-equivalent. Used to enforce Prospectus Regulation value thresholds
+	// (Art 1(3): €1M simplified; Art 3(2): €8M threshold above which full prospectus
+	// is typically required under national implementing rules).
+	TwelveMonthEURValue float64 `json:"twelve_month_eur_value"`
+	// OfferingValueByTradeID records the EUR value of each settled trade so that
+	// cancellations can decrement the rolling total accurately.
+	OfferingValueByTradeID map[string]float64 `json:"offering_value_by_trade_id"`
 }
 
 // SuitabilityAssessment is the on-chain MiFID II Article 25 record for a wallet/asset pair.
@@ -261,6 +273,188 @@ func ApplyJurisdictionRule(
 }
 
 // ---------------------------------------------------------------------------
+// ProspectusExemption — EUR rolling value helpers
+// ---------------------------------------------------------------------------
+
+// ProspectusThreshold1MEUR is the lower value threshold under Art 1(3) of the
+// Prospectus Regulation. Offerings below this amount are always exempt.
+const ProspectusThreshold1MEUR = 1_000_000.0
+
+// ProspectusThreshold8MEUR is the upper value threshold: above this, a full EU
+// prospectus is typically required unless the qualified-investor-only exemption applies.
+const ProspectusThreshold8MEUR = 8_000_000.0
+
+// RecordSettlement adds the EUR value of a settled trade to the exemption's 12-month
+// rolling total. Call this from finalizeBlock after DVP settlement completes.
+func (pe *ProspectusExemption) RecordSettlement(tradeID string, eurValue float64) {
+	if pe.OfferingValueByTradeID == nil {
+		pe.OfferingValueByTradeID = make(map[string]float64)
+	}
+	if _, exists := pe.OfferingValueByTradeID[tradeID]; !exists {
+		pe.OfferingValueByTradeID[tradeID] = eurValue
+		pe.TwelveMonthEURValue += eurValue
+	}
+}
+
+// CheckProspectusValueThreshold returns an error if a new trade of eurValue would
+// push the exemption over the 8M EUR value ceiling that triggers a full prospectus
+// obligation (unless the exemption basis is QIB-only, which has no value cap).
+func CheckProspectusValueThreshold(pe *ProspectusExemption, eurValue float64) error {
+	if pe == nil || pe.Basis == ExemptionQIBOnly {
+		return nil
+	}
+	if pe.TwelveMonthEURValue+eurValue > ProspectusThreshold8MEUR {
+		return fmt.Errorf(
+			"offering would exceed €8M 12-month value threshold (current: €%.2f, new: €%.2f): full prospectus required",
+			pe.TwelveMonthEURValue, eurValue,
+		)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// MAR Article 18 — Insider Lists
+// ---------------------------------------------------------------------------
+
+// InsiderRecord represents one entry on a MAR Article 18 insider list.
+// An insider is any person who has access to inside information relating to an admitted
+// instrument. The platform operator must maintain these lists and produce them to the
+// NCA on demand (MAR Art 18(1)).
+type InsiderRecord struct {
+	ID            string `json:"id"`
+	AssetID       string `json:"asset_id"`
+	FullName      string `json:"full_name"`       // full legal name
+	Role          string `json:"role"`            // e.g. "Director", "Adviser", "Employee"
+	Organisation  string `json:"organisation,omitempty"`
+	AddedAt       int64  `json:"added_at"`        // Unix timestamp
+	RemovedAt     int64  `json:"removed_at"`      // 0 = still active
+	AddedByWallet string `json:"added_by_wallet"` // compliance officer wallet key
+	// Reason describes why this person has access to inside information.
+	Reason string `json:"reason"`
+}
+
+// InsiderList is the per-instrument MAR Article 18 insider list.
+// A list is created automatically when a new asset is admitted to trading.
+type InsiderList struct {
+	AssetID string           `json:"asset_id"`
+	Records []*InsiderRecord `json:"records"`
+}
+
+// Add appends a new insider record to the list.
+func (il *InsiderList) Add(r *InsiderRecord) {
+	r.AssetID = il.AssetID
+	il.Records = append(il.Records, r)
+}
+
+// Remove marks the record with the given ID as removed (soft delete).
+// Returns false if no matching active record was found.
+func (il *InsiderList) Remove(recordID string, removedAt int64) bool {
+	for _, r := range il.Records {
+		if r.ID == recordID && r.RemovedAt == 0 {
+			r.RemovedAt = removedAt
+			return true
+		}
+	}
+	return false
+}
+
+// Active returns only currently active (not removed) insider records.
+func (il *InsiderList) Active() []*InsiderRecord {
+	var out []*InsiderRecord
+	for _, r := range il.Records {
+		if r.RemovedAt == 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// MAR Article 16 — Suspicious Transaction and Order Reports (STOR)
+// ---------------------------------------------------------------------------
+
+// STORCategory classifies the type of market abuse suspected.
+// Reference: MAR Article 16; ESMA guidelines on delayed disclosure.
+type STORCategory string
+
+const (
+	// STORInsiderDealing — suspected trading on inside information (MAR Art 8).
+	STORInsiderDealing STORCategory = "insider_dealing"
+	// STORMarketManipulation — suspected price distortion or false impression of supply/demand.
+	STORMarketManipulation STORCategory = "market_manipulation"
+	// STORSpoofing — large orders placed with intent to cancel before execution.
+	STORSpoofing STORCategory = "spoofing"
+	// STORLayering — stacking multiple orders to create false order book depth.
+	STORLayering STORCategory = "layering"
+	// STORWashTrading — buyer and seller are economically the same party.
+	STORWashTrading STORCategory = "wash_trading"
+	// STORFrontRunning — suspected execution ahead of a known large client order.
+	STORFrontRunning STORCategory = "front_running"
+)
+
+// STORResolution is the outcome of compliance officer review.
+type STORResolution string
+
+const (
+	STORResolutionPendingReview STORResolution = "pending_review"
+	STORResolutionFiledWithNCA  STORResolution = "filed_with_nca"
+	STORResolutionDismissed     STORResolution = "dismissed"
+	STORResolutionEscalated     STORResolution = "escalated"
+)
+
+// STORDraft is a Suspicious Transaction and Order Report pending compliance review.
+// Auto-created by pattern detection rules in the order/trade pipeline; filed with
+// the NCA by a compliance officer via POST /v1/compliance/stor/{id}/resolve.
+//
+// Reference: MAR Article 16(1) — obligation applies to market operators; report must
+// be filed with the NCA "without delay" once suspicion arises.
+type STORDraft struct {
+	ID          string         `json:"id"`
+	Category    STORCategory   `json:"category"`
+	AssetID     string         `json:"asset_id"`
+	OrderID     string         `json:"order_id,omitempty"`   // the triggering order
+	TradeID     string         `json:"trade_id,omitempty"`   // the triggering trade, if any
+	WalletKey   string         `json:"wallet_key"`           // suspected participant
+	Description string         `json:"description"`          // auto-generated + editable
+	DetectedAt  int64          `json:"detected_at"`          // Unix timestamp
+	Resolution  STORResolution `json:"resolution"`
+	ResolvedAt  int64          `json:"resolved_at,omitempty"`
+	ResolvedBy  string         `json:"resolved_by,omitempty"` // compliance officer wallet key
+	// NCARef is the reference number returned by the NCA upon filing.
+	// Populated by the compliance officer when setting Resolution = STORResolutionFiledWithNCA.
+	NCARef string `json:"nca_ref,omitempty"`
+}
+
+// NewSTORDraft constructs a new STOR draft with a generated ID and DetectedAt timestamp.
+func NewSTORDraft(category STORCategory, assetID, orderID, tradeID, walletKey, description string) *STORDraft {
+	return &STORDraft{
+		ID:          generateID("STOR"),
+		Category:    category,
+		AssetID:     assetID,
+		OrderID:     orderID,
+		TradeID:     tradeID,
+		WalletKey:   walletKey,
+		Description: description,
+		DetectedAt:  time.Now().Unix(),
+		Resolution:  STORResolutionPendingReview,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+
+// generateID returns a random prefixed identifier.
+// Format: "<prefix>-<16 hex chars>" e.g. "STOR-a3f7b2c19d4e5f6a".
+func generateID(prefix string) string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(b))
+}
+
+// ---------------------------------------------------------------------------
 // MarshalJSON helpers (for compliance reports, audit logs)
 // ---------------------------------------------------------------------------
 
@@ -269,3 +463,4 @@ func (pe *ProspectusExemption) MarshalJSON() ([]byte, error) {
 	type Alias ProspectusExemption
 	return json.Marshal((*Alias)(pe))
 }
+

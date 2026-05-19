@@ -353,6 +353,15 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 				Reference:     fmt.Sprintf("GH-%s", trade.ID[:8]),
 				ExpiresAt:     time.Now().Unix() + 86400, // 24 h to pay
 			}
+
+			// FATF Recommendation 16 / EU TFR (Regulation 2023/1113):
+			// attach originator + beneficiary data when EUR-equivalent >= €1,000.
+			if instruction.TotalAmount >= TravelRuleThresholdEUR {
+				instruction.TravelRule = bc.buildTravelRule(
+					trade.BuyerID, trade.SellerID, instruction.Reference,
+				)
+			}
+
 			instruction, _ = bc.OracleService.SignInstruction(instruction)
 			bc.PendingInstructions[trade.ID] = instruction
 
@@ -378,6 +387,12 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 				// if a webhook fires later for the same reference.
 				if err := bc.ConfirmAndSettle(instruction.Reference, instruction.TotalAmount, instruction.Currency); err != nil {
 					fmt.Printf("DVP settle failed for trade %s: %v\n", trade.ID, err)
+				} else {
+					// Record settlement value against the prospectus exemption for
+					// this asset so the 12-month EUR rolling total stays current.
+					if pe, ok := bc.ProspectusExemptions[trade.AssetID]; ok {
+						pe.RecordSettlement(trade.ID, instruction.TotalAmount)
+					}
 				}
 			}
 		}

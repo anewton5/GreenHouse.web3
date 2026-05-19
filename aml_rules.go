@@ -295,6 +295,60 @@ func tmRule06CrossBorderLargeTransfer() AMLRule {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// PEP / Sanctions Re-screening Scheduler
+// ---------------------------------------------------------------------------
+
+// StartPEPRescreeningScheduler starts a background goroutine that periodically
+// re-screens every registered credential holder against the configured AML
+// screener.  Any flag-severity hit raises a SAR draft for compliance review.
+//
+// JMLSG 3.4.5 requires ongoing periodic re-screening; a 24-hour interval is
+// the recommended production setting.  Use a shorter interval only in tests.
+func StartPEPRescreeningScheduler(bc *Blockchain, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			rescreenAllWallets(bc)
+		}
+	}()
+}
+
+// rescreenAllWallets is the single-pass re-screening function called by the scheduler.
+func rescreenAllWallets(bc *Blockchain) {
+	for walletKey := range bc.Credentials {
+		// Use a zero-amount self-transfer as a PEP/sanctions name-check trigger.
+		alert, err := bc.AMLScreener.ScreenTransaction(walletKey, walletKey, "", 0, "")
+		if err != nil || alert == nil {
+			continue
+		}
+		if alert.Severity != AMLSeverityFlag && alert.Severity != AMLSeverityBlock {
+			continue
+		}
+		sarID := generateID("SAR")
+		if _, exists := bc.PendingSARs[sarID]; exists {
+			continue // extremely unlikely collision; skip
+		}
+		bc.PendingSARs[sarID] = &SARDraft{
+			ID:          sarID,
+			SenderKey:   walletKey,
+			ReceiverKey: walletKey,
+			AssetID:     "",
+			Reason:      "PEP/sanctions periodic re-screening alert: " + alert.Reason,
+			MatchedList: alert.MatchedList,
+			CreatedAt:   time.Now().Unix(),
+			Status:      SARStatusPending,
+		}
+		bc.emitEvent(EventSARCreated, map[string]any{
+			"sar_id":       sarID,
+			"wallet_key":   walletKey,
+			"matched_list": alert.MatchedList,
+			"source":       "pep_rescreening",
+		})
+	}
+}
+
 // CrossBorderHighRiskCheck returns an AMLSeverityBlock alert if the receiver is
 // credentialled to a FATF high-risk jurisdiction AND the transfer exceeds EUR 5,000.
 // Called from handleFillOrder after credential lookup.
