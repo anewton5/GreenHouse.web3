@@ -153,6 +153,36 @@ func ValidateISIN(isin string) error {
 			}
 		}
 	}
+
+	// ISO 6166 Luhn mod-10 check-digit validation.
+	// Expand: convert each character to its numeric value (A=10, B=11, …, Z=35,
+	// digits stay as-is) and concatenate into a digit string, then run Luhn.
+	var digits []int
+	for _, c := range isin {
+		if c >= 'A' && c <= 'Z' {
+			val := int(c-'A') + 10 // A=10 … Z=35
+			digits = append(digits, val/10, val%10)
+		} else {
+			digits = append(digits, int(c-'0'))
+		}
+	}
+	// Luhn algorithm: from rightmost digit, double every second digit.
+	sum := 0
+	double := false
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := digits[i]
+		if double {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		double = !double
+	}
+	if sum%10 != 0 {
+		return fmt.Errorf("ISIN %q has invalid check digit (Luhn mod-10 failed)", isin)
+	}
 	return nil
 }
 

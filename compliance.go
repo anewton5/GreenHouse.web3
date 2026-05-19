@@ -323,8 +323,8 @@ func CheckProspectusValueThreshold(pe *ProspectusExemption, eurValue float64) er
 type InsiderRecord struct {
 	ID            string `json:"id"`
 	AssetID       string `json:"asset_id"`
-	FullName      string `json:"full_name"`       // full legal name
-	Role          string `json:"role"`            // e.g. "Director", "Adviser", "Employee"
+	FullName      string `json:"full_name"` // full legal name
+	Role          string `json:"role"`      // e.g. "Director", "Adviser", "Employee"
 	Organisation  string `json:"organisation,omitempty"`
 	AddedAt       int64  `json:"added_at"`        // Unix timestamp
 	RemovedAt     int64  `json:"removed_at"`      // 0 = still active
@@ -412,11 +412,11 @@ type STORDraft struct {
 	ID          string         `json:"id"`
 	Category    STORCategory   `json:"category"`
 	AssetID     string         `json:"asset_id"`
-	OrderID     string         `json:"order_id,omitempty"`   // the triggering order
-	TradeID     string         `json:"trade_id,omitempty"`   // the triggering trade, if any
-	WalletKey   string         `json:"wallet_key"`           // suspected participant
-	Description string         `json:"description"`          // auto-generated + editable
-	DetectedAt  int64          `json:"detected_at"`          // Unix timestamp
+	OrderID     string         `json:"order_id,omitempty"` // the triggering order
+	TradeID     string         `json:"trade_id,omitempty"` // the triggering trade, if any
+	WalletKey   string         `json:"wallet_key"`         // suspected participant
+	Description string         `json:"description"`        // auto-generated + editable
+	DetectedAt  int64          `json:"detected_at"`        // Unix timestamp
 	Resolution  STORResolution `json:"resolution"`
 	ResolvedAt  int64          `json:"resolved_at,omitempty"`
 	ResolvedBy  string         `json:"resolved_by,omitempty"` // compliance officer wallet key
@@ -463,4 +463,3 @@ func (pe *ProspectusExemption) MarshalJSON() ([]byte, error) {
 	type Alias ProspectusExemption
 	return json.Marshal((*Alias)(pe))
 }
-

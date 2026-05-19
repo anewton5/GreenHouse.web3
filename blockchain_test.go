@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"testing"
 )
@@ -21,7 +22,7 @@ func TestAddBlock(t *testing.T) {
 	}
 	prevHash := bc.Blocks[len(bc.Blocks)-1].CalculateHash() // Use the hash of the last block (genesis block)
 
-	bc.AddBlock(transactions, [][]byte{[]byte(prevHash)})
+	bc.AddBlock(Block{Transactions: transactions})
 
 	// Expect 2 blocks: genesis block + the new block
 	if len(bc.Blocks) != 2 {
@@ -106,9 +107,11 @@ func TestBlockValidationWithSignatures(t *testing.T) {
 		PrevHash: bc.GetLastBlockHash(),
 	}
 
+	block.SetPayloadHash()
+	payloadHashBytes1, _ := hex.DecodeString(block.PayloadHash)
 	block.Signatures = [][]byte{
-		ed25519.Sign(delegate1.PrivateKey, []byte(block.CalculateHash())),
-		ed25519.Sign(delegate2.PrivateKey, []byte(block.CalculateHash())),
+		ed25519.Sign(delegate1.PrivateKey, payloadHashBytes1),
+		ed25519.Sign(delegate2.PrivateKey, payloadHashBytes1),
 	}
 
 	if !bc.ValidateBlock(block) {
@@ -182,9 +185,11 @@ func TestValidateBlock(t *testing.T) {
 		PrevHash:     validBlock.CalculateHash(),
 	}
 
+	newBlock.SetPayloadHash()
+	payloadBytes, _ := hex.DecodeString(newBlock.PayloadHash)
 	newBlock.Signatures = [][]byte{
-		ed25519.Sign(delegatePrivKey1.key, []byte(newBlock.CalculateHash())),
-		ed25519.Sign(delegatePrivKey2.key, []byte(newBlock.CalculateHash())),
+		ed25519.Sign(delegatePrivKey1.key, payloadBytes),
+		ed25519.Sign(delegatePrivKey2.key, payloadBytes),
 	}
 
 	if !bc.ValidateBlock(newBlock) {
@@ -295,7 +300,7 @@ func TestNodeRecovery(t *testing.T) {
 
 	// Add a block to node1's blockchain
 	tx := Transaction{Sender: "A", Receiver: "B", Amount: 10}
-	node1.Blockchain.AddBlock([]Transaction{tx}, nil)
+	node1.Blockchain.AddBlock(Block{Transactions: []Transaction{tx}})
 
 	// Sync node2 with node1
 	node2.SyncBlockchain(node1)
@@ -313,12 +318,12 @@ func TestForkResolution(t *testing.T) {
 
 	// Add blocks to bc1
 	tx1 := Transaction{Sender: "A", Receiver: "B", Amount: 10}
-	bc1.AddBlock([]Transaction{tx1}, nil)
+	bc1.AddBlock(Block{Transactions: []Transaction{tx1}})
 
 	// Add more blocks to bc2
 	tx2 := Transaction{Sender: "C", Receiver: "D", Amount: 20}
-	bc2.AddBlock([]Transaction{tx1}, nil)
-	bc2.AddBlock([]Transaction{tx2}, nil)
+	bc2.AddBlock(Block{Transactions: []Transaction{tx1}})
+	bc2.AddBlock(Block{Transactions: []Transaction{tx2}})
 
 	// Resolve fork
 	if !bc1.ResolveFork(bc2.Blocks) {

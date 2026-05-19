@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -94,6 +95,8 @@ func (t *Transaction) VerifyTransaction(pubKeys []*PublicKey) (bool, error) {
 }
 
 type Block struct {
+	Index                  int                     `json:"index"`
+	PayloadHash            string                  `json:"payload_hash,omitempty"`
 	Transactions           []Transaction           `json:"Transactions"`
 	AssetTransactions      []AssetTransaction      `json:"AssetTransactions,omitempty"`
 	OrderTransactions      []OrderTransaction      `json:"OrderTransactions,omitempty"`
@@ -101,6 +104,38 @@ type Block struct {
 	PrevHash               string
 	Nonce                  int
 	Signatures             [][]byte
+}
+
+// blockHashInput is the deterministic pre-signature representation of a block
+// used as the payload that delegates sign. It excludes Signatures so the hash
+// is stable regardless of how many signatures are collected.
+type blockHashInput struct {
+	Index                  int                     `json:"index"`
+	Transactions           []Transaction           `json:"transactions"`
+	AssetTransactions      []AssetTransaction      `json:"asset_transactions,omitempty"`
+	OrderTransactions      []OrderTransaction      `json:"order_transactions,omitempty"`
+	CredentialTransactions []CredentialTransaction `json:"credential_transactions,omitempty"`
+	PrevHash               string                  `json:"prev_hash"`
+	Nonce                  int                     `json:"nonce"`
+}
+
+// SetPayloadHash computes and stores the pre-signature block hash. Must be
+// called after all transaction fields are populated and before any signatures
+// are added. Delegates sign PayloadHash; CalculateHash includes signatures
+// and is used for chain-linking (PrevHash references).
+func (b *Block) SetPayloadHash() {
+	input := blockHashInput{
+		Index:                  b.Index,
+		Transactions:           b.Transactions,
+		AssetTransactions:      b.AssetTransactions,
+		OrderTransactions:      b.OrderTransactions,
+		CredentialTransactions: b.CredentialTransactions,
+		PrevHash:               b.PrevHash,
+		Nonce:                  b.Nonce,
+	}
+	data, _ := json.Marshal(input)
+	hash := sha3.Sum256(data)
+	b.PayloadHash = hex.EncodeToString(hash[:])
 }
 
 func (b *Block) CalculateHash() string {
@@ -114,6 +149,12 @@ type View struct {
 }
 
 type Blockchain struct {
+	// Mu guards all mutable state on this struct. Callers must hold Mu.RLock()
+	// for reads and Mu.Lock() for writes. Internal helpers (applyBlockState,
+	// ConfirmAndSettle, etc.) assume the caller already holds the appropriate
+	// lock — they do not acquire it themselves.
+	Mu sync.RWMutex `json:"-"`
+
 	Blocks             []Block
 	Nodes              []Node
 	LockedWallets      map[[32]byte]*LockedWallet
@@ -225,6 +266,30 @@ type Blockchain struct {
 	// Senders use bc.emitEvent() which never blocks — events are dropped when the
 	// buffer is full rather than blocking the consensus path.
 	Events chan StreamEvent
+
+	// WalletSequences tracks the last accepted nonce per sender public key.
+	// Any transaction with nonce ≤ WalletSequences[sender] is rejected as a
+	// replay. Time-based nonces (UnixNano) are monotonically increasing in
+	// normal operation; this guard closes the replay window that opens when a
+	// shard pool is cleared after a block is sealed.
+	WalletSequences map[string]int64
+
+	// ConsensusTimeout is the maximum time AchieveConsensus will wait for all
+	// delegate votes before declaring a view-change (M-2). Defaults to 30s.
+	// Set to 0 to disable the timeout (not recommended for production).
+	ConsensusTimeout time.Duration
+
+	// OperatorKeyProvider is the node-operator's signing key used to add an
+	// operator Ed25519 signature to every sealed block (C-2). When nil (default
+	// in dev/test mode) the signing step is skipped. Set to a LocalKeyProvider
+	// or VaultKeyProvider before starting a production node.
+	OperatorKeyProvider KeyProvider
+
+	// BlockStore is an optional bbolt-backed persistent block store (C-4).
+	// When non-nil, SealBlock writes each sealed block to disk so the chain
+	// survives process restarts. Populate via OpenBlockStore() and call
+	// LoadBlocks() before serving requests.
+	BlockStore *BlockStore
 }
 
 // ---------------------------------------------------------------------------
@@ -284,15 +349,15 @@ func (bc *Blockchain) buildTravelRule(payerKey, payeeKey, transferRef string) *T
 	}
 	if bc.RegistrationRegistry != nil {
 		if rec := bc.RegistrationRegistry.Get(payerKey); rec != nil {
-			p.OriginatorName        = rec.Personal.FullLegalName
+			p.OriginatorName = rec.Personal.FullLegalName
 			p.OriginatorAddressLine = rec.Address.Line1
-			p.OriginatorCity        = rec.Address.City
+			p.OriginatorCity = rec.Address.City
 			p.OriginatorCountryCode = rec.Address.Country
 		}
 		if rec := bc.RegistrationRegistry.Get(payeeKey); rec != nil {
-			p.BeneficiaryName        = rec.Personal.FullLegalName
+			p.BeneficiaryName = rec.Personal.FullLegalName
 			p.BeneficiaryAddressLine = rec.Address.Line1
-			p.BeneficiaryCity        = rec.Address.City
+			p.BeneficiaryCity = rec.Address.City
 			p.BeneficiaryCountryCode = rec.Address.Country
 		}
 	}
@@ -431,20 +496,219 @@ func (bc *Blockchain) ConfirmAndSettle(reference string, amount float64, currenc
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// immediately emits EventBlockFinalised. It is called by the API layer after
-// each state-mutating HTTP request so the chain grows in real time without
-// requiring a full dBFT consensus round.
+// applyBlockState processes all transactions contained in a block and updates
+// the live chain state: order books, holdings, credentials, trades, payment
+// instructions, and prospectus counters. It is the shared engine called by
+// both SealBlock (HTTP API path) and finalizeBlock (dBFT consensus path) so
+// that identical state transitions occur regardless of how a block was produced.
+//
+// applyBlockState must only be called while bc.Mu is held by the caller.
+func (bc *Blockchain) applyBlockState(block *Block) {
+	// 1. Expire stale payment instructions before running the matching engine.
+	bc.ExpireStaleInstructions()
+
+	// 2. Apply asset transactions.
+	for _, tx := range block.AssetTransactions {
+		if err := tx.Validate(bc.Assets, bc.Holdings, bc.Credentials, bc.PendingCorporateActions, bc.AMLScreener); err != nil {
+			fmt.Printf("Skipping invalid asset tx: %v\n", err)
+			continue
+		}
+		if err := ApplyAssetTransaction(&tx, bc.Assets, bc.Holdings); err != nil {
+			fmt.Printf("Failed to apply asset tx: %v\n", err)
+		}
+	}
+
+	// 3. Apply credential transactions.
+	for _, ct := range block.CredentialTransactions {
+		bc.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
+		bc.emitEvent(EventCredentialIssued, map[string]any{
+			"wallet_key":     ct.Attestation.WalletPublicKey,
+			"investor_class": ct.Attestation.InvestorClass,
+			"kyc_status":     ct.Attestation.KYCStatus,
+			"expires_at":     ct.Attestation.ExpiresAt,
+		})
+	}
+
+	// 4. Apply order transactions (add new orders / process cancellations).
+	for _, ot := range block.OrderTransactions {
+		if ot.IsCancellation {
+			if ob, ok := bc.OrderBooks[ot.Order.AssetID]; ok {
+				if err := ob.CancelOrder(ot.Order.ID, ot.Tx.Sender); err != nil {
+					fmt.Printf("Failed to cancel order %s: %v\n", ot.Order.ID, err)
+				}
+			}
+			bc.emitEvent(EventOrderCancelled, map[string]any{
+				"order_id": ot.Order.ID,
+				"asset_id": ot.Order.AssetID,
+			})
+			continue
+		}
+		if _, ok := bc.OrderBooks[ot.Order.AssetID]; !ok {
+			bc.OrderBooks[ot.Order.AssetID] = NewOrderBook(ot.Order.AssetID)
+		}
+		pubKey, err := PublicKeyFromString(ot.Tx.Sender)
+		if err != nil {
+			fmt.Printf("Failed to decode order placer key: %v\n", err)
+			continue
+		}
+		if err := bc.OrderBooks[ot.Order.AssetID].AddOrder(&ot.Order, pubKey); err != nil {
+			fmt.Printf("Failed to add order to book: %v\n", err)
+		} else {
+			bc.emitEvent(EventOrderPlaced, map[string]any{
+				"order_id": ot.Order.ID,
+				"asset_id": ot.Order.AssetID,
+				"side":     ot.Order.Side,
+				"price":    ot.Order.Price,
+				"quantity": ot.Order.Quantity,
+			})
+		}
+	}
+
+	// 5. Run the matching engine for all order books.
+	// Window-managed assets are matched by Tick() on window close; skip them here.
+	if bc.WindowManager != nil {
+		windowResults := bc.WindowManager.Tick(bc)
+		bc.WindowResults = append(bc.WindowResults, windowResults...)
+	}
+
+	for assetID, ob := range bc.OrderBooks {
+		if bc.WindowManager != nil && bc.WindowManager.IsManaged(assetID) {
+			continue
+		}
+		asset, ok := bc.Assets[assetID]
+		if !ok {
+			continue
+		}
+		trades, assetTxs, err := ob.MatchOrders(assetID, asset.Currency)
+		if err != nil {
+			fmt.Printf("MatchOrders error for asset %s: %v\n", assetID, err)
+			continue
+		}
+
+		for i, trade := range trades {
+			bc.Trades = append(bc.Trades, trade)
+			bc.emitEvent(EventTradeExecuted, map[string]any{
+				"trade_id":  trade.ID,
+				"asset_id":  trade.AssetID,
+				"quantity":  trade.Quantity,
+				"price":     trade.Price,
+				"currency":  trade.Currency,
+				"buyer_id":  trade.BuyerID,
+				"seller_id": trade.SellerID,
+			})
+
+			// 6. Issue a PaymentInstruction for each matched trade.
+			instruction := &PaymentInstruction{
+				TradeID:       trade.ID,
+				AssetID:       trade.AssetID,
+				Quantity:      trade.Quantity,
+				PricePerUnit:  trade.Price,
+				TotalAmount:   trade.Price * trade.Quantity,
+				Currency:      trade.Currency,
+				Method:        DefaultSettlementMethod(trade.Currency),
+				PayerWalletID: trade.BuyerID,
+				PayeeWalletID: trade.SellerID,
+				Reference:     fmt.Sprintf("GH-%s", trade.ID[:8]),
+				ExpiresAt:     time.Now().Unix() + 86400, // 24 h to pay
+			}
+
+			// FATF Recommendation 16 / EU TFR 2023/1113: attach originator and
+			// beneficiary data when the EUR-equivalent value >= €1,000.
+			// Convert to EUR via the ValuationOracle when the trade currency differs.
+			eurAmount := instruction.TotalAmount
+			if bc.ValuationOracle != nil && instruction.Currency != "EUR" {
+				if rate, err := bc.ValuationOracle.GetCurrencyRate(instruction.Currency, "EUR"); err == nil && rate > 0 {
+					eurAmount = instruction.TotalAmount * rate
+				}
+			}
+			if eurAmount >= TravelRuleThresholdEUR {
+				instruction.TravelRule = bc.buildTravelRule(
+					trade.BuyerID, trade.SellerID, instruction.Reference,
+				)
+			}
+
+			instruction, _ = bc.OracleService.SignInstruction(instruction)
+			bc.PendingInstructions[trade.ID] = instruction
+			bc.PendingSettlements[trade.ID] = assetTxs[i]
+
+			// 7. Attempt immediate synchronous confirmation (mock / local providers).
+			// Production providers (Modulr, EURC, Pontes) leave status pending and
+			// call ConfirmAndSettle via their webhook handler when payment arrives.
+			provider := bc.ProviderForMethod(instruction.Method)
+			_ = provider.ConfirmPayment(
+				instruction.Reference,
+				instruction.TotalAmount,
+				instruction.Currency,
+			)
+			status, _ := provider.GetPaymentStatus(instruction.Reference)
+			if status == PaymentStatusConfirmed {
+				// 8. DVP: apply the asset transfer now that payment is confirmed.
+				if err := bc.ConfirmAndSettle(instruction.Reference, instruction.TotalAmount, instruction.Currency); err != nil {
+					fmt.Printf("DVP settle failed for trade %s: %v\n", trade.ID, err)
+				} else {
+					if pe, ok := bc.ProspectusExemptions[trade.AssetID]; ok {
+						pe.RecordSettlement(trade.ID, instruction.TotalAmount)
+					}
+				}
+			}
+		}
+	}
+
+	// 9. Update prospectus retail-holder counts and emit threshold warnings.
+	for _, pe := range bc.ProspectusExemptions {
+		UpdateRetailCounts(pe, bc.Holdings, bc.Credentials)
+	}
+	CheckProspectusThresholds(bc, bc.ProspectusExemptions)
+}
+
+// SealBlock constructs and commits a block from the provided transaction slices,
+// applies its state (order matching, DVP settlement, credential expiry, compliance
+// checks), and emits EventBlockFinalised. It is the canonical write path for the
+// HTTP API; all state-mutating handlers call SealBlock after building their
+// transaction list.
+//
+// SealBlock acquires bc.Mu for its entire duration. Callers must not hold bc.Mu.
 func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTransaction, credTxs []CredentialTransaction) {
-	bc.AddBlock(nil, nil)
+	bc.Mu.Lock()
+	defer bc.Mu.Unlock()
+
+	// Build the complete block before appending or broadcasting. AddBlock sets
+	// Index, PrevHash, Nonce, and PayloadHash; all content is present at broadcast.
+	block := Block{
+		AssetTransactions:      assetTxs,
+		OrderTransactions:      orderTxs,
+		CredentialTransactions: credTxs,
+	}
+	bc.AddBlock(block)
 	idx := len(bc.Blocks) - 1
-	bc.Blocks[idx].AssetTransactions = assetTxs
-	bc.Blocks[idx].OrderTransactions = orderTxs
-	bc.Blocks[idx].CredentialTransactions = credTxs
+
+	// C-2: operator signs PayloadHash so that external verifiers can confirm
+	// which node produced the block. Skip when no key is configured (dev mode).
+	if bc.OperatorKeyProvider != nil {
+		payloadBytes, err := hex.DecodeString(bc.Blocks[idx].PayloadHash)
+		if err == nil {
+			sig, err := bc.OperatorKeyProvider.Sign(payloadBytes)
+			if err == nil {
+				bc.Blocks[idx].Signatures = append(bc.Blocks[idx].Signatures, sig)
+			} else {
+				log.Printf("SealBlock: operator signing failed: %v", err)
+			}
+		}
+	}
+
+	// C-4: persist sealed block to bbolt so the chain survives restarts.
+	if bc.BlockStore != nil {
+		if err := bc.BlockStore.SaveBlock(&bc.Blocks[idx]); err != nil {
+			log.Printf("SealBlock: persistence write failed: %v", err)
+		}
+	}
+
+	// Apply all block state: order matching, DVP settlement, credential application.
+	bc.applyBlockState(&bc.Blocks[idx])
+
 	blk := bc.Blocks[idx]
 
-	// G-08: sweep credentials and downgrade any that have passed their expiry
-	// timestamp to KYCStatusExpired so CheckTransferEligibility rejects them.
+	// G-08: sweep credentials past their expiry date.
 	now := time.Now().Unix()
 	for walletKey, cred := range bc.Credentials {
 		if cred.KYCStatus == KYCStatusVerified && cred.ExpiresAt > 0 && now > cred.ExpiresAt {
@@ -457,36 +721,24 @@ func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTra
 		}
 	}
 
-	// G-06: rebuild prospectus retail-holder counts from live holdings/credentials
-	// and emit proximity warnings for any jurisdiction approaching the cap.
-	for _, exemption := range bc.ProspectusExemptions {
-		UpdateRetailCounts(exemption, bc.Holdings, bc.Credentials)
-	}
-	CheckProspectusThresholds(bc, bc.ProspectusExemptions)
-
-	// G-10: generate MiFIR / AIFMD transaction reports for every filled trade in
-	// this block.  Only trades with Status=="settled" (i.e. filled by handleFillOrder)
-	// need reporting; cancellations and open orders are excluded.
+	// G-10: MiFIR / AIFMD reports for trades matched in this block.
+	// Look up the actual Trade from bc.Trades by matching order IDs so the
+	// report carries the canonical trade ID rather than a synthetic one.
 	for _, otx := range orderTxs {
 		if otx.IsCancellation || otx.Order.Status != OrderStatusFilled {
 			continue
 		}
-		trade := Trade{
-			ID:         "block-trade-" + otx.Order.ID[:8],
-			AssetID:    otx.Order.AssetID,
-			BuyerID:    otx.Order.PlacedBy,
-			SellerID:   "", // issuer; not stored on Order — skip for block-sourced trades
-			Quantity:   otx.Order.Filled,
-			Price:      otx.Order.Price,
-			ExecutedAt: time.Now().Unix(),
-			Status:     "settled",
+		for i := len(bc.Trades) - 1; i >= 0; i-- {
+			t := bc.Trades[i]
+			if t.BidOrderID == otx.Order.ID || t.AskOrderID == otx.Order.ID {
+				GenerateMiFIRReport(bc, t, idx)
+				GenerateAIFMDReport(bc, t, idx)
+				break
+			}
 		}
-		GenerateMiFIRReport(bc, trade, idx)
-		GenerateAIFMDReport(bc, trade, idx)
 	}
 
-	// A-01: verify CirculatingSupply is consistent with the holdings sum after
-	// every block. Divergence indicates a write path bypassing ApplyAssetTransaction.
+	// A-01: verify CirculatingSupply is consistent with the sum of all holdings.
 	bc.assertCirculatingSupplyConsistency()
 
 	bc.emitEvent(EventBlockFinalised, map[string]any{
@@ -557,27 +809,29 @@ func (bc *Blockchain) emitEvent(eventType string, payload any) {
 	}
 }
 
-func (bc *Blockchain) AddBlock(transactions []Transaction, signatures [][]byte) {
-	var prevHash string
+// AddBlock appends a fully-constructed block to the chain. It sets the block's
+// Index (monotone position), PrevHash (sealed hash of the preceding block),
+// Nonce (global block counter), and PayloadHash (pre-signature content hash)
+// before appending, then broadcasts the committed block to peers.
+//
+// The caller must populate all transaction fields BEFORE calling AddBlock.
+// No mutations to block content are made after broadcast.
+func (bc *Blockchain) AddBlock(block Block) {
 	if len(bc.Blocks) > 0 {
-		prevHash = bc.Blocks[len(bc.Blocks)-1].CalculateHash()
+		block.PrevHash = bc.Blocks[len(bc.Blocks)-1].CalculateHash()
 	} else {
-		prevHash = "0000000000000000" // Set genesis block's PrevHash
+		block.PrevHash = strings.Repeat("0", 64) // 64-char zero hex (genesis)
 	}
-
-	newBlock := Block{
-		Transactions: transactions,
-		PrevHash:     prevHash,
-		Nonce:        bc.Nonce,
-		Signatures:   signatures,
-	}
-
-	bc.Blocks = append(bc.Blocks, newBlock)
+	block.Index = len(bc.Blocks)
+	block.Nonce = bc.Nonce
+	block.SetPayloadHash()
+	bc.Blocks = append(bc.Blocks, block)
 	bc.Nonce++
 
-	// Broadcast the block
+	// Broadcast after the block is fully committed so peers receive the
+	// complete, consistent block in a single message.
 	if bc.P2PNode != nil {
-		if err := bc.P2PNode.BroadcastBlock(newBlock); err != nil {
+		if err := bc.P2PNode.BroadcastBlock(bc.Blocks[len(bc.Blocks)-1]); err != nil {
 			fmt.Printf("Failed to broadcast block: %v\n", err)
 		}
 	}
@@ -613,9 +867,12 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 		}
 	}
 
-	// Check if the block contains at least one transaction
-	if len(block.Transactions) == 0 {
-		fmt.Println("Invalid block: no transactions")
+	// Block must contain at least one of: base transactions, asset transactions,
+	// order transactions, or credential transactions. Pure base-tx blocks come
+	// from the legacy P2P path; all other types come from the API (SealBlock).
+	if len(block.Transactions) == 0 && len(block.AssetTransactions) == 0 &&
+		len(block.OrderTransactions) == 0 && len(block.CredentialTransactions) == 0 {
+		fmt.Println("Invalid block: contains no transactions of any kind")
 		return false
 	}
 
@@ -648,10 +905,37 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			return false
 		}
 	}
-	// Verify block signatures
-	if len(block.Signatures) < len(bc.Delegates)/2+1 { // Majority required
-		fmt.Println("Invalid block: insufficient delegate signatures")
-		return false
+	// Verify block signatures: require BFT supermajority (⌈2n/3⌉).
+	// Guard n==0 for single-operator mode where no delegates are registered.
+	if len(bc.Delegates) > 0 {
+		required := int(math.Ceil(float64(2*len(bc.Delegates)) / 3.0))
+		if len(block.Signatures) < required {
+			fmt.Printf("Invalid block: need %d signatures, have %d\n", required, len(block.Signatures))
+			return false
+		}
+
+		// H-9: verify each delegate signature covers PayloadHash.
+		payloadHashBytes, err := hex.DecodeString(block.PayloadHash)
+		if err != nil {
+			fmt.Printf("Invalid block: cannot decode PayloadHash (%v)\n", err)
+			return false
+		}
+		validSigs := 0
+		for _, delegate := range bc.Delegates {
+			if len(delegate.PublicKey) == 0 {
+				continue
+			}
+			for _, sig := range block.Signatures {
+				if ed25519.Verify(delegate.PublicKey, payloadHashBytes, sig) {
+					validSigs++
+					break
+				}
+			}
+		}
+		if validSigs < required {
+			fmt.Printf("Invalid block: %d/%d valid Ed25519 delegate signatures\n", validSigs, required)
+			return false
+		}
 	}
 
 	fmt.Println("Block validated successfully")
@@ -803,15 +1087,12 @@ func main() {
 	}
 
 	// Add a genesis block
-	genesisTransactions := []Transaction{
-		{Sender: "genesis", Receiver: "user1", Amount: 100},
-	}
-	bc.AddBlock(genesisTransactions, nil)
+	bc.AddBlock(Block{Transactions: []Transaction{{Sender: "genesis", Receiver: "user1", Amount: 100}}})
 
 	newTransactions := []Transaction{
 		{Sender: "user1", Receiver: "user2", Amount: 50},
 	}
-	bc.AddBlock(newTransactions, nil)
+	bc.AddBlock(Block{Transactions: newTransactions})
 
 	for _, block := range bc.Blocks {
 		fmt.Printf("PrevHash: %s\n", block.PrevHash)
@@ -831,23 +1112,30 @@ func (bc *Blockchain) CommitBlock(block Block) {
 
 func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc := &Blockchain{
-		Blocks:             []Block{},
-		TransactionPool:    []Transaction{},
-		LockedWallets:      make(map[[32]byte]*LockedWallet),
+		Blocks:          []Block{},
+		TransactionPool: []Transaction{},
+		// Use the package-level lockedWallets map so that Wallet.LockCurrency
+		// (which updates that map) and VoteForDelegates (which reads bc.LockedWallets)
+		// both see the same data. Without this alignment the two stores diverge
+		// and delegate elections never see any staked balances (H-6).
+		LockedWallets:      GetLockedWallets(),
 		PublicKeyToID:      make(map[string]string),
 		UserIDToDelegateID: make(map[string]string),
 		Wallets:            make(map[string]*Wallet),
 	}
 
-	// Add the genesis block
+	// Add the genesis block. The PrevHash is a 64-character zero-value hex
+	// string (matching the length of a SHA3-256 hex digest) so the genesis
+	// block's PrevHash is unambiguously distinguishable from an unset field.
 	genesisBlock := Block{
-		Transactions: []Transaction{},    // No transactions in the genesis block
-		PrevHash:     "0000000000000000", // Predefined hash for the genesis block
+		Index:        0,
+		Transactions: []Transaction{},
+		PrevHash:     strings.Repeat("0", 64),
 		Nonce:        0,
 		Signatures:   [][]byte{},
 	}
+	genesisBlock.SetPayloadHash()
 	bc.Blocks = append(bc.Blocks, genesisBlock)
-	fmt.Println("Genesis block added to the blockchain.")
 
 	// Initialise DVP state maps
 	bc.Assets = make(map[string]*Asset)
@@ -926,6 +1214,12 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	if bc.OracleService == nil {
 		bc.OracleService, _ = NewMockOracleService()
 	}
+
+	// Per-wallet sequence/nonce tracking for replay prevention.
+	bc.WalletSequences = make(map[string]int64)
+
+	// Default consensus view-change timeout (M-2).
+	bc.ConsensusTimeout = 30 * time.Second
 
 	// Bootstrap peers are loaded from the GREENHOUSE_BOOTSTRAP_PEERS environment
 	// variable (comma-separated multiaddrs). An empty or unset variable means the

@@ -16,8 +16,16 @@ package gonetwork
 // ---------------------------------------------------------------------------
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -228,20 +236,136 @@ func (r *RegistrationRecord) IsComplete() bool {
 // RegistrationRegistry is a concurrency-safe in-memory store for RegistrationRecords.
 // Replace with an encrypted, audited database (PostgreSQL + pgcrypto / RDS + KMS) in
 // production before accepting real investors.
+//
+// M-7: when GREENHOUSE_PII_KEY is set (64 hex chars = 32-byte AES-256 key) all
+// personally identifiable fields are encrypted with AES-256-GCM before being
+// stored in the in-memory map and decrypted transparently on every read. This
+// ensures PII is never exposed in core dumps, heap snapshots, or serialised
+// state files.
 type RegistrationRegistry struct {
-	mu      sync.RWMutex
-	records map[string]*RegistrationRecord // walletKey → record
+	mu        sync.RWMutex
+	hasPIIKey bool
+	piiKey    [32]byte
+	records   map[string]*RegistrationRecord // walletKey → record (PII fields AES-GCM encrypted when hasPIIKey)
 }
 
 // NewRegistrationRegistry creates an empty RegistrationRegistry.
+// It reads GREENHOUSE_PII_KEY from the environment; if set and valid it enables
+// at-rest PII encryption (M-7). If not set a warning is logged and records are
+// stored in plaintext (acceptable for local development only).
 func NewRegistrationRegistry() *RegistrationRegistry {
-	return &RegistrationRegistry{
+	rr := &RegistrationRegistry{
 		records: make(map[string]*RegistrationRecord),
 	}
+	if raw := os.Getenv("GREENHOUSE_PII_KEY"); raw != "" {
+		keyBytes, err := hex.DecodeString(raw)
+		if err != nil || len(keyBytes) != 32 {
+			panic("GREENHOUSE_PII_KEY must be exactly 64 hex characters (32 bytes)")
+		}
+		copy(rr.piiKey[:], keyBytes)
+		rr.hasPIIKey = true
+	}
+	return rr
+}
+
+// piiEncrypt encrypts a UTF-8 plaintext string with AES-256-GCM and returns
+// "enc:<base64(nonce+ciphertext)>". Returns the plaintext unchanged if PII
+// encryption is not configured.
+func (rr *RegistrationRegistry) piiEncrypt(plaintext string) string {
+	if !rr.hasPIIKey || plaintext == "" {
+		return plaintext
+	}
+	block, err := aes.NewCipher(rr.piiKey[:])
+	if err != nil {
+		panic("RegistrationRegistry: AES cipher init failed: " + err.Error())
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		panic("RegistrationRegistry: GCM init failed: " + err.Error())
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		panic("RegistrationRegistry: nonce generation failed: " + err.Error())
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return "enc:" + base64.StdEncoding.EncodeToString(ciphertext)
+}
+
+// piiDecrypt decrypts a value previously encrypted by piiEncrypt. Non-"enc:"
+// prefixed values (legacy plaintext) are returned unchanged.
+func (rr *RegistrationRegistry) piiDecrypt(ciphertext string) string {
+	if !strings.HasPrefix(ciphertext, "enc:") {
+		return ciphertext // plaintext or empty
+	}
+	if !rr.hasPIIKey {
+		return ciphertext // can't decrypt without key — return as-is
+	}
+	data, err := base64.StdEncoding.DecodeString(ciphertext[4:])
+	if err != nil {
+		return ciphertext
+	}
+	block, err := aes.NewCipher(rr.piiKey[:])
+	if err != nil {
+		return ciphertext
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return ciphertext
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return ciphertext
+	}
+	plaintext, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
+	if err != nil {
+		return ciphertext
+	}
+	return string(plaintext)
+}
+
+// encryptRecord returns a shallow copy of r with PII fields encrypted.
+func (rr *RegistrationRegistry) encryptRecord(r *RegistrationRecord) *RegistrationRecord {
+	if !rr.hasPIIKey {
+		return r
+	}
+	c := *r
+	c.Personal.FullLegalName = rr.piiEncrypt(r.Personal.FullLegalName)
+	c.Personal.DateOfBirth = rr.piiEncrypt(r.Personal.DateOfBirth)
+	c.Personal.Nationality = rr.piiEncrypt(r.Personal.Nationality)
+	c.Personal.TaxResidency = rr.piiEncrypt(r.Personal.TaxResidency)
+	c.Personal.TaxIDNumber = rr.piiEncrypt(r.Personal.TaxIDNumber)
+	c.Address.Line1 = rr.piiEncrypt(r.Address.Line1)
+	c.Address.Line2 = rr.piiEncrypt(r.Address.Line2)
+	c.Address.City = rr.piiEncrypt(r.Address.City)
+	c.Address.PostCode = rr.piiEncrypt(r.Address.PostCode)
+	c.Consents.SourceOfFundsDeclaration = rr.piiEncrypt(r.Consents.SourceOfFundsDeclaration)
+	c.Consents.SourceOfWealthDeclaration = rr.piiEncrypt(r.Consents.SourceOfWealthDeclaration)
+	return &c
+}
+
+// decryptRecord returns a shallow copy of r with PII fields decrypted.
+func (rr *RegistrationRegistry) decryptRecord(r *RegistrationRecord) *RegistrationRecord {
+	if !rr.hasPIIKey {
+		return r
+	}
+	c := *r
+	c.Personal.FullLegalName = rr.piiDecrypt(r.Personal.FullLegalName)
+	c.Personal.DateOfBirth = rr.piiDecrypt(r.Personal.DateOfBirth)
+	c.Personal.Nationality = rr.piiDecrypt(r.Personal.Nationality)
+	c.Personal.TaxResidency = rr.piiDecrypt(r.Personal.TaxResidency)
+	c.Personal.TaxIDNumber = rr.piiDecrypt(r.Personal.TaxIDNumber)
+	c.Address.Line1 = rr.piiDecrypt(r.Address.Line1)
+	c.Address.Line2 = rr.piiDecrypt(r.Address.Line2)
+	c.Address.City = rr.piiDecrypt(r.Address.City)
+	c.Address.PostCode = rr.piiDecrypt(r.Address.PostCode)
+	c.Consents.SourceOfFundsDeclaration = rr.piiDecrypt(r.Consents.SourceOfFundsDeclaration)
+	c.Consents.SourceOfWealthDeclaration = rr.piiDecrypt(r.Consents.SourceOfWealthDeclaration)
+	return &c
 }
 
 // Upsert creates or replaces the registration record for a wallet key.
-// It always updates the UpdatedAt timestamp.
+// It always updates the UpdatedAt timestamp. PII fields are encrypted before
+// storage when GREENHOUSE_PII_KEY is configured (M-7).
 func (rr *RegistrationRegistry) Upsert(record *RegistrationRecord) {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
@@ -250,25 +374,30 @@ func (rr *RegistrationRegistry) Upsert(record *RegistrationRecord) {
 		record.CreatedAt = now
 	}
 	record.UpdatedAt = now
-	rr.records[record.WalletKey] = record
+	rr.records[record.WalletKey] = rr.encryptRecord(record)
 }
 
 // Get returns the registration record for a wallet key, or nil if not found.
+// PII fields are transparently decrypted before being returned (M-7).
 func (rr *RegistrationRegistry) Get(walletKey string) *RegistrationRecord {
 	rr.mu.RLock()
 	defer rr.mu.RUnlock()
-	return rr.records[walletKey]
+	r := rr.records[walletKey]
+	if r == nil {
+		return nil
+	}
+	return rr.decryptRecord(r)
 }
 
 // ListPending returns all records in RegistrationStatusPendingReview,
-// sorted by SubmittedAt ascending (oldest first).
+// sorted by SubmittedAt ascending (oldest first). PII fields are decrypted (M-7).
 func (rr *RegistrationRegistry) ListPending() []*RegistrationRecord {
 	rr.mu.RLock()
 	defer rr.mu.RUnlock()
 	out := make([]*RegistrationRecord, 0)
 	for _, r := range rr.records {
 		if r.Status == RegistrationStatusPendingReview {
-			out = append(out, r)
+			out = append(out, rr.decryptRecord(r))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -302,12 +431,13 @@ func (rr *RegistrationRegistry) UpdateStatus(
 }
 
 // All returns all records (for admin use). Caller is responsible for redacting PII.
+// PII fields are decrypted before being returned (M-7).
 func (rr *RegistrationRegistry) All() []*RegistrationRecord {
 	rr.mu.RLock()
 	defer rr.mu.RUnlock()
 	out := make([]*RegistrationRecord, 0, len(rr.records))
 	for _, r := range rr.records {
-		out = append(out, r)
+		out = append(out, rr.decryptRecord(r))
 	}
 	return out
 }

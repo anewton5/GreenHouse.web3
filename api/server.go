@@ -75,25 +75,44 @@ type refreshTokenRecord struct {
 }
 
 // NewServer creates an API server for the given Blockchain.
-// A fresh 32-byte JWT secret is generated at startup; restarting the server
-// invalidates all issued tokens.
+//
+// JWT secret is loaded from GREENHOUSE_JWT_SECRET (64 hex chars → 32 bytes).
+// In production (GH_ENV=production) the variable must be set; in development
+// an ephemeral random secret is generated with a warning.
 //
 // Admin wallet keys are loaded from GREENHOUSE_ADMIN_WALLET_KEYS
-// (comma-separated base64-encoded Ed25519 public keys). When the variable is
-// not set, any authenticated wallet may call admin routes (single-operator
-// development mode — restrict this before going to production).
+// (comma-separated base64-encoded Ed25519 public keys). In production the
+// variable must be set; in development any authenticated wallet may call
+// admin routes.
 func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server {
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		panic("api: failed to generate JWT secret: " + err.Error())
+	// JWT secret loading (H-4).
+	var secret []byte
+	if raw := os.Getenv("GREENHOUSE_JWT_SECRET"); raw != "" {
+		decoded, err := hex.DecodeString(raw)
+		if err != nil || len(decoded) != 32 {
+			panic("GREENHOUSE_JWT_SECRET must be exactly 64 hex characters (32 bytes)")
+		}
+		secret = decoded
+	} else if os.Getenv("GH_ENV") == "production" {
+		panic("GREENHOUSE_JWT_SECRET must be set in production (H-4)")
+	} else {
+		fmt.Println("WARNING: GREENHOUSE_JWT_SECRET not set; using ephemeral secret (tokens invalidated on restart)")
+		secret = make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			panic("api: failed to generate JWT secret: " + err.Error())
+		}
 	}
 
+	// Admin wallet key loading (H-3).
 	adminKeys := make(map[string]bool)
 	for _, k := range strings.Split(os.Getenv("GREENHOUSE_ADMIN_WALLET_KEYS"), ",") {
 		k = strings.TrimSpace(k)
 		if k != "" {
 			adminKeys[k] = true
 		}
+	}
+	if len(adminKeys) == 0 && os.Getenv("GH_ENV") == "production" {
+		panic("GREENHOUSE_ADMIN_WALLET_KEYS must be set in production (H-3)")
 	}
 
 	s := &Server{
@@ -113,9 +132,26 @@ func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server {
 }
 
 // Start registers all routes, starts background goroutines, and begins serving.
+// In production (GH_ENV=production) it verifies that no mock provider is active.
 func (s *Server) Start() error {
+	// Production guards (H-1): fail loudly if mock providers are still wired in.
+	if os.Getenv("GH_ENV") == "production" {
+		switch s.bc.AMLScreener.(type) {
+		case *gonetwork.MockAMLScreener:
+			panic("production: MockAMLScreener is active — configure ComplyAdvantageScreener (H-1)")
+		}
+		switch s.bc.PaymentProvider.(type) {
+		case *gonetwork.MockPaymentProvider:
+			panic("production: MockPaymentProvider is active — configure Modulr/EURC/Pontes (H-1)")
+		}
+		switch s.bc.IdentityRegistry.(type) {
+		case *gonetwork.MockIdentityRegistry:
+			panic("production: MockIdentityRegistry is active — configure OnfidoIdentityRegistry (H-1)")
+		}
+	}
 	go s.startEventFan()
 	go s.startPing()
+	go s.startSweep()
 	return http.ListenAndServe(s.listenAddr, s.Routes())
 }
 
@@ -240,6 +276,10 @@ func (s *Server) Routes() http.Handler {
 	// MAR Art 16: STOR (Suspicious Transaction and Order Reports) management
 	mux.Handle("GET /v1/compliance/stor", s.jwtAdmin(http.HandlerFunc(s.handleListSTORs)))
 	mux.Handle("POST /v1/compliance/stor/{id}/resolve", s.jwtAdmin(http.HandlerFunc(s.handleResolveSTOR)))
+
+	// H-6: delegate vote registration — authenticated investors may assign their
+	// voting power to another registered user (or themselves for self-delegation).
+	mux.Handle("POST /v1/delegates/vote", s.jwt(http.HandlerFunc(s.handleRegisterDelegateVote)))
 
 	// Block finality information — unauthenticated (public)
 	mux.HandleFunc("GET /v1/blocks/{index}/finality", s.handleGetBlockFinality)

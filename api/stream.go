@@ -215,6 +215,37 @@ func (s *Server) startPing() {
 	}
 }
 
+// startSweep runs every minute and removes expired challenges and refresh
+// tokens from their respective maps (M-3).  This prevents unbounded memory
+// growth from unanswered challenge requests and rotated/expired refresh tokens.
+func (s *Server) startSweep() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now().Unix()
+
+		s.challengeMu.Lock()
+		for k, v := range s.challenges {
+			if v.expiresAt < now {
+				delete(s.challenges, k)
+			}
+		}
+		s.challengeMu.Unlock()
+
+		s.refreshMu.Lock()
+		for k, v := range s.refreshTokens {
+			if v.expiresAt < now {
+				delete(s.refreshTokens, k)
+			}
+		}
+		s.refreshMu.Unlock()
+
+		// H-12: evict IP entries that have been idle for > 5 minutes.
+		globalRateLimiter.sweepOldEntries(300)
+		authRateLimiter.sweepOldEntries(300)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleKYCWebhook — POST /v1/webhooks/kyc
 // ---------------------------------------------------------------------------

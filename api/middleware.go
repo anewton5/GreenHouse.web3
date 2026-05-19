@@ -141,6 +141,19 @@ func (rl *rateLimiter) allow(ip, method string) bool {
 	return true
 }
 
+// sweepOldEntries removes IPs whose last request was more than ttlSeconds ago.
+// Called periodically by startSweep to prevent unbounded map growth (H-12).
+func (rl *rateLimiter) sweepOldEntries(ttlSeconds int64) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Unix() - ttlSeconds
+	for ip, ts := range rl.windows {
+		if len(ts) == 0 || ts[len(ts)-1] < cutoff {
+			delete(rl.windows, ip)
+		}
+	}
+}
+
 var globalRateLimiter = newRateLimiter()
 
 // authRateLimiter is a stricter per-IP limiter applied only to authentication

@@ -105,18 +105,19 @@ func (p *KMSKeyProvider) PublicKeyString() string {
 	return p.PublicKey
 }
 
-// Sign records the call and returns nil, nil.
-// Production replacement: call kms.Sign(p.KeyARN, msg, "ECDSA_SHA_256").
+// Sign returns an explicit error so callers fail loudly instead of silently
+// propagating nil signatures. Production code must swap KMSKeyProvider for
+// VaultKeyProvider or LocalKeyProvider before enabling signing paths.
 func (p *KMSKeyProvider) Sign(msg []byte) ([]byte, error) {
 	p.Calls = append(p.Calls, "Sign")
-	return nil, nil
+	return nil, fmt.Errorf("KMSKeyProvider.Sign is not implemented: configure VaultKeyProvider or LocalKeyProvider for signing (H-2)")
 }
 
-// Verify records the call and returns true.
-// Production replacement: verify signature via kms.GetPublicKey + local Ed25519 verify.
+// Verify returns false so callers reject signatures from the stub rather than
+// accepting them silently.
 func (p *KMSKeyProvider) Verify(msg, sig []byte) bool {
 	p.Calls = append(p.Calls, "Verify")
-	return true
+	return false
 }
 
 // ---------------------------------------------------------------------------

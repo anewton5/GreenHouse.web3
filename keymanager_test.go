@@ -66,8 +66,8 @@ func TestKMSKeyProvider_SignRecordsCall(t *testing.T) {
 	p := NewKMSKeyProvider("arn:aws:kms:eu-west-1:123456789012:key/test-key-id")
 
 	sig, err := p.Sign([]byte("payload"))
-	require.NoError(t, err) // stub returns no error
-	assert.Nil(t, sig)      // stub returns nil signature
+	require.Error(t, err) // H-2: stub returns explicit error to fail loudly
+	assert.Nil(t, sig)    // stub returns nil signature
 	assert.Contains(t, p.Calls, "Sign")
 	assert.Len(t, p.Calls, 1)
 }
@@ -80,7 +80,7 @@ func TestKMSKeyProvider_VerifyRecordsCall(t *testing.T) {
 	p := NewKMSKeyProvider("arn:aws:kms:eu-west-1:123456789012:key/test-key-id")
 
 	result := p.Verify([]byte("message"), nil)
-	assert.True(t, result) // stub returns true
+	assert.False(t, result) // H-2: stub rejects signatures to prevent silent acceptance
 	assert.Contains(t, p.Calls, "Verify")
 	assert.Len(t, p.Calls, 1)
 }

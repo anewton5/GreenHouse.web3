@@ -58,7 +58,26 @@ func main() {
 		log.Fatalf("Failed to create operator registry: %v", err)
 	}
 	bc.IdentityRegistry = reg
+	// C-2: operator key also signs every sealed block so external verifiers can
+	// confirm which node produced the block.
+	bc.OperatorKeyProvider = gn.NewLocalKeyProvider(operatorKey)
 	log.Println("  KYC registry   : OperatorIdentityRegistry (ephemeral key)")
+
+	// C-4: open bbolt block store so the chain survives process restarts.
+	dbPath := "greenhouse.db"
+	if v := os.Getenv("GREENHOUSE_DB"); v != "" {
+		dbPath = v
+	}
+	store, err := gn.OpenBlockStore(dbPath)
+	if err != nil {
+		log.Fatalf("Failed to open block store %s: %v", dbPath, err)
+	}
+	if err := store.LoadBlocks(bc); err != nil {
+		log.Printf("Warning: could not load persisted blocks from %s: %v", dbPath, err)
+	} else {
+		log.Printf("  Block store    : %s (loaded %d blocks)", dbPath, len(bc.Blocks))
+	}
+	bc.BlockStore = store
 
 	// ── API Server ────────────────────────────────────────────────────────────
 	srv := api.NewServer(bc, listenAddr)

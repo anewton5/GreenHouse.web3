@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -327,9 +328,16 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 
 	// Enable mDNS for same-machine / LAN peer discovery before creating the
 	// node so the service reference can be stored (prevents GC and keeps it live).
-	mdnsSvc, err := setupMdnsDiscovery(h)
-	if err != nil {
-		logger.Warnf("mDNS discovery unavailable: %v", err)
+	// M-10: mDNS is only enabled outside production to avoid advertising
+	// node addresses on the local LAN in production deployments.
+	var mdnsSvc mdns.Service
+	if os.Getenv("GH_ENV") != "production" {
+		mdnsSvc, err = setupMdnsDiscovery(h)
+		if err != nil {
+			logger.Warnf("mDNS discovery unavailable: %v", err)
+		}
+	} else {
+		logger.Infof("mDNS discovery disabled in production (GH_ENV=production)")
 	}
 
 	// Create and return the P2PNode
@@ -526,9 +534,16 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 					continue
 				}
 				log.Printf("Received block: %+v", block)
+				// ValidateBlock verifies chain linkage, content, and signatures.
+				// applyBlockState is called inside finalizeBlock / AddBlock; we
+				// must hold bc.Mu for the full validate-and-apply cycle.
+				n.Blockchain.Mu.Lock()
 				if n.Blockchain.ValidateBlock(block) {
-					n.Blockchain.AddBlock(block.Transactions, block.Signatures)
+					// Peer-received blocks carry their full content; pass the
+					// complete block directly to avoid re-broadcasting.
+					n.Blockchain.AddBlock(block)
 				}
+				n.Blockchain.Mu.Unlock()
 
 			case MessageTypeAck:
 				log.Println("Received acknowledgment message")
@@ -548,11 +563,13 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 					log.Printf("Failed to deserialize asset transaction: %v", err)
 					continue
 				}
+				n.Blockchain.Mu.Lock()
 				if err := at.Validate(n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials, n.Blockchain.PendingCorporateActions, n.Blockchain.AMLScreener); err == nil {
 					n.Blockchain.PendingAssetTransactions = append(n.Blockchain.PendingAssetTransactions, at)
 				} else {
 					log.Printf("Received invalid asset transaction: %v", err)
 				}
+				n.Blockchain.Mu.Unlock()
 
 			case MessageTypeCredential:
 				var ct CredentialTransaction
@@ -560,10 +577,12 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 					log.Printf("Failed to deserialize credential transaction: %v", err)
 					continue
 				}
-				// Credentials are registry-signed — apply directly on receipt
+				// Credentials are registry-signed — apply directly on receipt.
+				n.Blockchain.Mu.Lock()
 				if ct.Attestation.IsValid() {
 					n.Blockchain.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
 				}
+				n.Blockchain.Mu.Unlock()
 
 			case MessageTypePaymentConfirmation:
 				var pc PaymentConfirmation
@@ -571,9 +590,11 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 					log.Printf("Failed to deserialize payment confirmation: %v", err)
 					continue
 				}
+				n.Blockchain.Mu.Lock()
 				if n.Blockchain.OracleService.VerifyConfirmation(&pc) {
 					n.Blockchain.ConfirmedPayments[pc.InstructionID] = &pc
 				}
+				n.Blockchain.Mu.Unlock()
 
 			case MessageTypeAllowlistAdd:
 				var at AllowlistTransaction

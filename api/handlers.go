@@ -3014,3 +3014,34 @@ func (s *Server) handleGetBlockFinality(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleRegisterDelegateVote lets an authenticated investor assign their
+// consensus voting power to another registered user (or themselves).
+// H-6: populates UserIDToDelegateID so that getDelegateID returns a real entry.
+//
+// POST /v1/delegates/vote
+// Body: { "delegate_id": "<wallet-key or user-id>" }
+// Omitting delegate_id or setting it to the caller's own wallet key = self-delegation.
+func (s *Server) handleRegisterDelegateVote(w http.ResponseWriter, r *http.Request) {
+	callerKey := walletFromCtx(r)
+	if callerKey == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var body struct {
+		DelegateID string `json:"delegate_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.DelegateID == "" {
+		body.DelegateID = callerKey // default: self-delegation
+	}
+
+	s.bc.RegisterDelegateVote(callerKey, body.DelegateID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"voter_id":    callerKey,
+		"delegate_id": body.DelegateID,
+	})
+}

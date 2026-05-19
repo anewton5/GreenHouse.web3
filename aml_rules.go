@@ -317,6 +317,8 @@ func StartPEPRescreeningScheduler(bc *Blockchain, interval time.Duration) {
 
 // rescreenAllWallets is the single-pass re-screening function called by the scheduler.
 func rescreenAllWallets(bc *Blockchain) {
+	bc.Mu.Lock()
+	defer bc.Mu.Unlock()
 	for walletKey := range bc.Credentials {
 		// Use a zero-amount self-transfer as a PEP/sanctions name-check trigger.
 		alert, err := bc.AMLScreener.ScreenTransaction(walletKey, walletKey, "", 0, "")

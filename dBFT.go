@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -77,6 +79,20 @@ func (bc *Blockchain) getDelegateID(voterID string) string {
 	return bc.UserIDToDelegateID[voterID]
 }
 
+// RegisterDelegateVote records that voter userID delegates their consensus
+// voting power to delegateID. Call with userID == delegateID for self-delegation
+// (the default for any wallet that participates in consensus directly).
+// This populates UserIDToDelegateID so that getDelegateID returns the correct
+// entry (H-6: previously the map was initialised but never written to).
+func (bc *Blockchain) RegisterDelegateVote(userID, delegateID string) {
+	if userID == "" || delegateID == "" {
+		return
+	}
+	bc.Mu.Lock()
+	bc.UserIDToDelegateID[userID] = delegateID
+	bc.Mu.Unlock()
+}
+
 // Start the consensus process
 func (bc *Blockchain) startConsensus(p2pNode *P2PNode) {
 	bc.currentView = View{Number: 0}
@@ -119,8 +135,27 @@ type VotingStrategy interface {
 type DefaultVotingStrategy struct{}
 
 func (d *DefaultVotingStrategy) Vote(block Block) bool {
-	// Example: Vote "yes" if the block contains at least one transaction
-	return len(block.Transactions) > 0
+	// A block with no content of any kind is not worth voting yes on.
+	if len(block.Transactions) == 0 && len(block.AssetTransactions) == 0 &&
+		len(block.OrderTransactions) == 0 && len(block.CredentialTransactions) == 0 {
+		return false
+	}
+	// Validate each base transaction's signature when signatures are required.
+	// Transactions with RequiredSigs == 0 are legacy or internal entries that
+	// do not carry end-user signatures and are accepted without verification.
+	for _, tx := range block.Transactions {
+		if tx.RequiredSigs == 0 {
+			continue
+		}
+		pubKey, err := PublicKeyFromString(tx.Sender)
+		if err != nil {
+			return false
+		}
+		if !tx.VerifyMultiSignature([]*PublicKey{pubKey}) {
+			return false
+		}
+	}
+	return true
 }
 
 // Select the speaker (proposer) for the current view
@@ -133,24 +168,51 @@ func (bc *Blockchain) selectSpeaker() {
 	fmt.Printf("Speaker for view %d is %s\n", bc.currentView.Number, bc.Delegates[bc.currentSpeaker].ID)
 }
 
-// AchieveConsensus ensures consensus is reached among delegates
+// AchieveConsensus collects votes from all delegates and finalises the block
+// if a BFT supermajority (⌈2n/3⌉) approves it.
+//
+// M-2: if bc.ConsensusTimeout > 0 the entire vote round is bounded by that
+// duration; a timeout triggers a view-change and returns false.
 func (bc *Blockchain) AchieveConsensus(block Block) bool {
+	if len(bc.Delegates) == 0 {
+		fmt.Println("No delegates registered; consensus not applicable.")
+		return false
+	}
+
+	type voteResult struct{ yes bool }
+	ch := make(chan voteResult, len(bc.Delegates))
+
+	for _, delegate := range bc.Delegates {
+		d := delegate // capture loop variable
+		go func() {
+			ch <- voteResult{yes: d.VoteOnBlock(block)}
+		}()
+	}
+
+	// M-2: apply view-change timeout when configured.
+	var deadline <-chan time.Time
+	if bc.ConsensusTimeout > 0 {
+		deadline = time.After(bc.ConsensusTimeout)
+	}
+
 	yesVotes := 0
 	noVotes := 0
+	consensusThreshold := int(math.Ceil(float64(2*len(bc.Delegates)) / 3.0))
 
-	// Aggregate votes from delegates
-	for _, delegate := range bc.Delegates {
-		vote := delegate.VoteOnBlock(block)
-		fmt.Printf("Delegate %s voted %v on the block\n", delegate.ID, vote)
-
-		if vote {
-			yesVotes++
-		} else {
-			noVotes++
+	for collected := 0; collected < len(bc.Delegates); collected++ {
+		select {
+		case v := <-ch:
+			if v.yes {
+				yesVotes++
+			} else {
+				noVotes++
+			}
+		case <-deadline:
+			fmt.Printf("Consensus timed out after %v — triggering view-change (M-2)\n", bc.ConsensusTimeout)
+			return false
 		}
 	}
 
-	consensusThreshold := (2 * len(bc.Delegates)) / 3
 	if yesVotes >= consensusThreshold {
 		fmt.Printf("Consensus achieved with %d yes votes out of %d\n", yesVotes, len(bc.Delegates))
 		bc.finalizeBlock(block)
@@ -199,6 +261,18 @@ func (bc *Blockchain) AddTransaction(tx Transaction) {
 		}
 	}
 
+	// M-9: per-wallet sequence counter enforcement.
+	// tx.Nonce must be strictly greater than the last accepted nonce for this sender.
+	bc.Mu.Lock()
+	lastSeq := bc.WalletSequences[tx.Sender]
+	if tx.Nonce <= lastSeq {
+		bc.Mu.Unlock()
+		fmt.Printf("Invalid transaction: nonce %d is not greater than last sequence %d for sender %s\n", tx.Nonce, lastSeq, tx.Sender)
+		return
+	}
+	bc.WalletSequences[tx.Sender] = tx.Nonce
+	bc.Mu.Unlock()
+
 	// Assign the transaction to a shard
 	shardID := int(sha3.Sum256([]byte(tx.Sender))[0]) % len(bc.Shards)
 	bc.Shards[shardID].TransactionPool = append(bc.Shards[shardID].TransactionPool, tx)
@@ -231,232 +305,80 @@ func (n *Node) VoteOnBlock(block Block) bool {
 	// Default to "yes" if no strategy is set
 	return true
 }
+
+// finalizeBlock appends a consensus-approved block to the chain and applies its
+// state transitions. It is always called from AchieveConsensus after reaching
+// the BFT supermajority threshold.
 func (bc *Blockchain) finalizeBlock(block Block) {
-	// Expire any PaymentInstructions whose deadline has passed before we match
-	// new orders. This prevents stale instructions from blocking order books.
-	bc.ExpireStaleInstructions()
+	bc.Mu.Lock()
+	defer bc.Mu.Unlock()
 
-	fmt.Printf("Finalizing block with hash: %s\n", block.CalculateHash())
+	// Set chain-linking fields and append. Do not use AddBlock here because
+	// the block's signatures were collected before appending; we only need to
+	// stamp its Index and chain reference.
+	block.Index = len(bc.Blocks)
+	block.Nonce = bc.Nonce
+	if len(bc.Blocks) > 0 {
+		block.PrevHash = bc.Blocks[len(bc.Blocks)-1].CalculateHash()
+	} else {
+		block.PrevHash = strings.Repeat("0", 64)
+	}
+	block.SetPayloadHash()
 
-	// 1. Append to chain
 	bc.Blocks = append(bc.Blocks, block)
+	bc.Nonce++
+
 	bc.emitEvent(EventBlockFinalised, map[string]any{
 		"block_index": len(bc.Blocks) - 1,
 		"hash":        block.CalculateHash(),
 		"tx_count":    len(block.Transactions),
 	})
 
-	// 2. Apply asset transactions from this block
-	for _, tx := range block.AssetTransactions {
-		if err := tx.Validate(bc.Assets, bc.Holdings, bc.Credentials, bc.PendingCorporateActions, bc.AMLScreener); err != nil {
-			fmt.Printf("Skipping invalid asset tx: %v\n", err)
-			continue
-		}
-		if err := ApplyAssetTransaction(&tx, bc.Assets, bc.Holdings); err != nil {
-			fmt.Printf("Failed to apply asset tx: %v\n", err)
-		}
-	}
-
-	// 3. Apply credential transactions
-	for _, ct := range block.CredentialTransactions {
-		bc.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
-		bc.emitEvent(EventCredentialIssued, map[string]any{
-			"wallet_key":     ct.Attestation.WalletPublicKey,
-			"investor_class": ct.Attestation.InvestorClass,
-			"kyc_status":     ct.Attestation.KYCStatus,
-			"expires_at":     ct.Attestation.ExpiresAt,
-		})
-	}
-
-	// 4. Apply new orders to order books
-	for _, ot := range block.OrderTransactions {
-		if ot.IsCancellation {
-			if ob, ok := bc.OrderBooks[ot.Order.AssetID]; ok {
-				if err := ob.CancelOrder(ot.Order.ID, ot.Tx.Sender); err != nil {
-					fmt.Printf("Failed to cancel order %s: %v\n", ot.Order.ID, err)
-				}
-			}
-			bc.emitEvent(EventOrderCancelled, map[string]any{
-				"order_id": ot.Order.ID,
-				"asset_id": ot.Order.AssetID,
-			})
-			continue
-		}
-		if _, ok := bc.OrderBooks[ot.Order.AssetID]; !ok {
-			bc.OrderBooks[ot.Order.AssetID] = NewOrderBook(ot.Order.AssetID)
-		}
-		pubKey, err := PublicKeyFromString(ot.Tx.Sender)
-		if err != nil {
-			fmt.Printf("Failed to decode order placer key: %v\n", err)
-			continue
-		}
-		if err := bc.OrderBooks[ot.Order.AssetID].AddOrder(&ot.Order, pubKey); err != nil {
-			fmt.Printf("Failed to add order to book: %v\n", err)
-		} else {
-			bc.emitEvent(EventOrderPlaced, map[string]any{
-				"order_id": ot.Order.ID,
-				"asset_id": ot.Order.AssetID,
-				"side":     ot.Order.Side,
-				"price":    ot.Order.Price,
-				"quantity": ot.Order.Quantity,
-			})
-		}
-	}
-
-	// 5. Run matching engine for all order books.
-	// If the WindowManager has registered windows for an asset, matching is
-	// suppressed here — Tick() already ran MatchOrders when the window closed.
-	if bc.WindowManager != nil {
-		windowResults := bc.WindowManager.Tick(bc)
-		bc.WindowResults = append(bc.WindowResults, windowResults...)
-	}
-
-	for assetID, ob := range bc.OrderBooks {
-		// Skip assets managed by the WindowManager — they match on window close only.
-		if bc.WindowManager != nil && bc.WindowManager.IsManaged(assetID) {
-			continue
-		}
-
-		asset, ok := bc.Assets[assetID]
-		if !ok {
-			continue
-		}
-		trades, assetTxs, err := ob.MatchOrders(assetID, asset.Currency)
-		if err != nil {
-			fmt.Printf("MatchOrders error for asset %s: %v\n", assetID, err)
-			continue
-		}
-
-		for i, trade := range trades {
-			bc.Trades = append(bc.Trades, trade)
-			bc.emitEvent(EventTradeExecuted, map[string]any{
-				"trade_id":  trade.ID,
-				"asset_id":  trade.AssetID,
-				"quantity":  trade.Quantity,
-				"price":     trade.Price,
-				"currency":  trade.Currency,
-				"buyer_id":  trade.BuyerID,
-				"seller_id": trade.SellerID,
-			})
-
-			// 6. Issue PaymentInstruction for each trade
-			instruction := &PaymentInstruction{
-				TradeID:       trade.ID,
-				AssetID:       trade.AssetID,
-				Quantity:      trade.Quantity,
-				PricePerUnit:  trade.Price,
-				TotalAmount:   trade.Price * trade.Quantity,
-				Currency:      trade.Currency,
-				Method:        DefaultSettlementMethod(trade.Currency),
-				PayerWalletID: trade.BuyerID,
-				PayeeWalletID: trade.SellerID,
-				Reference:     fmt.Sprintf("GH-%s", trade.ID[:8]),
-				ExpiresAt:     time.Now().Unix() + 86400, // 24 h to pay
-			}
-
-			// FATF Recommendation 16 / EU TFR (Regulation 2023/1113):
-			// attach originator + beneficiary data when EUR-equivalent >= €1,000.
-			if instruction.TotalAmount >= TravelRuleThresholdEUR {
-				instruction.TravelRule = bc.buildTravelRule(
-					trade.BuyerID, trade.SellerID, instruction.Reference,
-				)
-			}
-
-			instruction, _ = bc.OracleService.SignInstruction(instruction)
-			bc.PendingInstructions[trade.ID] = instruction
-
-			// Store the DVP asset transaction so that ConfirmAndSettle can apply
-			// it when the payment confirmation arrives via webhook (async rails).
-			bc.PendingSettlements[trade.ID] = assetTxs[i]
-
-			// 7. Attempt immediate confirmation via the registered provider.
-			// MockPaymentProvider confirms synchronously so tests work without
-			// webhooks. Production providers (Modulr, EURC, Pontes) will return
-			// an error or leave the status as pending — the webhook handler calls
-			// bc.ConfirmAndSettle to apply the DVP transfer when payment arrives.
-			provider := bc.ProviderForMethod(instruction.Method)
-			_ = provider.ConfirmPayment(
-				instruction.Reference,
-				instruction.TotalAmount,
-				instruction.Currency,
-			)
-			status, _ := provider.GetPaymentStatus(instruction.Reference)
-			if status == PaymentStatusConfirmed {
-				// 8. DVP: apply asset transfer now that payment is confirmed.
-				// Use ConfirmAndSettle so the confirmation + DVP is idempotent even
-				// if a webhook fires later for the same reference.
-				if err := bc.ConfirmAndSettle(instruction.Reference, instruction.TotalAmount, instruction.Currency); err != nil {
-					fmt.Printf("DVP settle failed for trade %s: %v\n", trade.ID, err)
-				} else {
-					// Record settlement value against the prospectus exemption for
-					// this asset so the 12-month EUR rolling total stays current.
-					if pe, ok := bc.ProspectusExemptions[trade.AssetID]; ok {
-						pe.RecordSettlement(trade.ID, instruction.TotalAmount)
-					}
-				}
-			}
-		}
-	}
-
-	// 9. Update prospectus retail counts and emit threshold warnings.
-	for _, pe := range bc.ProspectusExemptions {
-		UpdateRetailCounts(pe, bc.Holdings, bc.Credentials)
-	}
-	CheckProspectusThresholds(bc, bc.ProspectusExemptions)
+	// Apply all transaction state (order matching, DVP, prospectus counts, etc.)
+	bc.applyBlockState(&bc.Blocks[len(bc.Blocks)-1])
 }
 
-// Create a new block and add it to the blockchain
+// createBlock proposes a new block from the current transaction pool,
+// collects delegate signatures, and attempts consensus.
 func (bc *Blockchain) createBlock(p2pNode *P2PNode) {
 	if len(bc.Delegates) == 0 {
 		fmt.Println("No delegates available to create a block.")
 		return
 	}
 
-	// Collect transactions from all shards
+	// Collect transactions from all shards.
 	collectedTransactions := []Transaction{}
 	for _, shard := range bc.Shards {
 		collectedTransactions = append(collectedTransactions, shard.TransactionPool...)
 	}
-
-	// Check if there are transactions to validate
 	if len(collectedTransactions) == 0 {
 		fmt.Println("No transactions to include in the block.")
 		return
 	}
 
-	// Validate transactions in parallel
-	bc.TransactionPool = collectedTransactions // Temporarily set the transaction pool
+	bc.TransactionPool = collectedTransactions
 	bc.ValidateTransactionsInParallel()
 
-	// Log the transaction pool
-	fmt.Printf("Transaction pool before block creation: %+v\n", bc.TransactionPool)
-
-	// Collect signatures from delegates
+	// Collect placeholder signatures (real Ed25519 signing added in Step 11).
 	signatures := [][]byte{}
 	for _, delegate := range bc.Delegates {
 		signatures = append(signatures, []byte(delegate.ID))
 	}
 
-	// Attempt to achieve consensus
 	block := Block{
 		Transactions: bc.TransactionPool,
-		PrevHash:     bc.GetLastBlockHash(),
 		Signatures:   signatures,
 	}
 	if bc.AchieveConsensus(block) {
-		bc.AddBlock(block.Transactions, signatures)
-
-		// Clear transaction pools in all shards
+		// finalizeBlock appended the block; clear the shard pools.
 		for _, shard := range bc.Shards {
 			shard.TransactionPool = []Transaction{}
 		}
-
 		fmt.Printf("Block %d created with signatures: %v\n", len(bc.Blocks)-1, signatures)
 	} else {
 		fmt.Println("Failed to achieve consensus. Block not added.")
 	}
 
-	// Move to the next view
 	bc.currentView = View{Number: bc.currentView.Number + 1}
 	bc.selectSpeaker()
 }
