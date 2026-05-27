@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,9 @@ type P2PNode struct {
 	Blockchain  *Blockchain
 	MdnsService mdns.Service // Store the mDNS service
 	Gater       *AllowlistGater
+	// cancelBackground cancels the context used by background goroutines
+	// (DHT bootstrap/discovery loop). Called by Shutdown to stop the loop.
+	cancelBackground context.CancelFunc
 }
 
 type mdnsNotifee struct {
@@ -239,7 +243,17 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 		}
 	}
 
-	// Bootstrap the DHT and discover peers asynchronously in the background
+	// Bootstrap the DHT and discover peers asynchronously in the background.
+	// bgCtx is derived from the caller context and is cancelled by Shutdown,
+	// so the goroutine terminates when the node is shut down.
+	bgCtx, bgCancel := context.WithCancel(ctx)
+	// If NewP2PNode returns an error, cancel bgCtx so the goroutine exits.
+	committed := false
+	defer func() {
+		if !committed {
+			bgCancel()
+		}
+	}()
 	go func() {
 		// Retry connecting to bootstrap peers
 		if len(bootstrapPeers) > 0 {
@@ -247,20 +261,28 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 			maxRetries := 10
 			for len(h.Network().Peers()) == 0 && retryCount < maxRetries {
 				logger.Debugf("Waiting for peers in the routing table... (attempt %d/%d)", retryCount+1, maxRetries)
-				time.Sleep(2 * time.Second)
+				select {
+				case <-bgCtx.Done():
+					return
+				case <-time.After(2 * time.Second):
+				}
 				retryCount++
 			}
 			logger.Infof("Current peers in the network: %v", h.Network().Peers())
 		}
 
-		if err := dht.Bootstrap(ctx); err != nil {
+		if err := dht.Bootstrap(bgCtx); err != nil {
 			logger.Warnf("Failed to bootstrap DHT: %v", err)
 			return
 		}
 		logger.Infof("DHT bootstrapped successfully")
 
 		// Give DHT time to populate routing table
-		time.Sleep(5 * time.Second)
+		select {
+		case <-bgCtx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 		peersCount := len(dht.RoutingTable().ListPeers())
 		logger.Infof("DHT routing table now has %d peers", peersCount)
 
@@ -277,7 +299,7 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 		}
 		rendezvousCID := cid.NewCidV1(cid.Raw, mh)
 
-		if err := dht.Provide(ctx, rendezvousCID, true); err != nil {
+		if err := dht.Provide(bgCtx, rendezvousCID, true); err != nil {
 			logger.Warnf("Failed to advertise rendezvous point: %v", err)
 		} else {
 			logger.Infof("Rendezvous point advertised successfully")
@@ -285,23 +307,29 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 
 		// Discover peers advertising the same rendezvous point
 		for {
-			peers, err := dht.FindProviders(ctx, rendezvousCID)
+			if bgCtx.Err() != nil {
+				return // node is shutting down
+			}
+			peers, err := dht.FindProviders(bgCtx, rendezvousCID)
 			if err != nil {
 				logger.Debugf("Error finding providers: %v", err)
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			for _, p := range peers {
-				if p.ID != h.ID() {
-					logger.Infof("Discovered peer: %s", p.ID.String())
-					if err := h.Connect(ctx, p); err != nil {
-						logger.Debugf("Failed to connect to peer %s: %v", p.ID.String(), err)
-					} else {
-						logger.Infof("Successfully connected to peer: %s", p.ID.String())
+			} else {
+				for _, p := range peers {
+					if p.ID != h.ID() {
+						logger.Infof("Discovered peer: %s", p.ID.String())
+						if err := h.Connect(bgCtx, p); err != nil {
+							logger.Debugf("Failed to connect to peer %s: %v", p.ID.String(), err)
+						} else {
+							logger.Infof("Successfully connected to peer: %s", p.ID.String())
+						}
 					}
 				}
 			}
-			time.Sleep(5 * time.Second) // Poll every 5 seconds
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
 		}
 	}()
 
@@ -342,19 +370,21 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 
 	// Create and return the P2PNode
 	node := &P2PNode{
-		Host:        h,
-		PubSub:      ps,
-		Topic:       topic,
-		Sub:         sub,
-		Blockchain:  blockchain,
-		MdnsService: mdnsSvc,
-		Gater:       gater,
+		Host:             h,
+		PubSub:           ps,
+		Topic:            topic,
+		Sub:              sub,
+		Blockchain:       blockchain,
+		MdnsService:      mdnsSvc,
+		Gater:            gater,
+		cancelBackground: bgCancel,
 	}
 
 	// Set a stream handler for direct messaging
 	h.SetStreamHandler("/p2p/1.0.0", node.handleStream)
 	logger.Infof("Stream handler set for direct messaging")
 
+	committed = true
 	return node, nil
 }
 
@@ -494,135 +524,145 @@ func (n *P2PNode) BroadcastPaymentConfirmation(pc PaymentConfirmation) error {
 
 func (n *P2PNode) HandleMessages(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Stopping message handling.")
+		// Sub.Next blocks until a message arrives, the context is cancelled,
+		// or Sub.Cancel() is called (which closes the internal channel and
+		// returns "subscription cancelled"). Any error is a permanent stop
+		// signal — there are no transient errors from Sub.Next.
+		msg, err := n.Sub.Next(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Println("Stopping message handling (context done).")
+			} else {
+				log.Printf("Stopping message handling (subscription error): %v", err)
+			}
 			return
-		default:
-			msg, err := n.Sub.Next(ctx)
-			if err != nil {
-				log.Printf("Error reading message: %v", err)
+		}
+
+		if msg.ReceivedFrom == n.Host.ID() {
+			continue
+		}
+
+		// Deserialize the P2PMessage
+		var p2pMessage P2PMessage
+		if err := json.Unmarshal(msg.Data, &p2pMessage); err != nil {
+			log.Printf("Failed to deserialize P2PMessage: %v", err)
+			continue
+		}
+
+		// Process the message based on its type
+		switch p2pMessage.Type {
+		case MessageTypeTransaction:
+			var tx Transaction
+			if err := json.Unmarshal(p2pMessage.Payload, &tx); err != nil {
+				log.Printf("Failed to deserialize transaction: %v", err)
 				continue
 			}
+			log.Printf("Received transaction: %+v", tx)
+			n.Blockchain.AddTransaction(tx)
 
-			if msg.ReceivedFrom == n.Host.ID() {
+		case MessageTypeBlock:
+			var block Block
+			if err := json.Unmarshal(p2pMessage.Payload, &block); err != nil {
+				log.Printf("Failed to deserialize block: %v", err)
 				continue
 			}
-
-			// Deserialize the P2PMessage
-			var p2pMessage P2PMessage
-			if err := json.Unmarshal(msg.Data, &p2pMessage); err != nil {
-				log.Printf("Failed to deserialize P2PMessage: %v", err)
-				continue
-			}
-
-			// Process the message based on its type
-			switch p2pMessage.Type {
-			case MessageTypeTransaction:
-				var tx Transaction
-				if err := json.Unmarshal(p2pMessage.Payload, &tx); err != nil {
-					log.Printf("Failed to deserialize transaction: %v", err)
-					continue
-				}
-				log.Printf("Received transaction: %+v", tx)
-				n.Blockchain.AddTransaction(tx)
-
-			case MessageTypeBlock:
-				var block Block
-				if err := json.Unmarshal(p2pMessage.Payload, &block); err != nil {
-					log.Printf("Failed to deserialize block: %v", err)
-					continue
-				}
-				log.Printf("Received block: %+v", block)
-				// ValidateBlock verifies chain linkage, content, and signatures.
-				// applyBlockState is called inside finalizeBlock / AddBlock; we
-				// must hold bc.Mu for the full validate-and-apply cycle.
-				n.Blockchain.Mu.Lock()
-				if n.Blockchain.ValidateBlock(block) {
-					// Peer-received blocks carry their full content; pass the
-					// complete block directly to avoid re-broadcasting.
-					n.Blockchain.AddBlock(block)
-				}
-				n.Blockchain.Mu.Unlock()
-
-			case MessageTypeAck:
-				log.Println("Received acknowledgment message")
-
-			case MessageTypePing:
-				log.Println("Received ping message")
-				ackMessage := P2PMessage{
-					Type:    MessageTypeAck,
-					Payload: []byte("pong"),
-				}
-				data, _ := json.Marshal(ackMessage)
-				n.Topic.Publish(ctx, data)
-
-			case MessageTypeAssetTransaction:
-				var at AssetTransaction
-				if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
-					log.Printf("Failed to deserialize asset transaction: %v", err)
-					continue
-				}
-				n.Blockchain.Mu.Lock()
-				if err := at.Validate(n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials, n.Blockchain.PendingCorporateActions, n.Blockchain.AMLScreener); err == nil {
-					n.Blockchain.PendingAssetTransactions = append(n.Blockchain.PendingAssetTransactions, at)
+			log.Printf("Received block: %+v", block)
+			// Validate and append under the write lock, but do NOT call
+			// AddBlock (which broadcasts) while holding the lock — a slow
+			// network publish would deadlock the entire chain. Instead we
+			// do the state mutation inline (same as AddBlock minus broadcast).
+			n.Blockchain.Mu.Lock()
+			if n.Blockchain.ValidateBlock(block) {
+				if len(n.Blockchain.Blocks) > 0 {
+					block.PrevHash = n.Blockchain.Blocks[len(n.Blockchain.Blocks)-1].CalculateHash()
 				} else {
-					log.Printf("Received invalid asset transaction: %v", err)
+					block.PrevHash = strings.Repeat("0", 64)
 				}
-				n.Blockchain.Mu.Unlock()
-
-			case MessageTypeCredential:
-				var ct CredentialTransaction
-				if err := json.Unmarshal(p2pMessage.Payload, &ct); err != nil {
-					log.Printf("Failed to deserialize credential transaction: %v", err)
-					continue
-				}
-				// Credentials are registry-signed — apply directly on receipt.
-				n.Blockchain.Mu.Lock()
-				if ct.Attestation.IsValid() {
-					n.Blockchain.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
-				}
-				n.Blockchain.Mu.Unlock()
-
-			case MessageTypePaymentConfirmation:
-				var pc PaymentConfirmation
-				if err := json.Unmarshal(p2pMessage.Payload, &pc); err != nil {
-					log.Printf("Failed to deserialize payment confirmation: %v", err)
-					continue
-				}
-				n.Blockchain.Mu.Lock()
-				if n.Blockchain.OracleService.VerifyConfirmation(&pc) {
-					n.Blockchain.ConfirmedPayments[pc.InstructionID] = &pc
-				}
-				n.Blockchain.Mu.Unlock()
-
-			case MessageTypeAllowlistAdd:
-				var at AllowlistTransaction
-				if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
-					log.Printf("Failed to deserialize allowlist transaction: %v", err)
-					continue
-				}
-				if n.Gater != nil {
-					if err := n.Gater.AllowPeer(peer.ID(at.PeerID), at.Signature); err != nil {
-						log.Printf("Rejected allowlist_add for peer %s: %v", at.PeerID, err)
-					}
-				}
-
-			case MessageTypeAllowlistRevoke:
-				var at AllowlistTransaction
-				if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
-					log.Printf("Failed to deserialize allowlist transaction: %v", err)
-					continue
-				}
-				if n.Gater != nil {
-					if err := n.Gater.RevokePeer(peer.ID(at.PeerID), at.Signature); err != nil {
-						log.Printf("Rejected allowlist_revoke for peer %s: %v", at.PeerID, err)
-					}
-				}
-
-			default:
-				log.Printf("Unknown message type: %s", p2pMessage.Type)
+				block.Index = len(n.Blockchain.Blocks)
+				block.Nonce = n.Blockchain.Nonce
+				block.SetPayloadHash()
+				n.Blockchain.Blocks = append(n.Blockchain.Blocks, block)
+				n.Blockchain.Nonce++
 			}
+			n.Blockchain.Mu.Unlock()
+
+		case MessageTypeAck:
+			log.Println("Received acknowledgment message")
+
+		case MessageTypePing:
+			log.Println("Received ping message")
+			ackMessage := P2PMessage{
+				Type:    MessageTypeAck,
+				Payload: []byte("pong"),
+			}
+			data, _ := json.Marshal(ackMessage)
+			n.Topic.Publish(ctx, data)
+
+		case MessageTypeAssetTransaction:
+			var at AssetTransaction
+			if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
+				log.Printf("Failed to deserialize asset transaction: %v", err)
+				continue
+			}
+			n.Blockchain.Mu.Lock()
+			if err := at.Validate(n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials, n.Blockchain.PendingCorporateActions, n.Blockchain.AMLScreener); err == nil {
+				n.Blockchain.PendingAssetTransactions = append(n.Blockchain.PendingAssetTransactions, at)
+			} else {
+				log.Printf("Received invalid asset transaction: %v", err)
+			}
+			n.Blockchain.Mu.Unlock()
+
+		case MessageTypeCredential:
+			var ct CredentialTransaction
+			if err := json.Unmarshal(p2pMessage.Payload, &ct); err != nil {
+				log.Printf("Failed to deserialize credential transaction: %v", err)
+				continue
+			}
+			// Credentials are registry-signed — apply directly on receipt.
+			n.Blockchain.Mu.Lock()
+			if ct.Attestation.IsValid() {
+				n.Blockchain.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
+			}
+			n.Blockchain.Mu.Unlock()
+
+		case MessageTypePaymentConfirmation:
+			var pc PaymentConfirmation
+			if err := json.Unmarshal(p2pMessage.Payload, &pc); err != nil {
+				log.Printf("Failed to deserialize payment confirmation: %v", err)
+				continue
+			}
+			n.Blockchain.Mu.Lock()
+			if n.Blockchain.OracleService.VerifyConfirmation(&pc) {
+				n.Blockchain.ConfirmedPayments[pc.InstructionID] = &pc
+			}
+			n.Blockchain.Mu.Unlock()
+
+		case MessageTypeAllowlistAdd:
+			var at AllowlistTransaction
+			if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
+				log.Printf("Failed to deserialize allowlist transaction: %v", err)
+				continue
+			}
+			if n.Gater != nil {
+				if err := n.Gater.AllowPeer(peer.ID(at.PeerID), at.Signature); err != nil {
+					log.Printf("Rejected allowlist_add for peer %s: %v", at.PeerID, err)
+				}
+			}
+
+		case MessageTypeAllowlistRevoke:
+			var at AllowlistTransaction
+			if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
+				log.Printf("Failed to deserialize allowlist transaction: %v", err)
+				continue
+			}
+			if n.Gater != nil {
+				if err := n.Gater.RevokePeer(peer.ID(at.PeerID), at.Signature); err != nil {
+					log.Printf("Rejected allowlist_revoke for peer %s: %v", at.PeerID, err)
+				}
+			}
+
+		default:
+			log.Printf("Unknown message type: %s", p2pMessage.Type)
 		}
 	}
 }
@@ -720,6 +760,12 @@ func (n *P2PNode) Shutdown(ctx context.Context) error {
 
 	log.Println("Shutting down P2PNode...")
 
+	// Cancel the background DHT discovery goroutine first so it stops
+	// polling and making network calls before we tear down the host.
+	if n.cancelBackground != nil {
+		n.cancelBackground()
+	}
+
 	// Cancel the PubSub subscription
 	if n.Sub != nil {
 		log.Println("Closing PubSub subscription...")
@@ -731,6 +777,15 @@ func (n *P2PNode) Shutdown(ctx context.Context) error {
 		log.Println("Closing PubSub topic...")
 		if err := n.Topic.Close(); err != nil {
 			log.Printf("Error closing PubSub topic: %v", err)
+		}
+	}
+
+	// Stop the mDNS discovery service before closing the host so that its
+	// background goroutine (zeroconf probe/announce) is not leaked.
+	if n.MdnsService != nil {
+		log.Println("Closing mDNS service...")
+		if err := n.MdnsService.Close(); err != nil {
+			log.Printf("Error closing mDNS service: %v", err)
 		}
 	}
 

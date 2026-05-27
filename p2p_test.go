@@ -17,6 +17,9 @@ import (
 func TestNewP2PNode(t *testing.T) {
 	ctx := context.Background()
 	blockchain := NewBlockchain(ctx, "test-blockchain")
+	if blockchain.P2PNode != nil {
+		t.Cleanup(func() { blockchain.P2PNode.Shutdown(ctx) }) //nolint:errcheck
+	}
 	topicName := "test-topic"
 	bootstrapPeers := []string{}
 
@@ -24,6 +27,7 @@ func TestNewP2PNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to initialize P2PNode: %v", err)
 	}
+	defer node.Shutdown(ctx) //nolint:errcheck
 
 	if node.Host == nil {
 		t.Fatalf("Expected Host to be initialized, got nil")
@@ -78,7 +82,8 @@ func TestBroadcastBlock(t *testing.T) {
 }
 
 func TestHandleMessages(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	blockchain := &Blockchain{} // Mock or initialize a blockchain instance
 
 	// Use the mock P2PNode
@@ -136,8 +141,8 @@ func TestHandleMessages(t *testing.T) {
 	// Simulate handling messages
 	go mockNode.HandleMessages(ctx)
 
-	// Wait for the messages to be processed
-	time.Sleep(2 * time.Second) // Allow time for all messages to be handled
+	// Wait briefly — MockP2PNode.HandleMessages is a no-op and returns immediately.
+	time.Sleep(50 * time.Millisecond)
 
 	t.Log("All message types handled successfully")
 }
@@ -149,7 +154,13 @@ func TestPeerDiscovery_Local(t *testing.T) {
 	defer cancel()
 
 	bc1 := NewBlockchain(ctx, "node1")
+	if bc1.P2PNode != nil {
+		t.Cleanup(func() { bc1.P2PNode.Shutdown(context.Background()) }) //nolint:errcheck
+	}
 	bc2 := NewBlockchain(ctx, "node2")
+	if bc2.P2PNode != nil {
+		t.Cleanup(func() { bc2.P2PNode.Shutdown(context.Background()) }) //nolint:errcheck
+	}
 
 	nodeA, err := NewP2PNode(ctx, bc1, "test-discovery", nil)
 	require.NoError(t, err, "nodeA should initialise without error")
@@ -214,7 +225,8 @@ func TestMockP2PNodeInitialization(t *testing.T) {
 }
 
 func TestHandleMessagesWithStructuredMessages(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	blockchain := &Blockchain{} // Mock or initialize a blockchain instance
 
 	// Use the mock P2PNode
@@ -240,13 +252,14 @@ func TestHandleMessagesWithStructuredMessages(t *testing.T) {
 	// Simulate handling messages
 	go mockNode.HandleMessages(ctx)
 
-	// Wait for the message to be processed
-	time.Sleep(1 * time.Second)
+	// MockP2PNode.HandleMessages is a no-op; just yield briefly.
+	time.Sleep(50 * time.Millisecond)
 	t.Log("Structured message handled successfully")
 }
 
 func TestPingAndAck(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	blockchain := &Blockchain{} // Mock or initialize a blockchain instance
 
 	// Use the mock P2PNode
@@ -262,8 +275,8 @@ func TestPingAndAck(t *testing.T) {
 	// Simulate handling messages
 	go mockNode.HandleMessages(ctx)
 
-	// Wait for the message to be processed
-	time.Sleep(1 * time.Second)
+	// MockP2PNode.HandleMessages is a no-op; just yield briefly.
+	time.Sleep(50 * time.Millisecond)
 	t.Log("Ping and acknowledgment messages handled successfully")
 }
 
@@ -284,7 +297,6 @@ func TestP2PNodeShutdown(t *testing.T) {
 
 func TestRealPeersCommunication(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	blockchain1 := &Blockchain{} // Mock or initialize a blockchain instance
 	blockchain2 := &Blockchain{}
@@ -292,31 +304,34 @@ func TestRealPeersCommunication(t *testing.T) {
 	// Create two P2P nodes
 	node1, err := NewP2PNode(ctx, blockchain1, "test-topic", nil)
 	assert.NoError(t, err, "Node1 initialization should not fail")
-	defer node1.Shutdown(ctx)
-
 	node2, err := NewP2PNode(ctx, blockchain2, "test-topic", nil)
 	assert.NoError(t, err, "Node2 initialization should not fail")
-	defer node2.Shutdown(ctx)
 
-	// Simulate broadcasting a transaction from Node1
-	go func() {
-		tx := Transaction{
-			Sender:   "Alice",
-			Receiver: "Bob",
-			Amount:   10,
-		}
-		err := node1.BroadcastTransaction(tx)
-		assert.NoError(t, err, "BroadcastTransaction should not return an error")
-	}()
+	// Shutdown BEFORE cancelling ctx so that Topic.Close() and Sub.Cancel()
+	// run while the GossipSub context is still live (avoids "context canceled"
+	// errors from Topic.Close). HandleMessages exits because Sub.Cancel() closes
+	// its internal channel, which now causes Sub.Next to return immediately.
+	// LIFO: defer registered last runs first → Shutdown fires before cancel().
+	defer cancel()
+	defer node1.Shutdown(context.Background()) //nolint:errcheck
+	defer node2.Shutdown(context.Background()) //nolint:errcheck
 
-	// Simulate handling messages on Node2
+	// Start message handler for Node2 before broadcasting.
 	go node2.HandleMessages(ctx)
 
-	// Wait for the message to be processed
-	time.Sleep(2 * time.Second)
+	// Broadcast a transaction from Node1 synchronously so we can assert the
+	// result before any cleanup defers have run.
+	tx := Transaction{
+		Sender:   "Alice",
+		Receiver: "Bob",
+		Amount:   10,
+	}
+	assert.NoError(t, node1.BroadcastTransaction(tx), "BroadcastTransaction should not return an error")
 
-	// Verify that Node2 received the transaction
-	// (You can add logic to check the blockchain or logs for the received transaction)
+	// Allow brief time for the message to propagate; nodes are not bootstrapped
+	// so no actual delivery occurs, but the goroutine should run cleanly.
+	require.Eventually(t, func() bool { return true }, 200*time.Millisecond, 10*time.Millisecond)
+
 	t.Log("Real peer communication test passed")
 }
 

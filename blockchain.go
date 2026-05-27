@@ -157,7 +157,7 @@ type Blockchain struct {
 
 	Blocks             []Block
 	Nodes              []Node
-	LockedWallets      map[[32]byte]*LockedWallet
+	LockedWallets      map[[32]byte]*LockedWallet `json:"-"`
 	Delegates          []Node
 	PublicKeyToID      map[string]string
 	UserIDToDelegateID map[string]string
@@ -167,7 +167,7 @@ type Blockchain struct {
 	Nonce              int
 	TransactionPool    []Transaction
 	Shards             []*Shard
-	P2PNode            *P2PNode
+	P2PNode            *P2PNode `json:"-"`
 
 	// Asset layer
 	Assets   map[string]*Asset        // assetID → Asset
@@ -187,16 +187,16 @@ type Blockchain struct {
 	PendingAssetTransactions []AssetTransaction              // received via P2P, awaiting block inclusion
 
 	// Services (interfaces — swappable for live implementations)
-	PaymentProvider  PaymentProvider
-	IdentityRegistry IdentityRegistry
-	OracleService    OracleService
+	PaymentProvider  PaymentProvider  `json:"-"`
+	IdentityRegistry IdentityRegistry `json:"-"`
+	OracleService    OracleService    `json:"-"`
 
 	// SettlementRouter dispatches PaymentInstructions to per-method providers.
 	// Register providers via RegisterSettlementProvider. Falls back to
 	// PaymentProvider when no entry exists for a given SettlementMethod.
 	// Example: register a PontesPaymentProvider for SettlementCeBM once the
 	// ECB Pontes pilot launches (Q3 2026).
-	SettlementRouter map[SettlementMethod]PaymentProvider
+	SettlementRouter map[SettlementMethod]PaymentProvider `json:"-"`
 
 	// Phase 2: Liquidity Windows
 	WindowManager *WindowManager
@@ -230,7 +230,7 @@ type Blockchain struct {
 	// Phase 3 / Track 5: AML screening — called from AssetTransaction.Validate
 	// before any other check. Defaults to MockAMLScreener (passes everything).
 	// Replace with ComplyAdvantageScreener / EllipticScreener before going live.
-	AMLScreener AMLScreener
+	AMLScreener AMLScreener `json:"-"`
 
 	// G-09: Suspicious Activity Report drafts — keyed by SAR ID.
 	// Created automatically when the AML screener returns a flag-severity alert.
@@ -265,7 +265,7 @@ type Blockchain struct {
 	// The API server reads from this channel and fans the events out to WebSocket clients.
 	// Senders use bc.emitEvent() which never blocks — events are dropped when the
 	// buffer is full rather than blocking the consensus path.
-	Events chan StreamEvent
+	Events chan StreamEvent `json:"-"`
 
 	// WalletSequences tracks the last accepted nonce per sender public key.
 	// Any transaction with nonce ≤ WalletSequences[sender] is rejected as a
@@ -283,13 +283,13 @@ type Blockchain struct {
 	// operator Ed25519 signature to every sealed block (C-2). When nil (default
 	// in dev/test mode) the signing step is skipped. Set to a LocalKeyProvider
 	// or VaultKeyProvider before starting a production node.
-	OperatorKeyProvider KeyProvider
+	OperatorKeyProvider KeyProvider `json:"-"`
 
 	// BlockStore is an optional bbolt-backed persistent block store (C-4).
 	// When non-nil, SealBlock writes each sealed block to disk so the chain
 	// survives process restarts. Populate via OpenBlockStore() and call
 	// LoadBlocks() before serving requests.
-	BlockStore *BlockStore
+	BlockStore *BlockStore `json:"-"`
 }
 
 // ---------------------------------------------------------------------------
@@ -668,87 +668,101 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 // transaction list.
 //
 // SealBlock acquires bc.Mu for its entire duration. Callers must not hold bc.Mu.
+// BroadcastBlock is called AFTER bc.Mu is released so network I/O does not
+// stall other readers/writers waiting on the mutex.
 func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTransaction, credTxs []CredentialTransaction) {
-	bc.Mu.Lock()
-	defer bc.Mu.Unlock()
+	var sealedBlock Block
 
-	// Build the complete block before appending or broadcasting. AddBlock sets
-	// Index, PrevHash, Nonce, and PayloadHash; all content is present at broadcast.
-	block := Block{
-		AssetTransactions:      assetTxs,
-		OrderTransactions:      orderTxs,
-		CredentialTransactions: credTxs,
-	}
-	bc.AddBlock(block)
-	idx := len(bc.Blocks) - 1
+	func() {
+		bc.Mu.Lock()
+		defer bc.Mu.Unlock()
 
-	// C-2: operator signs PayloadHash so that external verifiers can confirm
-	// which node produced the block. Skip when no key is configured (dev mode).
-	if bc.OperatorKeyProvider != nil {
-		payloadBytes, err := hex.DecodeString(bc.Blocks[idx].PayloadHash)
-		if err == nil {
-			sig, err := bc.OperatorKeyProvider.Sign(payloadBytes)
+		// Build the complete block before appending or broadcasting. AddBlock sets
+		// Index, PrevHash, Nonce, and PayloadHash; all content is present at broadcast.
+		block := Block{
+			AssetTransactions:      assetTxs,
+			OrderTransactions:      orderTxs,
+			CredentialTransactions: credTxs,
+		}
+		bc.AddBlock(block)
+		idx := len(bc.Blocks) - 1
+
+		// C-2: operator signs PayloadHash so that external verifiers can confirm
+		// which node produced the block. Skip when no key is configured (dev mode).
+		if bc.OperatorKeyProvider != nil {
+			payloadBytes, err := hex.DecodeString(bc.Blocks[idx].PayloadHash)
 			if err == nil {
-				bc.Blocks[idx].Signatures = append(bc.Blocks[idx].Signatures, sig)
-			} else {
-				log.Printf("SealBlock: operator signing failed: %v", err)
+				sig, err := bc.OperatorKeyProvider.Sign(payloadBytes)
+				if err == nil {
+					bc.Blocks[idx].Signatures = append(bc.Blocks[idx].Signatures, sig)
+				} else {
+					log.Printf("SealBlock: operator signing failed: %v", err)
+				}
 			}
 		}
-	}
 
-	// C-4: persist sealed block to bbolt so the chain survives restarts.
-	if bc.BlockStore != nil {
-		if err := bc.BlockStore.SaveBlock(&bc.Blocks[idx]); err != nil {
-			log.Printf("SealBlock: persistence write failed: %v", err)
-		}
-	}
-
-	// Apply all block state: order matching, DVP settlement, credential application.
-	bc.applyBlockState(&bc.Blocks[idx])
-
-	blk := bc.Blocks[idx]
-
-	// G-08: sweep credentials past their expiry date.
-	now := time.Now().Unix()
-	for walletKey, cred := range bc.Credentials {
-		if cred.KYCStatus == KYCStatusVerified && cred.ExpiresAt > 0 && now > cred.ExpiresAt {
-			cred.KYCStatus = KYCStatusExpired
-			bc.emitEvent(EventCredentialExpired, map[string]any{
-				"wallet_key":     walletKey,
-				"expired_at":     cred.ExpiresAt,
-				"investor_class": string(cred.InvestorClass),
-			})
-		}
-	}
-
-	// G-10: MiFIR / AIFMD reports for trades matched in this block.
-	// Look up the actual Trade from bc.Trades by matching order IDs so the
-	// report carries the canonical trade ID rather than a synthetic one.
-	for _, otx := range orderTxs {
-		if otx.IsCancellation || otx.Order.Status != OrderStatusFilled {
-			continue
-		}
-		for i := len(bc.Trades) - 1; i >= 0; i-- {
-			t := bc.Trades[i]
-			if t.BidOrderID == otx.Order.ID || t.AskOrderID == otx.Order.ID {
-				GenerateMiFIRReport(bc, t, idx)
-				GenerateAIFMDReport(bc, t, idx)
-				break
+		// C-4: persist sealed block to bbolt so the chain survives restarts.
+		if bc.BlockStore != nil {
+			if err := bc.BlockStore.SaveBlock(&bc.Blocks[idx]); err != nil {
+				log.Printf("SealBlock: persistence write failed: %v", err)
 			}
 		}
+
+		// Apply all block state: order matching, DVP settlement, credential application.
+		bc.applyBlockState(&bc.Blocks[idx])
+
+		blk := bc.Blocks[idx]
+		sealedBlock = blk // capture for broadcast after the lock releases
+
+		// G-08: sweep credentials past their expiry date.
+		now := time.Now().Unix()
+		for walletKey, cred := range bc.Credentials {
+			if cred.KYCStatus == KYCStatusVerified && cred.ExpiresAt > 0 && now > cred.ExpiresAt {
+				cred.KYCStatus = KYCStatusExpired
+				bc.emitEvent(EventCredentialExpired, map[string]any{
+					"wallet_key":     walletKey,
+					"expired_at":     cred.ExpiresAt,
+					"investor_class": string(cred.InvestorClass),
+				})
+			}
+		}
+
+		// G-10: MiFIR / AIFMD reports for trades matched in this block.
+		// Look up the actual Trade from bc.Trades by matching order IDs so the
+		// report carries the canonical trade ID rather than a synthetic one.
+		for _, otx := range orderTxs {
+			if otx.IsCancellation || otx.Order.Status != OrderStatusFilled {
+				continue
+			}
+			for i := len(bc.Trades) - 1; i >= 0; i-- {
+				t := bc.Trades[i]
+				if t.BidOrderID == otx.Order.ID || t.AskOrderID == otx.Order.ID {
+					GenerateMiFIRReport(bc, t, idx)
+					GenerateAIFMDReport(bc, t, idx)
+					break
+				}
+			}
+		}
+
+		// A-01: verify CirculatingSupply is consistent with the sum of all holdings.
+		bc.assertCirculatingSupplyConsistency()
+
+		bc.emitEvent(EventBlockFinalised, map[string]any{
+			"block_index":         idx,
+			"hash":                blk.CalculateHash(),
+			"tx_count":            0,
+			"asset_tx_count":      len(assetTxs),
+			"order_tx_count":      len(orderTxs),
+			"credential_tx_count": len(credTxs),
+		})
+	}()
+
+	// Broadcast outside bc.Mu so network I/O does not stall mutex waiters.
+	if bc.P2PNode != nil {
+		if err := bc.P2PNode.BroadcastBlock(sealedBlock); err != nil {
+			log.Printf("SealBlock: broadcast failed: %v", err)
+		}
 	}
-
-	// A-01: verify CirculatingSupply is consistent with the sum of all holdings.
-	bc.assertCirculatingSupplyConsistency()
-
-	bc.emitEvent(EventBlockFinalised, map[string]any{
-		"block_index":         idx,
-		"hash":                blk.CalculateHash(),
-		"tx_count":            0,
-		"asset_tx_count":      len(assetTxs),
-		"order_tx_count":      len(orderTxs),
-		"credential_tx_count": len(credTxs),
-	})
 }
 
 // assertCirculatingSupplyConsistency verifies that each asset's CirculatingSupply
@@ -812,10 +826,12 @@ func (bc *Blockchain) emitEvent(eventType string, payload any) {
 // AddBlock appends a fully-constructed block to the chain. It sets the block's
 // Index (monotone position), PrevHash (sealed hash of the preceding block),
 // Nonce (global block counter), and PayloadHash (pre-signature content hash)
-// before appending, then broadcasts the committed block to peers.
+// before appending.
 //
 // The caller must populate all transaction fields BEFORE calling AddBlock.
-// No mutations to block content are made after broadcast.
+// Broadcasting to peers is the caller's responsibility; callers that hold
+// bc.Mu must broadcast AFTER releasing the lock to avoid network I/O under
+// the mutex (see SealBlock).
 func (bc *Blockchain) AddBlock(block Block) {
 	if len(bc.Blocks) > 0 {
 		block.PrevHash = bc.Blocks[len(bc.Blocks)-1].CalculateHash()
@@ -827,14 +843,6 @@ func (bc *Blockchain) AddBlock(block Block) {
 	block.SetPayloadHash()
 	bc.Blocks = append(bc.Blocks, block)
 	bc.Nonce++
-
-	// Broadcast after the block is fully committed so peers receive the
-	// complete, consistent block in a single message.
-	if bc.P2PNode != nil {
-		if err := bc.P2PNode.BroadcastBlock(bc.Blocks[len(bc.Blocks)-1]); err != nil {
-			fmt.Printf("Failed to broadcast block: %v\n", err)
-		}
-	}
 }
 
 // SignTransaction signs the transaction with the given private key
@@ -991,27 +999,43 @@ func (shard *Shard) ValidateShardTransactions() {
 }
 
 func (bc *Blockchain) ValidateTransactionsInParallel() {
+	bc.Mu.RLock()
 	if len(bc.TransactionPool) == 0 {
+		bc.Mu.RUnlock()
 		fmt.Println("No transactions to validate.")
 		return
 	}
+	// Take a stable snapshot so worker goroutines do not race on the pool.
+	poolSnapshot := make([]Transaction, len(bc.TransactionPool))
+	copy(poolSnapshot, bc.TransactionPool)
+	bc.Mu.RUnlock()
 
-	numWorkers := 4                                                      // Number of goroutines
-	chunkSize := (len(bc.TransactionPool) + numWorkers - 1) / numWorkers // Ensure chunkSize is valid
+	numWorkers := 4                                                // Number of goroutines
+	chunkSize := (len(poolSnapshot) + numWorkers - 1) / numWorkers // Ensure chunkSize is valid
 
-	results := make(chan bool, len(bc.TransactionPool))
+	results := make(chan bool, len(poolSnapshot))
 
 	for i := 0; i < numWorkers; i++ {
 		start := i * chunkSize
-		if start >= len(bc.TransactionPool) { // Prevent out-of-bounds access
+		if start >= len(poolSnapshot) { // Prevent out-of-bounds access
 			break
 		}
 		end := start + chunkSize
-		if end > len(bc.TransactionPool) {
-			end = len(bc.TransactionPool)
+		if end > len(poolSnapshot) {
+			end = len(poolSnapshot)
 		}
 
 		go func(transactions []Transaction) {
+			defer func() {
+				// If a worker panics, drain its outstanding result slots so the
+				// collect loop below does not block forever.
+				if r := recover(); r != nil {
+					log.Printf("ValidateTransactionsInParallel: worker panic: %v", r)
+					for range transactions {
+						results <- false
+					}
+				}
+			}()
 			for _, tx := range transactions {
 				pubKey, err := PublicKeyFromString(tx.Sender)
 				if err != nil || !tx.VerifyMultiSignature([]*PublicKey{pubKey}) {
@@ -1020,18 +1044,18 @@ func (bc *Blockchain) ValidateTransactionsInParallel() {
 				}
 				results <- true
 			}
-		}(bc.TransactionPool[start:end])
+		}(poolSnapshot[start:end])
 	}
 
 	// Collect results
 	validCount := 0
-	for i := 0; i < len(bc.TransactionPool); i++ {
+	for i := 0; i < len(poolSnapshot); i++ {
 		if <-results {
 			validCount++
 		}
 	}
 
-	fmt.Printf("%d/%d transactions are valid\n", validCount, len(bc.TransactionPool))
+	fmt.Printf("%d/%d transactions are valid\n", validCount, len(poolSnapshot))
 }
 
 // SaveBlockchain saves the blockchain state to a file
@@ -1074,33 +1098,6 @@ func (bc *Blockchain) ResolveFork(newChain []Block) bool {
 
 	fmt.Println("New chain is not longer. No replacement made.")
 	return false
-}
-
-// This main function is not implemented correctly, for testing only.
-func main() {
-	bc := &Blockchain{
-		Blocks:             []Block{},
-		LockedWallets:      make(map[[32]byte]*LockedWallet),
-		PublicKeyToID:      make(map[string]string),
-		UserIDToDelegateID: make(map[string]string),
-		Wallets:            make(map[string]*Wallet),
-	}
-
-	// Add a genesis block
-	bc.AddBlock(Block{Transactions: []Transaction{{Sender: "genesis", Receiver: "user1", Amount: 100}}})
-
-	newTransactions := []Transaction{
-		{Sender: "user1", Receiver: "user2", Amount: 50},
-	}
-	bc.AddBlock(Block{Transactions: newTransactions})
-
-	for _, block := range bc.Blocks {
-		fmt.Printf("PrevHash: %s\n", block.PrevHash)
-		fmt.Printf("Transactions: %+v\n", block.Transactions)
-		fmt.Printf("Nonce: %d\n", block.Nonce)
-		fmt.Printf("Signatures: %x\n", block.Signatures)
-		fmt.Println()
-	}
 }
 
 // CommitBlock is the public entry point for finalising a pre-built block.
@@ -1234,12 +1231,22 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 		}
 	}
 
-	// Initialize the P2PNode
-	p2pNode, err := NewP2PNode(ctx, bc, topicName, bootstrapPeers)
-	if err != nil {
-		log.Fatalf("Failed to initialize P2PNode: %v", err)
+	// Initialize the P2PNode. A failure is non-fatal: the blockchain operates
+	// in standalone mode (bc.P2PNode == nil) without gossip propagation.
+	// Skip P2P initialisation when GONETWORK_NO_P2P=1.  This env var is set
+	// by newTestBlockchain() so that the ~95 unit-test blockchain instances
+	// do not each spin up a real libp2p host with mDNS/GossipSub/DHT.
+	// Production and P2P-specific tests leave the variable unset.
+	if os.Getenv("GONETWORK_NO_P2P") == "" {
+		// log.Fatalf was removed because it called os.Exit, killing the entire
+		// test process when port exhaustion or network errors occur.
+		p2pNode, err := NewP2PNode(ctx, bc, topicName, bootstrapPeers)
+		if err != nil {
+			log.Printf("Warning: Failed to initialize P2PNode (running in standalone mode): %v", err)
+		} else {
+			bc.P2PNode = p2pNode
+		}
 	}
-	bc.P2PNode = p2pNode
 
 	return bc
 }

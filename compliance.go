@@ -225,6 +225,7 @@ func ApplyJurisdictionRule(
 	receiverCredential *CredentialAttestation,
 	asset *Asset,
 	ticketValueEUR float64,
+	currentRetailCount int,
 ) error {
 	if rule == nil {
 		return nil
@@ -256,16 +257,19 @@ func ApplyJurisdictionRule(
 		)
 	}
 
-	// Retail-holder cap for jurisdiction
+	// Retail-holder cap for jurisdiction: block a new retail buyer if the cap
+	// has already been reached. currentRetailCount must be the live count of
+	// retail credential-holders for this jurisdiction at the time of the call.
 	if rule.MaxRetailHolders > 0 {
 		receiverClass := InvestorClassRetail
 		if receiverCredential != nil {
 			receiverClass = receiverCredential.InvestorClass
 		}
-		if receiverClass == InvestorClassRetail {
-			// The caller is responsible for tracking the live count;
-			// we surface the rule — actual count enforcement is in CheckProspectusLimits.
-			_ = senderCredential // available for future rule extensions
+		if receiverClass == InvestorClassRetail && currentRetailCount >= rule.MaxRetailHolders {
+			return fmt.Errorf(
+				"retail holder cap of %d reached for jurisdiction %s",
+				rule.MaxRetailHolders, rule.CountryCode,
+			)
 		}
 	}
 

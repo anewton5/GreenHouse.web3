@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // Wallet structure
@@ -19,6 +20,7 @@ type LockedWallet struct {
 }
 
 var lockedWallets = make(map[[32]byte]*LockedWallet)
+var lockedWalletsMu sync.Mutex
 
 // NewWallet creates a new wallet with a new pair of keys
 func NewWallet() (*Wallet, error) {
@@ -75,6 +77,8 @@ func (w *Wallet) LockCurrency(amount float64) error {
 	copy(publicKeyArray[:], w.PublicKey.Bytes()[:32])
 
 	// Add the amount to the locked wallet
+	lockedWalletsMu.Lock()
+	defer lockedWalletsMu.Unlock()
 	lockedWallet, exists := lockedWallets[publicKeyArray]
 	if !exists {
 		lockedWallet = &LockedWallet{
@@ -97,6 +101,8 @@ func (w *Wallet) UnlockCurrency(amount float64) error {
 	var publicKeyArray [32]byte
 	copy(publicKeyArray[:], w.PublicKey.Bytes()[:32])
 
+	lockedWalletsMu.Lock()
+	defer lockedWalletsMu.Unlock()
 	lockedWallet, exists := lockedWallets[publicKeyArray]
 	if !exists || lockedWallet.Balance < amount {
 		return errors.New("insufficient locked balance")
@@ -117,5 +123,7 @@ func (w *Wallet) UnlockCurrency(amount float64) error {
 	return nil
 }
 func GetLockedWallets() map[[32]byte]*LockedWallet {
+	lockedWalletsMu.Lock()
+	defer lockedWalletsMu.Unlock()
 	return lockedWallets
 }

@@ -30,6 +30,7 @@ type Node struct {
 // VoteForDelegates selects delegates based on staked currency
 func (bc *Blockchain) VoteForDelegates(p2pNode *P2PNode) {
 	// Reset delegates
+	bc.Mu.Lock()
 	bc.Delegates = []Node{}
 
 	votes := make(map[string]float64)
@@ -54,6 +55,7 @@ func (bc *Blockchain) VoteForDelegates(p2pNode *P2PNode) {
 			bc.Delegates = append(bc.Delegates, *node)
 		}
 	}
+	bc.Mu.Unlock()
 
 	// Log the elected delegates
 	for _, delegate := range bc.Delegates {
@@ -98,10 +100,17 @@ func (bc *Blockchain) startConsensus(p2pNode *P2PNode) {
 	bc.currentView = View{Number: 0}
 	bc.selectSpeaker()
 
-	// Access the speaker directly
+	// Snapshot the transaction pool under the read lock so the block content
+	// is consistent and no concurrent AddTransaction call races on the slice.
+	bc.Mu.RLock()
+	txSnapshot := make([]Transaction, len(bc.TransactionPool))
+	copy(txSnapshot, bc.TransactionPool)
+	prevHash := bc.GetLastBlockHash()
+	bc.Mu.RUnlock()
+
 	block := Block{
-		Transactions: bc.TransactionPool, // Use transactions from the pool
-		PrevHash:     bc.GetLastBlockHash(),
+		Transactions: txSnapshot,
+		PrevHash:     prevHash,
 	}
 
 	// Validate the block before broadcasting
@@ -117,7 +126,9 @@ func (bc *Blockchain) startConsensus(p2pNode *P2PNode) {
 	}
 
 	// Clear the transaction pool after proposing the block
+	bc.Mu.Lock()
 	bc.TransactionPool = []Transaction{}
+	bc.Mu.Unlock()
 }
 
 type FuncVotingStrategy struct {
@@ -182,10 +193,20 @@ func (bc *Blockchain) AchieveConsensus(block Block) bool {
 	type voteResult struct{ yes bool }
 	ch := make(chan voteResult, len(bc.Delegates))
 
+	// voteCtx is cancelled when AchieveConsensus returns (via defer voteCancel).
+	// This allows in-flight delegate goroutines to exit cleanly instead of
+	// blocking on a channel send after the caller has already returned.
+	voteCtx, voteCancel := context.WithCancel(context.Background())
+	defer voteCancel()
+
 	for _, delegate := range bc.Delegates {
 		d := delegate // capture loop variable
 		go func() {
-			ch <- voteResult{yes: d.VoteOnBlock(block)}
+			result := d.VoteOnBlock(block) // may block; cannot be interrupted
+			select {
+			case ch <- voteResult{yes: result}:
+			case <-voteCtx.Done(): // consensus already returned; discard result
+			}
 		}()
 	}
 
@@ -251,10 +272,13 @@ func (bc *Blockchain) AddTransaction(tx Transaction) {
 		return
 	}
 
-	// Check for duplicate nonce (replay protection)
+	// Check for duplicate nonce and enforce the per-wallet sequence counter
+	// under a single lock to eliminate the TOCTOU race between the two checks.
+	bc.Mu.Lock()
 	for _, shard := range bc.Shards {
 		for _, existingTx := range shard.TransactionPool {
 			if existingTx.Nonce == tx.Nonce && existingTx.Sender == tx.Sender {
+				bc.Mu.Unlock()
 				fmt.Println("Invalid transaction: duplicate nonce detected")
 				return
 			}
@@ -263,7 +287,6 @@ func (bc *Blockchain) AddTransaction(tx Transaction) {
 
 	// M-9: per-wallet sequence counter enforcement.
 	// tx.Nonce must be strictly greater than the last accepted nonce for this sender.
-	bc.Mu.Lock()
 	lastSeq := bc.WalletSequences[tx.Sender]
 	if tx.Nonce <= lastSeq {
 		bc.Mu.Unlock()
@@ -271,11 +294,11 @@ func (bc *Blockchain) AddTransaction(tx Transaction) {
 		return
 	}
 	bc.WalletSequences[tx.Sender] = tx.Nonce
-	bc.Mu.Unlock()
 
-	// Assign the transaction to a shard
+	// Assign the transaction to a shard (still under lock to avoid concurrent appends).
 	shardID := int(sha3.Sum256([]byte(tx.Sender))[0]) % len(bc.Shards)
 	bc.Shards[shardID].TransactionPool = append(bc.Shards[shardID].TransactionPool, tx)
+	bc.Mu.Unlock()
 	fmt.Printf("Transaction assigned to shard %d: %+v\n", shardID, tx)
 
 	// Broadcast the transaction
@@ -398,7 +421,7 @@ func (n *Node) SyncBlockchain(peer *Node) {
 	fmt.Printf("Node %s successfully synced blockchain\n", n.ID)
 }
 
-func (n *Node) PeriodicStateSaving(filename string) {
+func (n *Node) PeriodicStateSaving(ctx context.Context, filename string) {
 	go func() {
 		for {
 			err := n.Blockchain.SaveBlockchain(filename)
@@ -407,7 +430,11 @@ func (n *Node) PeriodicStateSaving(filename string) {
 			} else {
 				fmt.Printf("Node %s successfully saved blockchain state\n", n.ID)
 			}
-			time.Sleep(10 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
 		}
 	}()
 }
@@ -438,8 +465,14 @@ func (n *Node) SendMessage(p2pNode *P2PNode, msg Message) {
 
 // ReceiveMessage handles incoming messages
 func (n *Node) ReceiveMessage(msg Message) {
+	// Use a non-blocking send: if Inbox (cap 10) is full the message is
+	// dropped rather than leaving a goroutine permanently blocked on the send.
 	go func() {
-		n.Inbox <- msg
+		select {
+		case n.Inbox <- msg:
+		default:
+			fmt.Printf("Node %s inbox full — message dropped\n", n.ID)
+		}
 	}()
 }
 

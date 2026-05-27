@@ -1,7 +1,6 @@
 package gonetwork
 
 import (
-	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
@@ -14,8 +13,7 @@ type Network struct {
 }
 
 func TestAddBlock(t *testing.T) {
-	ctx := context.Background()
-	bc := NewBlockchain(ctx, "test-blockchain") // Blockchain starts with a genesis block
+	bc := newTestBlockchain(t) // Blockchain starts with a genesis block
 
 	transactions := []Transaction{
 		{Sender: "Alice", Receiver: "Bob", Amount: 10, RequiredSigs: 1},
@@ -67,8 +65,7 @@ func TestSignTransaction(t *testing.T) {
 }
 
 func TestInvalidTransactionPublicKey(t *testing.T) {
-	ctx := context.Background()
-	bc := NewBlockchain(ctx, "test-blockchain")
+	bc := newTestBlockchain(t)
 
 	tx := Transaction{
 		Sender:   "invalid_base64_key",
@@ -86,8 +83,7 @@ func TestInvalidTransactionPublicKey(t *testing.T) {
 }
 
 func TestBlockValidationWithSignatures(t *testing.T) {
-	ctx := context.Background()
-	bc := NewBlockchain(ctx, "test-blockchain")
+	bc := newTestBlockchain(t)
 
 	privKey1, _ := GeneratePrivateKey()
 	privKey2, _ := GeneratePrivateKey()
@@ -122,8 +118,7 @@ func TestBlockValidationWithSignatures(t *testing.T) {
 }
 
 func TestSortTransactionPool(t *testing.T) {
-	ctx := context.Background()
-	bc := NewBlockchain(ctx, "test-blockchain")
+	bc := newTestBlockchain(t)
 
 	bc.TransactionPool = []Transaction{
 		{Sender: "A", Receiver: "B", Amount: 50, Nonce: 2},
@@ -141,8 +136,7 @@ func TestSortTransactionPool(t *testing.T) {
 }
 
 func TestValidateBlock(t *testing.T) {
-	ctx := context.Background()
-	bc := NewBlockchain(ctx, "test-blockchain")
+	bc := newTestBlockchain(t)
 
 	privateKey, _ := GeneratePrivateKey()
 	publicKey := privateKey.Public()
@@ -235,8 +229,7 @@ func TestMultiSignatureTransaction(t *testing.T) {
 }
 
 func TestAchieveConsensusBasic(t *testing.T) {
-	ctx := context.Background()
-	bc := NewBlockchain(ctx, "test-blockchain")
+	bc := newTestBlockchain(t)
 
 	// Add delegates
 	bc.Delegates = []Node{
@@ -261,7 +254,7 @@ func TestAchieveConsensusBasic(t *testing.T) {
 }
 
 func TestSharding(t *testing.T) {
-	bc := NewBlockchain(context.Background(), "test-blockchain")
+	bc := newTestBlockchain(t)
 	bc.InitializeShards(3)
 
 	tx1 := Transaction{Sender: "A", Receiver: "B", Amount: 10}
@@ -278,7 +271,7 @@ func TestSharding(t *testing.T) {
 }
 
 func TestParallelTransactionValidation(t *testing.T) {
-	bc := NewBlockchain(context.Background(), "test-blockchain")
+	bc := newTestBlockchain(t)
 	// Add transactions to the pool
 	for i := 0; i < 100; i++ {
 		tx := Transaction{
@@ -295,8 +288,8 @@ func TestParallelTransactionValidation(t *testing.T) {
 
 func TestNodeRecovery(t *testing.T) {
 	// Create two nodes
-	node1 := NewNode("node1", NewBlockchain(context.Background(), "node1-blockchain"))
-	node2 := NewNode("node2", NewBlockchain(context.Background(), "node2-blockchain"))
+	node1 := NewNode("node1", newTestBlockchain(t))
+	node2 := NewNode("node2", newTestBlockchain(t))
 
 	// Add a block to node1's blockchain
 	tx := Transaction{Sender: "A", Receiver: "B", Amount: 10}
@@ -313,8 +306,8 @@ func TestNodeRecovery(t *testing.T) {
 
 func TestForkResolution(t *testing.T) {
 	// Create two blockchains
-	bc1 := NewBlockchain(context.Background(), "bc1-blockchain")
-	bc2 := NewBlockchain(context.Background(), "bc2-blockchain")
+	bc1 := newTestBlockchain(t)
+	bc2 := newTestBlockchain(t)
 
 	// Add blocks to bc1
 	tx1 := Transaction{Sender: "A", Receiver: "B", Amount: 10}

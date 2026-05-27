@@ -1752,7 +1752,13 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 	// G-11: jurisdiction-specific rules.
 	if buyerCred != nil {
 		if rule, hasRule := s.bc.JurisdictionRules[buyerCred.Jurisdiction]; hasRule {
-			if err := gonetwork.ApplyJurisdictionRule(rule, nil, buyerCred, asset, 0); err != nil {
+			currentRetailCount := 0
+			for _, cred := range s.bc.Credentials {
+				if cred.InvestorClass == gonetwork.InvestorClassRetail {
+					currentRetailCount++
+				}
+			}
+			if err := gonetwork.ApplyJurisdictionRule(rule, nil, buyerCred, asset, 0, currentRetailCount); err != nil {
 				writeError(w, http.StatusForbidden, err.Error())
 				return
 			}

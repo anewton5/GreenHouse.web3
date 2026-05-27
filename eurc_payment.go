@@ -103,11 +103,13 @@ func (e *EURCPaymentProvider) CreateVirtualAccount(walletID string) (string, err
 		return addr, nil
 	}
 
-	// Truncate walletID to 16 chars for the idempotency key to stay within
-	// Circle's 36-character limit for this field.
+	// Build a collision-resistant idempotency key within Circle's 36-char limit.
+	// Naive prefix truncation would make two walletIDs that share the first 33
+	// characters map to the same key — hash the full ID instead.
 	idempotencyKey := "gh-" + walletID
 	if len(idempotencyKey) > 36 {
-		idempotencyKey = idempotencyKey[:36]
+		h := sha256.Sum256([]byte(walletID))
+		idempotencyKey = "gh-" + hex.EncodeToString(h[:])[:33]
 	}
 
 	payload := map[string]any{

@@ -121,6 +121,7 @@ func (a *LegalDocAmendment) VerifyIssuerSignature() bool {
 	copy := *a
 	copy.IssuerSignature = nil
 	copy.AdminSignature = nil
+	copy.AdminKey = "" // AdminKey is set after issuer signing; exclude from issuer sig payload
 	data, err := json.Marshal(copy)
 	if err != nil {
 		return false

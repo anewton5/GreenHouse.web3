@@ -170,7 +170,7 @@ func TestJurisdictionRule_MinTicket(t *testing.T) {
 		CountryCode:      "DE",
 		MinTicketSizeEUR: 100_000,
 	}
-	err := ApplyJurisdictionRule(rule, nil, nil, asset, 50_000)
+	err := ApplyJurisdictionRule(rule, nil, nil, asset, 50_000, 0)
 	assert.Error(t, err, "ticket below minimum must be blocked")
 }
 
@@ -181,7 +181,7 @@ func TestJurisdictionRule_BlockedAssetType(t *testing.T) {
 		CountryCode:       "FR",
 		BlockedAssetTypes: []AssetType{AssetTypeWarrant},
 	}
-	err := ApplyJurisdictionRule(rule, nil, nil, asset, 200_000)
+	err := ApplyJurisdictionRule(rule, nil, nil, asset, 200_000, 0)
 	assert.Error(t, err, "blocked asset type must be rejected for the jurisdiction")
 }
 
@@ -193,7 +193,7 @@ func TestJurisdictionRule_Allowed(t *testing.T) {
 		MinTicketSizeEUR: 50_000,
 		MaxTicketSizeEUR: 1_000_000,
 	}
-	err := ApplyJurisdictionRule(rule, nil, nil, asset, 200_000)
+	err := ApplyJurisdictionRule(rule, nil, nil, asset, 200_000, 0)
 	assert.NoError(t, err, "valid transfer must pass all jurisdiction rules")
 }
 

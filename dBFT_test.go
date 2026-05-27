@@ -52,6 +52,7 @@ func TestVoteForDelegates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create P2PNode: %v", err)
 	}
+	defer p2pNode.Shutdown(ctx) //nolint:errcheck
 
 	// Call VoteForDelegates
 	bc.VoteForDelegates(p2pNode)
@@ -90,6 +91,9 @@ func TestAchieveConsensus(t *testing.T) {
 func TestCreateBlock(t *testing.T) {
 	// Initialize the blockchain with a genesis block
 	blockchain := NewBlockchain(context.Background(), "test-topic")
+	if blockchain.P2PNode != nil {
+		t.Cleanup(func() { blockchain.P2PNode.Shutdown(context.Background()) }) //nolint:errcheck
+	}
 
 	// Initialize shards
 	blockchain.InitializeShards(3) // Create 3 shards
@@ -179,6 +183,7 @@ func TestNetworkConsensus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create P2PNode: %v", err)
 	}
+	defer p2pNode.Shutdown(ctx) //nolint:errcheck
 
 	// Create nodes
 	node1 := NewNode("node1", blockchain)
