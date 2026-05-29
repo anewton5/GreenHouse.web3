@@ -304,27 +304,28 @@ func TestNodeRecovery(t *testing.T) {
 	}
 }
 
-func TestForkResolution(t *testing.T) {
-	// Create two blockchains
+// TestHandleFork_DoesNotReplaceChain verifies Item 12: ResolveFork is removed.
+// HandleFork with a longer peer chain must NOT modify the local blockchain —
+// dBFT provides single-path irreversible finality.
+func TestHandleFork_DoesNotReplaceChain(t *testing.T) {
 	bc1 := newTestBlockchain(t)
 	bc2 := newTestBlockchain(t)
 
-	// Add blocks to bc1
+	// Give bc2 a longer chain.
 	tx1 := Transaction{Sender: "A", Receiver: "B", Amount: 10}
-	bc1.AddBlock(Block{Transactions: []Transaction{tx1}})
-
-	// Add more blocks to bc2
 	tx2 := Transaction{Sender: "C", Receiver: "D", Amount: 20}
 	bc2.AddBlock(Block{Transactions: []Transaction{tx1}})
 	bc2.AddBlock(Block{Transactions: []Transaction{tx2}})
 
-	// Resolve fork
-	if !bc1.ResolveFork(bc2.Blocks) {
-		t.Fatalf("Failed to resolve fork")
-	}
+	originalLen := len(bc1.Blocks)
 
-	// Verify that bc1 now matches bc2
-	if len(bc1.Blocks) != len(bc2.Blocks) {
-		t.Fatalf("Fork resolution failed: chains do not match")
+	n1 := &Node{ID: "n1", Blockchain: bc1}
+	n2 := &Node{ID: "n2", Blockchain: bc2}
+	n1.HandleFork(n2)
+
+	// Chain must not have changed — dBFT finality is single-path.
+	if len(n1.Blockchain.Blocks) != originalLen {
+		t.Fatalf("HandleFork illegally replaced the local chain: got %d blocks, want %d",
+			len(n1.Blockchain.Blocks), originalLen)
 	}
 }

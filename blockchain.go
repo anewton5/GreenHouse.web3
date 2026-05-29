@@ -95,8 +95,19 @@ func (t *Transaction) VerifyTransaction(pubKeys []*PublicKey) (bool, error) {
 }
 
 type Block struct {
-	Index                  int                     `json:"index"`
-	PayloadHash            string                  `json:"payload_hash,omitempty"`
+	Index       int    `json:"index"`
+	PayloadHash string `json:"payload_hash,omitempty"`
+	// SealedAt is the Unix microsecond timestamp set by AddBlock immediately
+	// before SetPayloadHash is called. It is included in the signed payload
+	// hash so it cannot be altered without invalidating all delegate signatures.
+	// Required for MiFIR RTS 22 / MAR / CSDR regulatory timestamp obligations.
+	SealedAt int64 `json:"sealed_at"`
+	// KeyVersion is the base64-encoded Ed25519 public key of the operator that
+	// sealed this block, set to OperatorKeyProvider.PublicKeyString() in AddBlock.
+	// Receiving nodes use it to verify the operator signature and to look up the
+	// correct key after a rotation. Included in blockHashInput so it cannot be
+	// substituted post-hoc without invalidating all delegate signatures.
+	KeyVersion             string                  `json:"key_version,omitempty"`
 	Transactions           []Transaction           `json:"Transactions"`
 	AssetTransactions      []AssetTransaction      `json:"AssetTransactions,omitempty"`
 	OrderTransactions      []OrderTransaction      `json:"OrderTransactions,omitempty"`
@@ -111,6 +122,8 @@ type Block struct {
 // is stable regardless of how many signatures are collected.
 type blockHashInput struct {
 	Index                  int                     `json:"index"`
+	SealedAt               int64                   `json:"sealed_at"`
+	KeyVersion             string                  `json:"key_version,omitempty"`
 	Transactions           []Transaction           `json:"transactions"`
 	AssetTransactions      []AssetTransaction      `json:"asset_transactions,omitempty"`
 	OrderTransactions      []OrderTransaction      `json:"order_transactions,omitempty"`
@@ -126,6 +139,8 @@ type blockHashInput struct {
 func (b *Block) SetPayloadHash() {
 	input := blockHashInput{
 		Index:                  b.Index,
+		SealedAt:               b.SealedAt,
+		KeyVersion:             b.KeyVersion,
 		Transactions:           b.Transactions,
 		AssetTransactions:      b.AssetTransactions,
 		OrderTransactions:      b.OrderTransactions,
@@ -151,8 +166,10 @@ type View struct {
 type Blockchain struct {
 	// Mu guards all mutable state on this struct. Callers must hold Mu.RLock()
 	// for reads and Mu.Lock() for writes. Internal helpers (applyBlockState,
-	// ConfirmAndSettle, etc.) assume the caller already holds the appropriate
-	// lock — they do not acquire it themselves.
+	// confirmAndSettleLocked, etc.) assume the caller already holds the
+	// appropriate lock — they do not acquire it themselves.
+	// ConfirmAndSettle (the public method) is self-locking and safe to call
+	// concurrently from multiple goroutines (e.g. concurrent webhook deliveries).
 	Mu sync.RWMutex `json:"-"`
 
 	Blocks             []Block
@@ -253,6 +270,11 @@ type Blockchain struct {
 	// via POST /v1/compliance/stor/{id}/resolve.
 	PendingSTORs map[string]*STORDraft
 
+	// MAR Article 16: rolling 30-day counterparty trade window for wash-trade detection.
+	// Key: canonical sorted "buyerID:sellerID" pair. Value: trades within the last 30 days.
+	// Pruned lazily on each detectSTORs call to avoid unbounded growth.
+	RecentCounterpartyTrades map[string][]Trade
+
 	// RegistrationRegistry provides KYC-verified investor PII for FATF Travel Rule
 	// payload population. Set to the same registry used by the API server so that
 	// finalizeBlock can look up buyer/seller names and addresses inline.
@@ -290,6 +312,20 @@ type Blockchain struct {
 	// survives process restarts. Populate via OpenBlockStore() and call
 	// LoadBlocks() before serving requests.
 	BlockStore *BlockStore `json:"-"`
+
+	// ReportingService is the regulatory reporting back-end used by SealBlock
+	// to generate MiFIR/AIFMD reports for every trade in a sealed block.
+	// Defaults to DefaultReportingService (on-chain record only). In production,
+	// NewBlockchain replaces this with NCAReportingService so that reports are
+	// also transmitted to the NCA/ARM and persisted to the outbox on failure.
+	ReportingService ReportingService `json:"-"`
+
+	// NetworkRegistryKey is the Ed25519 public key of the network registry.
+	// Loaded from GREENHOUSE_REGISTRY_PUBKEY (64-char hex) at startup.
+	// When set, the AllowlistGater enforces that every incoming P2P peer carries
+	// a valid registry signature. When nil the gater operates in open mode
+	// (development/test). Required in production (enforced by productionReadinessError).
+	NetworkRegistryKey *PublicKey `json:"-"`
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +358,15 @@ const (
 	// ExpiresAt deadline without a confirmed payment. The DVP asset transfer
 	// is not applied; the trade remains in a failed-settlement state.
 	EventPaymentExpired = "payment_expired"
+	// EventConsensusFailure is emitted by createBlock when all view-change
+	// retries are exhausted without sealing a block (Item 9 Step D).
+	EventConsensusFailure = "consensus_failure"
+	// EventDelegateUnreachable is emitted by startConsensus when a delegate with
+	// configured P2P peer ID cannot be reached after pre-consensus dial checks.
+	EventDelegateUnreachable = "delegate_unreachable"
+	// EventSTORCreated is emitted when a pattern-detection rule in applyBlockState
+	// creates a new STORDraft (MAR Article 16 — market manipulation suspicion).
+	EventSTORCreated = "stor_created"
 )
 
 // EmitEvent is the exported entry point for emitEvent, allowing external
@@ -431,9 +476,20 @@ func (bc *Blockchain) ExpireStaleInstructions() {
 // arriving via webhook (Modulr, Pontes, EURC) and replaces direct calls to
 // bc.PaymentProvider.ConfirmPayment from the webhook handlers.
 //
+// ConfirmAndSettle is safe to call concurrently from multiple goroutines. It
+// acquires bc.Mu internally — callers must NOT hold the lock when calling this.
+//
 // Returns nil if the reference is unknown (no-op is intentional — webhook
 // providers must not retry on unknown references).
 func (bc *Blockchain) ConfirmAndSettle(reference string, amount float64, currency string) error {
+	bc.Mu.Lock()
+	defer bc.Mu.Unlock()
+	return bc.confirmAndSettleLocked(reference, amount, currency)
+}
+
+// confirmAndSettleLocked is the lock-free body of ConfirmAndSettle.
+// bc.Mu must be held by the caller (e.g. applyBlockState).
+func (bc *Blockchain) confirmAndSettleLocked(reference string, amount float64, currency string) error {
 	// Find the matching instruction by reference.
 	var instruction *PaymentInstruction
 	var tradeID string
@@ -509,7 +565,7 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 
 	// 2. Apply asset transactions.
 	for _, tx := range block.AssetTransactions {
-		if err := tx.Validate(bc.Assets, bc.Holdings, bc.Credentials, bc.PendingCorporateActions, bc.AMLScreener); err != nil {
+		if err := tx.Validate(bc, bc.Assets, bc.Holdings, bc.Credentials, bc.PendingCorporateActions, bc.AMLScreener); err != nil {
 			fmt.Printf("Skipping invalid asset tx: %v\n", err)
 			continue
 		}
@@ -597,6 +653,9 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 				"seller_id": trade.SellerID,
 			})
 
+			// MAR Article 16: detect market-manipulation patterns on every trade.
+			bc.detectSTORs(trade)
+
 			// 6. Issue a PaymentInstruction for each matched trade.
 			instruction := &PaymentInstruction{
 				TradeID:       trade.ID,
@@ -643,7 +702,8 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			status, _ := provider.GetPaymentStatus(instruction.Reference)
 			if status == PaymentStatusConfirmed {
 				// 8. DVP: apply the asset transfer now that payment is confirmed.
-				if err := bc.ConfirmAndSettle(instruction.Reference, instruction.TotalAmount, instruction.Currency); err != nil {
+				// applyBlockState already holds bc.Mu, so use the lock-free variant.
+				if err := bc.confirmAndSettleLocked(instruction.Reference, instruction.TotalAmount, instruction.Currency); err != nil {
 					fmt.Printf("DVP settle failed for trade %s: %v\n", trade.ID, err)
 				} else {
 					if pe, ok := bc.ProspectusExemptions[trade.AssetID]; ok {
@@ -710,6 +770,13 @@ func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTra
 
 		// Apply all block state: order matching, DVP settlement, credential application.
 		bc.applyBlockState(&bc.Blocks[idx])
+
+		// C-4: persist state snapshot so chain state survives restarts.
+		if bc.BlockStore != nil {
+			if err := bc.BlockStore.SaveState(bc, idx); err != nil {
+				log.Printf("SealBlock: state snapshot failed: %v", err)
+			}
+		}
 
 		blk := bc.Blocks[idx]
 		sealedBlock = blk // capture for broadcast after the lock releases
@@ -800,6 +867,118 @@ func (bc *Blockchain) assertCirculatingSupplyConsistency() {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// MAR Article 16 — STOR pattern detection
+// ---------------------------------------------------------------------------
+
+// detectSTORs checks a newly-matched trade for three MAR Article 16 market-
+// manipulation patterns and creates a STORDraft in bc.PendingSTORs for each
+// hit.  An EventSTORCreated is emitted for every new draft.
+//
+// bc.Mu must be held by the caller (detectSTORs is called from applyBlockState).
+func (bc *Blockchain) detectSTORs(trade Trade) {
+	// Pattern 1 — Self-transfer: buyer and seller are the same wallet.
+	if trade.BuyerID == trade.SellerID && trade.BuyerID != "" {
+		stor := NewSTORDraft(STORWashTrading, trade.AssetID, "", trade.ID, trade.BuyerID,
+			"self-transfer: buyer and seller are the same wallet")
+		bc.PendingSTORs[stor.ID] = stor
+		bc.emitEvent(EventSTORCreated, map[string]any{
+			"stor_id":  stor.ID,
+			"category": stor.Category,
+			"asset_id": trade.AssetID,
+			"trade_id": trade.ID,
+			"reason":   "self-transfer",
+		})
+	}
+
+	// Pattern 2 — Wash trade: same counterparty pair traded the same asset
+	// more than 3 times within the last 30 days.
+	cpKey := storCounterpartyKey(trade.BuyerID, trade.SellerID)
+	cutoff := time.Now().Unix() - 30*24*3600
+	prev := bc.RecentCounterpartyTrades[cpKey]
+	pruned := prev[:0]
+	for _, t := range prev {
+		if t.ExecutedAt >= cutoff {
+			pruned = append(pruned, t)
+		}
+	}
+	bc.RecentCounterpartyTrades[cpKey] = append(pruned, trade)
+	assetTradeCount := 0
+	for _, t := range bc.RecentCounterpartyTrades[cpKey] {
+		if t.AssetID == trade.AssetID {
+			assetTradeCount++
+		}
+	}
+	if assetTradeCount > 3 {
+		stor := NewSTORDraft(STORWashTrading, trade.AssetID, "", trade.ID, trade.BuyerID,
+			fmt.Sprintf("wash-trade-pattern: counterparty pair traded asset %s %d times within 30 days",
+				trade.AssetID, assetTradeCount))
+		bc.PendingSTORs[stor.ID] = stor
+		bc.emitEvent(EventSTORCreated, map[string]any{
+			"stor_id":  stor.ID,
+			"category": stor.Category,
+			"asset_id": trade.AssetID,
+			"trade_id": trade.ID,
+			"reason":   "wash-trade-pattern",
+		})
+	}
+
+	// Pattern 3 — Price deviation: trade price deviates more than 20% from the
+	// last-10-trade VWAP for this asset.
+	vwap, n := bc.storAssetVWAP(trade.AssetID, trade.ID, 10)
+	if n >= 2 && vwap > 0 {
+		deviation := math.Abs(trade.Price-vwap) / vwap
+		if deviation > 0.20 {
+			stor := NewSTORDraft(STORMarketManipulation, trade.AssetID, "", trade.ID, trade.BuyerID,
+				fmt.Sprintf("price-deviation: trade price %.4f deviates %.1f%% from 10-trade VWAP %.4f",
+					trade.Price, deviation*100, vwap))
+			bc.PendingSTORs[stor.ID] = stor
+			bc.emitEvent(EventSTORCreated, map[string]any{
+				"stor_id":  stor.ID,
+				"category": stor.Category,
+				"asset_id": trade.AssetID,
+				"trade_id": trade.ID,
+				"reason":   "price-deviation",
+			})
+		}
+	}
+}
+
+// storAssetVWAP computes the volume-weighted average price for assetID using
+// up to n completed trades in bc.Trades, excluding the trade with excludeID
+// (the current trade just appended).  Returns the VWAP and the count of trades
+// that contributed to it.
+func (bc *Blockchain) storAssetVWAP(assetID, excludeID string, n int) (float64, int) {
+	relevant := make([]Trade, 0, n)
+	for i := len(bc.Trades) - 1; i >= 0 && len(relevant) < n; i-- {
+		t := bc.Trades[i]
+		if t.AssetID == assetID && t.ID != excludeID {
+			relevant = append(relevant, t)
+		}
+	}
+	if len(relevant) == 0 {
+		return 0, 0
+	}
+	var sumPQ, sumQ float64
+	for _, t := range relevant {
+		sumPQ += t.Price * t.Quantity
+		sumQ += t.Quantity
+	}
+	if sumQ == 0 {
+		return 0, 0
+	}
+	return sumPQ / sumQ, len(relevant)
+}
+
+// storCounterpartyKey returns a canonical order-independent key for a
+// buyer/seller pair so that A→B and B→A share the same wash-trade bucket.
+func storCounterpartyKey(a, b string) string {
+	if a <= b {
+		return a + ":" + b
+	}
+	return b + ":" + a
+}
+
 // emitEvent sends an event onto bc.Events without blocking.
 // If the buffer is full the event is silently dropped — consensus must not stall
 // waiting for a WebSocket consumer.
@@ -840,6 +1019,12 @@ func (bc *Blockchain) AddBlock(block Block) {
 	}
 	block.Index = len(bc.Blocks)
 	block.Nonce = bc.Nonce
+	// Set microsecond timestamp and key version before hashing so both are
+	// covered by all delegate signatures (MiFIR RTS 22, MAR, CSDR).
+	block.SealedAt = time.Now().UnixMicro()
+	if bc.OperatorKeyProvider != nil {
+		block.KeyVersion = bc.OperatorKeyProvider.PublicKeyString()
+	}
 	block.SetPayloadHash()
 	bc.Blocks = append(bc.Blocks, block)
 	bc.Nonce++
@@ -873,6 +1058,21 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			fmt.Printf("Invalid block: previous hash does not match (expected: %s, got: %s)\n", lastBlock.CalculateHash(), block.PrevHash)
 			return false
 		}
+	}
+
+	// Verify that PayloadHash is consistent with the block's content. Any field
+	// covered by blockHashInput (including SealedAt) that is altered after sealing
+	// will produce a different hash and fail this check. A missing PayloadHash
+	// (empty string) is allowed only for legacy / test blocks that never went
+	// through AddBlock.
+	if block.PayloadHash != "" {
+		originalHash := block.PayloadHash
+		block.SetPayloadHash()
+		if block.PayloadHash != originalHash {
+			fmt.Printf("Invalid block: PayloadHash does not match block content (got %s, recomputed %s)\n", originalHash, block.PayloadHash)
+			return false
+		}
+		block.PayloadHash = originalHash // restore for downstream signature checks
 	}
 
 	// Block must contain at least one of: base transactions, asset transactions,
@@ -913,6 +1113,68 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			return false
 		}
 	}
+	// Item 11 Step A: verify AssetTransaction sender signatures.
+	// Entries with RequiredSigs == 0 are genesis / internal issuances that carry
+	// no end-user signature; all others must have a valid Ed25519 sender sig.
+	for _, at := range block.AssetTransactions {
+		if at.Tx.RequiredSigs == 0 {
+			continue
+		}
+		senderPub, err := PublicKeyFromString(at.Tx.Sender)
+		if err != nil {
+			fmt.Printf("Invalid block: AssetTransaction has invalid sender key: %v\n", err)
+			return false
+		}
+		if !at.Tx.VerifyMultiSignature([]*PublicKey{senderPub}) {
+			fmt.Println("Invalid block: AssetTransaction has invalid sender signature")
+			return false
+		}
+	}
+
+	// Item 11 Step B: verify OrderTransaction order signatures.
+	// Cancellations are authorised by the base Tx.Sender signature only; new
+	// placements must also carry a valid Ed25519 signature over the order fields.
+	for _, ot := range block.OrderTransactions {
+		if ot.IsCancellation {
+			continue
+		}
+		placerPub, err := PublicKeyFromString(ot.Order.PlacedBy)
+		if err != nil {
+			fmt.Printf("Invalid block: OrderTransaction has invalid placer key: %v\n", err)
+			return false
+		}
+		if !ot.Order.VerifySignature(placerPub) {
+			fmt.Println("Invalid block: OrderTransaction has invalid order signature")
+			return false
+		}
+	}
+
+	// Item 11 Step C: verify CredentialTransaction registry signatures.
+	// Skipped when bc.IdentityRegistry is not configured (dev / test without KYC).
+	// CredentialAttestation.CredentialHash is the pre-signature hash (same bytes
+	// that RegistrySignature covers), so we can verify on-chain without the full
+	// IdentityCredential.
+	if bc.IdentityRegistry != nil {
+		regPub := bc.IdentityRegistry.RegistryPublicKey()
+		for _, ct := range block.CredentialTransactions {
+			a := &ct.Attestation
+			if len(a.RegistrySignature) == 0 {
+				fmt.Printf("Invalid block: CredentialTransaction for wallet %s has no registry signature\n", a.WalletPublicKey)
+				return false
+			}
+			credHashBytes, err := hex.DecodeString(a.CredentialHash)
+			if err != nil || len(credHashBytes) == 0 {
+				fmt.Printf("Invalid block: CredentialTransaction for wallet %s has invalid CredentialHash\n", a.WalletPublicKey)
+				return false
+			}
+			sig := &Signature{value: a.RegistrySignature}
+			if !sig.Verify(regPub, credHashBytes) {
+				fmt.Printf("Invalid block: CredentialTransaction for wallet %s has invalid registry signature\n", a.WalletPublicKey)
+				return false
+			}
+		}
+	}
+
 	// Verify block signatures: require BFT supermajority (⌈2n/3⌉).
 	// Guard n==0 for single-operator mode where no delegates are registered.
 	if len(bc.Delegates) > 0 {
@@ -922,7 +1184,11 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			return false
 		}
 
-		// H-9: verify each delegate signature covers PayloadHash.
+		// Item 8 Step C: verify each delegate Ed25519 signature against PayloadHash.
+		// All production delegates must have a PublicKey (enforced via Item 7
+		// startup guard + createBlock signing). Delegates without a key can no
+		// longer contribute valid signatures, so they do not count toward the
+		// threshold — the bypass that skipped keyless delegates has been removed.
 		payloadHashBytes, err := hex.DecodeString(block.PayloadHash)
 		if err != nil {
 			fmt.Printf("Invalid block: cannot decode PayloadHash (%v)\n", err)
@@ -930,9 +1196,6 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 		}
 		validSigs := 0
 		for _, delegate := range bc.Delegates {
-			if len(delegate.PublicKey) == 0 {
-				continue
-			}
 			for _, sig := range block.Signatures {
 				if ed25519.Verify(delegate.PublicKey, payloadHashBytes, sig) {
 					validSigs++
@@ -1080,28 +1343,68 @@ func LoadBlockchain(filename string) (*Blockchain, error) {
 	return &bc, nil
 }
 
-func (bc *Blockchain) ResolveFork(newChain []Block) bool {
-	// Validate the new chain
-	for i := 1; i < len(newChain); i++ {
-		if newChain[i].PrevHash != newChain[i-1].CalculateHash() {
-			fmt.Println("Invalid chain: hashes do not match")
-			return false
-		}
-	}
-
-	// Check if the new chain is longer
-	if len(newChain) > len(bc.Blocks) {
-		fmt.Println("Replacing current chain with the longer valid chain")
-		bc.Blocks = newChain
-		return true
-	}
-
-	fmt.Println("New chain is not longer. No replacement made.")
-	return false
-}
+// ResolveFork has been removed (Item 12). dBFT provides irreversible
+// single-path finality — once a block carries ⌈2n/3⌉ valid delegate
+// signatures it cannot be reverted. Longest-chain (Nakamoto) fork
+// resolution is incompatible with dBFT and would allow a Byzantine peer to
+// replace finalised blocks with attacker-controlled content.
+// See: HandleFork in dBFT.go.
 
 // CommitBlock is the public entry point for finalising a pre-built block.
 // It is used by the simulation and integration tests; the normal production
+// productionReadinessError returns a non-nil error if any critical production
+// dependency is unset or still uses a mock implementation. Extracted from
+// NewBlockchain so tests can verify individual error conditions without
+// triggering os.Exit via log.Fatal.
+func productionReadinessError(bc *Blockchain) error {
+	if _, ok := bc.AMLScreener.(*MockAMLScreener); ok {
+		return fmt.Errorf("production: AMLScreener is MockAMLScreener — set a real screener before startup")
+	}
+	if _, ok := bc.PaymentProvider.(*MockPaymentProvider); ok {
+		return fmt.Errorf("production: PaymentProvider is MockPaymentProvider — set a real provider before startup")
+	}
+	if _, ok := bc.IdentityRegistry.(*MockIdentityRegistry); ok {
+		return fmt.Errorf("production: IdentityRegistry is MockIdentityRegistry — set a real registry before startup")
+	}
+	if bc.OperatorKeyProvider == nil {
+		return fmt.Errorf("production: OperatorKeyProvider is nil — set a key provider before startup")
+	}
+	if os.Getenv("ONFIDO_WEBHOOK_SECRET") == "" {
+		return fmt.Errorf("production: ONFIDO_WEBHOOK_SECRET is not set")
+	}
+	if os.Getenv("GREENHOUSE_REGISTRY_PUBKEY") == "" {
+		return fmt.Errorf("production: GREENHOUSE_REGISTRY_PUBKEY is not set — set a hex-encoded Ed25519 registry public key")
+	}
+	return nil
+}
+
+// catchUpBlock applies only the direct state changes from a block during startup
+// recovery — AssetTransactions with a positive amount (skipping zero-amount marker
+// issue records), CredentialTransactions, and WalletSequence updates — without
+// running the order-matching engine. It is used to re-apply blocks that were
+// sealed after the most recent SaveState snapshot, bridging the narrow crash
+// window between SaveBlock and SaveState.
+// Must be called without bc.Mu held; only invoked from NewBlockchain before the
+// node begins serving requests.
+func (bc *Blockchain) catchUpBlock(block *Block) {
+	for _, tx := range block.AssetTransactions {
+		if tx.Tx.Amount <= 0 || tx.Tx.Sender == "" || tx.Tx.Receiver == "" {
+			continue // skip zero-amount marker transactions
+		}
+		if err := ApplyAssetTransaction(&tx, bc.Assets, bc.Holdings); err != nil {
+			log.Printf("catchUpBlock %d: asset tx error: %v", block.Index, err)
+		}
+	}
+	for _, ct := range block.CredentialTransactions {
+		bc.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
+	}
+	for _, tx := range block.Transactions {
+		if tx.Nonce > bc.WalletSequences[tx.Sender] {
+			bc.WalletSequences[tx.Sender] = tx.Nonce
+		}
+	}
+}
+
 // path is AchieveConsensus → finalizeBlock.
 func (bc *Blockchain) CommitBlock(block Block) {
 	bc.finalizeBlock(block)
@@ -1171,6 +1474,44 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 		RequiresRiskWarning: true,
 	}
 
+	// G-11: seed core EU jurisdiction rules (Prospectus Regulation 2017/1129 and
+	// MiFID II compliance). All four jurisdictions use the Art. 3(2)(b) exemption:
+	// offers addressed to fewer than 150 natural or legal persons per member state,
+	// so MaxRetailHolders is capped at 149. MiFID II suitability is required for
+	// complex instruments in all EU jurisdictions (RequiresSuitability = true).
+
+	// Germany (BaFin) — DLT Pilot Regime active; Electronic Securities Act (2021).
+	bc.JurisdictionRules["DE"] = &JurisdictionRule{
+		CountryCode:         "DE",
+		MaxRetailHolders:    149,
+		RequiresSuitability: true,
+		RequiresRiskWarning: true,
+	}
+
+	// Luxembourg (CSSF) — EU fund hub; CSSF proactive with DLT frameworks.
+	bc.JurisdictionRules["LU"] = &JurisdictionRule{
+		CountryCode:         "LU",
+		MaxRetailHolders:    149,
+		RequiresSuitability: true,
+		RequiresRiskWarning: true,
+	}
+
+	// France (AMF/ACPR) — Strong DLT legal framework; Banque de France ECB pilot.
+	bc.JurisdictionRules["FR"] = &JurisdictionRule{
+		CountryCode:         "FR",
+		MaxRetailHolders:    149,
+		RequiresSuitability: true,
+		RequiresRiskWarning: true,
+	}
+
+	// Netherlands (AFM) — AFM published clear DLT guidance; Amsterdam fintech hub.
+	bc.JurisdictionRules["NL"] = &JurisdictionRule{
+		CountryCode:         "NL",
+		MaxRetailHolders:    149,
+		RequiresSuitability: true,
+		RequiresRiskWarning: true,
+	}
+
 	// Phase 2: FiDA Reporting
 	bc.CostBasisTracker = NewCostBasisTracker()
 	bc.ValuationOracle = NewMockValuationOracle()
@@ -1200,8 +1541,9 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc.RegulatoryReports = []*RegulatoryReport{}
 	// MAR Article 18: insider lists
 	bc.InsiderLists = make(map[string]*InsiderList)
-	// MAR Article 16: STOR drafts
+	// MAR Article 16: STOR drafts and wash-trade detection window
 	bc.PendingSTORs = make(map[string]*STORDraft)
+	bc.RecentCounterpartyTrades = make(map[string][]Trade)
 	if bc.PaymentProvider == nil {
 		bc.PaymentProvider = NewMockPaymentProvider()
 	}
@@ -1210,6 +1552,25 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	}
 	if bc.OracleService == nil {
 		bc.OracleService, _ = NewMockOracleService()
+	}
+
+	// Load the network registry public key from GREENHOUSE_REGISTRY_PUBKEY (hex).
+	// Must be set before productionReadinessError so the guard can verify it.
+	if regKeyHex := os.Getenv("GREENHOUSE_REGISTRY_PUBKEY"); regKeyHex != "" {
+		regKey, err := PublicKeyFromHex(regKeyHex)
+		if err != nil {
+			log.Fatalf("NewBlockchain: invalid GREENHOUSE_REGISTRY_PUBKEY: %v", err)
+		}
+		bc.NetworkRegistryKey = regKey
+	}
+
+	// I-2: Production guard — refuse mock services at startup.
+	// Must come after all fallback mock assignments above so it fires only when
+	// no real provider was injected before NewBlockchain was called.
+	if os.Getenv("GH_ENV") == "production" {
+		if err := productionReadinessError(bc); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	// Per-wallet sequence/nonce tracking for replay prevention.
@@ -1222,6 +1583,74 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	// variable (comma-separated multiaddrs). An empty or unset variable means the
 	// node runs in standalone / local-only mode, which is the default for tests
 	// and local development. Production nodes are configured via the environment.
+	// C-4: Open persistent block store when GREENHOUSE_DB_PATH is set.
+	// On first run the store is empty and the genesis block created above is
+	// saved immediately. On subsequent runs LoadBlocks restores bc.Blocks and
+	// LoadState restores bc.Assets, bc.Holdings, bc.Credentials, and
+	// bc.WalletSequences. Any blocks sealed after the last snapshot are replayed
+	// via catchUpBlock (no order matching) to close the crash-window gap.
+	if dbPath := os.Getenv("GREENHOUSE_DB_PATH"); dbPath != "" {
+		store, err := OpenBlockStore(dbPath)
+		if err != nil {
+			log.Fatalf("NewBlockchain: cannot open block store %q: %v", dbPath, err)
+		}
+		bc.BlockStore = store
+
+		// Clear the in-memory genesis before loading from disk.
+		bc.Blocks = []Block{}
+		if err := store.LoadBlocks(bc); err != nil {
+			log.Printf("NewBlockchain: block load error: %v", err)
+		}
+
+		if len(bc.Blocks) == 0 {
+			// First run — re-create genesis and persist it so it survives restart.
+			genesis := Block{
+				Index:        0,
+				Transactions: []Transaction{},
+				PrevHash:     strings.Repeat("0", 64),
+				Nonce:        0,
+				Signatures:   [][]byte{},
+			}
+			genesis.SetPayloadHash()
+			bc.Blocks = append(bc.Blocks, genesis)
+			if err := store.SaveBlock(&genesis); err != nil {
+				log.Printf("NewBlockchain: failed to persist genesis block: %v", err)
+			}
+		} else {
+			// Restored from store — align the nonce counter with the saved chain.
+			// Pattern: genesis direct-append (no Nonce++) + (N-1) AddBlock calls
+			// → bc.Nonce = len(bc.Blocks) - 1 after the original run.
+			bc.Nonce = len(bc.Blocks) - 1
+
+			// Restore state snapshot (Assets, Holdings, Credentials, WalletSequences).
+			lastApplied, err := store.LoadState(bc)
+			if err != nil {
+				log.Printf("NewBlockchain: state restore error: %v", err)
+			}
+
+			// Re-apply any blocks sealed after the last snapshot.
+			// Handles the crash window between SaveBlock and SaveState.
+			for i := lastApplied + 1; i < len(bc.Blocks); i++ {
+				bc.catchUpBlock(&bc.Blocks[i])
+			}
+		}
+
+		// Restore the active delegate set saved by the last VoteForDelegates call
+		// (Item 10 Step B). Re-initialises Inbox and viewChangeRequests so delegates
+		// are immediately usable for consensus without a new election round.
+		if err := store.LoadDelegates(bc); err != nil {
+			log.Printf("NewBlockchain: LoadDelegates: %v", err)
+		}
+
+		// Step C: if no delegates were persisted but recovered state indicates the
+		// chain had active participants, attempt to re-elect from in-memory state.
+		// This is a best-effort hook — it is a no-op until LockedWallets and Nodes
+		// are also persisted (a dependency of future Item 11 work).
+		if len(bc.Delegates) == 0 && (len(bc.Credentials) > 0 || len(bc.Assets) > 0) {
+			bc.VoteForDelegates(nil)
+		}
+	}
+
 	var bootstrapPeers []string
 	if raw := os.Getenv("GREENHOUSE_BOOTSTRAP_PEERS"); raw != "" {
 		for _, addr := range strings.Split(raw, ",") {
@@ -1248,5 +1677,71 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 		}
 	}
 
+	// G-10: initialise the regulatory reporting service.
+	// DefaultReportingService is used in dev/test (on-chain record only).
+	// In production, NCAReportingService also transmits reports to the NCA/ARM.
+	// If BlockStore is available, failed submissions are persisted to the
+	// "reporting_outbox" bucket and retried by a background goroutine.
+	bc.ReportingService = &DefaultReportingService{}
+	if os.Getenv("GH_ENV") == "production" {
+		ncaSvc := NewNCAReportingService()
+		if bc.BlockStore != nil {
+			ncaSvc.outbox = bc.BlockStore.SaveToReportingOutbox
+			go bc.runReportingOutboxRetry(ctx, ncaSvc)
+		}
+		bc.ReportingService = ncaSvc
+	}
+
 	return bc
+}
+
+// runReportingOutboxRetry is a background goroutine that retries any reports
+// stored in the BBolt "reporting_outbox" bucket after a failed NCA/ARM
+// submission. It applies exponential backoff (100 ms → 30 s) and removes
+// each report from the outbox once it is successfully submitted.
+func (bc *Blockchain) runReportingOutboxRetry(ctx context.Context, svc *NCAReportingService) {
+	const initialDelay = 100 * time.Millisecond
+	const maxDelay = 30 * time.Second
+	delay := initialDelay
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if bc.BlockStore == nil {
+			return
+		}
+		reports, err := bc.BlockStore.LoadReportingOutbox()
+		if err != nil {
+			log.Printf("runReportingOutboxRetry: load error: %v", err)
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+			continue
+		}
+		if len(reports) == 0 {
+			delay = initialDelay // reset when outbox is clear
+			continue
+		}
+		anyFailed := false
+		for _, report := range reports {
+			if err := svc.SubmitReport(report); err == nil {
+				if delErr := bc.BlockStore.DeleteFromReportingOutbox(report.ID); delErr != nil {
+					log.Printf("runReportingOutboxRetry: delete failed for report %s: %v", report.ID, delErr)
+				}
+			} else {
+				anyFailed = true
+			}
+		}
+		if anyFailed {
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		} else {
+			delay = initialDelay
+		}
+	}
 }

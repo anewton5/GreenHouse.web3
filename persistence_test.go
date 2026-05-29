@@ -249,3 +249,93 @@ func TestPersistence_SealBlock_PersistsBlock(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, count, 1, "at least one block should be persisted")
 }
+
+// ---------------------------------------------------------------------------
+// SaveState / LoadState — snapshot round-trip
+// ---------------------------------------------------------------------------
+
+func TestPersistence_SaveAndLoadState_RoundTrip(t *testing.T) {
+	path := tempDBPath(t)
+	bs, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	bc := newTestBlockchain(t)
+	bc.Assets["A1"] = &Asset{ID: "A1", Name: "Alpha", TotalSupply: 1000}
+	bc.Holdings["H1"] = &AssetHolding{AssetID: "A1", HolderID: "alice", Balance: 500}
+	bc.WalletSequences["alice"] = 7
+
+	require.NoError(t, bs.SaveState(bc, 3))
+
+	// Restore into a fresh blockchain.
+	bc2 := newTestBlockchain(t)
+	bc2.Assets = make(map[string]*Asset)
+	bc2.Holdings = make(map[string]*AssetHolding)
+	bc2.WalletSequences = make(map[string]int64)
+
+	lastApplied, err := bs.LoadState(bc2)
+	require.NoError(t, err)
+	assert.Equal(t, 3, lastApplied)
+	require.NotNil(t, bc2.Assets["A1"])
+	assert.Equal(t, "Alpha", bc2.Assets["A1"].Name)
+	require.NotNil(t, bc2.Holdings["H1"])
+	assert.InDelta(t, float64(500), bc2.Holdings["H1"].Balance, 1e-9)
+	assert.Equal(t, int64(7), bc2.WalletSequences["alice"])
+}
+
+func TestPersistence_LoadState_EmptyStore_ReturnsMinusOne(t *testing.T) {
+	path := tempDBPath(t)
+	bs, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	bc := newTestBlockchain(t)
+	lastApplied, err := bs.LoadState(bc)
+	require.NoError(t, err)
+	assert.Equal(t, -1, lastApplied, "empty store should return -1")
+}
+
+func TestPersistence_SaveState_SurvivesReopen(t *testing.T) {
+	path := tempDBPath(t)
+
+	bs, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	bc := newTestBlockchain(t)
+	bc.Assets["X"] = &Asset{ID: "X", Name: "Xray"}
+	require.NoError(t, bs.SaveState(bc, 5))
+	bs.Close()
+
+	// Re-open and verify state is present.
+	bs2, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	defer bs2.Close()
+
+	bc2 := newTestBlockchain(t)
+	bc2.Assets = make(map[string]*Asset)
+	lastApplied, err := bs2.LoadState(bc2)
+	require.NoError(t, err)
+	assert.Equal(t, 5, lastApplied)
+	require.NotNil(t, bc2.Assets["X"])
+	assert.Equal(t, "Xray", bc2.Assets["X"].Name)
+}
+
+func TestPersistence_SealBlock_PersistsState(t *testing.T) {
+	path := tempDBPath(t)
+	bs, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	bc := newTestBlockchain(t)
+	bc.BlockStore = bs
+	bc.Assets["Z"] = &Asset{ID: "Z", Name: "Zeta", TotalSupply: 100}
+
+	bc.SealBlock(nil, nil, nil)
+
+	bc2 := newTestBlockchain(t)
+	bc2.Assets = make(map[string]*Asset)
+	lastApplied, err := bs.LoadState(bc2)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, lastApplied, 0, "snapshot should record a non-negative block index")
+	require.NotNil(t, bc2.Assets["Z"])
+	assert.Equal(t, "Zeta", bc2.Assets["Z"].Name)
+}

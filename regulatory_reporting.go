@@ -125,6 +125,9 @@ var AIFMDReportableAssetTypes = map[AssetType]bool{
 // GenerateMiFIRReport is a convenience function that generates a MiFIR report
 // for a trade and appends it to bc.RegulatoryReports.
 // It is called from SealBlock for every trade in a block's OrderTransactions.
+// It uses bc.ReportingService (falling back to DefaultReportingService when nil)
+// so that the NCAReportingService is invoked in production without callers needing
+// to be aware of which implementation is active.
 func GenerateMiFIRReport(
 	bc *Blockchain,
 	trade Trade,
@@ -138,7 +141,10 @@ func GenerateMiFIRReport(
 		return
 	}
 
-	svc := &DefaultReportingService{}
+	svc := bc.ReportingService
+	if svc == nil {
+		svc = &DefaultReportingService{}
+	}
 	report, err := svc.GenerateReport(ReportTypeMiFIR, trade, asset, blockIndex)
 	if err != nil {
 		return
@@ -155,6 +161,7 @@ func GenerateMiFIRReport(
 }
 
 // GenerateAIFMDReport generates an AIFMD Annex IV report for a fund-unit trade.
+// It uses bc.ReportingService (falling back to DefaultReportingService when nil).
 func GenerateAIFMDReport(
 	bc *Blockchain,
 	trade Trade,
@@ -168,7 +175,10 @@ func GenerateAIFMDReport(
 		return
 	}
 
-	svc := &DefaultReportingService{}
+	svc := bc.ReportingService
+	if svc == nil {
+		svc = &DefaultReportingService{}
+	}
 	report, err := svc.GenerateReport(ReportTypeAIFMD, trade, asset, blockIndex)
 	if err != nil {
 		return

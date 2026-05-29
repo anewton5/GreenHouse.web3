@@ -224,9 +224,16 @@ func TestValidateBlock_BlockWithAssetTx_ReturnsTrue(t *testing.T) {
 
 func TestValidateBlock_BlockWithOrderTx_ReturnsTrue(t *testing.T) {
 	bc := NewBlockchain(context.Background(), "validate-order")
+
+	// Item 11: orders now require a valid placer signature.
+	placerKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	order, err := NewOrder(placerKey, "a1", OrderSideBid, 10.0, 5.0, 0)
+	require.NoError(t, err)
+
 	b := Block{
 		PrevHash:          bc.Blocks[len(bc.Blocks)-1].CalculateHash(),
-		OrderTransactions: []OrderTransaction{{Order: Order{AssetID: "a1"}}},
+		OrderTransactions: []OrderTransaction{{Order: *order}},
 	}
 	b.SetPayloadHash()
 	assert.True(t, bc.ValidateBlock(b))

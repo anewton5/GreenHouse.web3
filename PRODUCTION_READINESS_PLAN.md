@@ -20,24 +20,24 @@ Each item records: the gap identifier used in code comments, severity, root caus
 |----|-------|---------------------------------------------------|--------------|--------|
 | 1  | 1     | Persistence — state replay on startup             | **Critical** | Open   |
 | 2  | 1     | Production guard — refuse mock services           | **Critical** | Open   |
-| 3  | 1     | ConfirmAndSettle data race (webhook path)         | **Critical** | Open   |
-| 4  | 1     | AllowlistGater — make functional                  | **Critical** | Open   |
-| 5  | 1     | GossipSub topic validator                         | **Critical** | Open   |
-| 6  | 1     | Block timestamp field                             | **High**     | Open   |
-| 7  | 1     | Key management — require OperatorKeyProvider      | **Critical** | Open   |
-| 8  | 2     | dBFT — real delegate Ed25519 signing              | **Critical** | Open   |
-| 9  | 2     | dBFT — distributed view-change protocol           | **Critical** | Open   |
-| 10 | 2     | dBFT — persist delegate set and WalletSequences   | **High**     | Open   |
-| 11 | 2     | ValidateBlock — typed transaction verification    | **High**     | Open   |
-| 12 | 2     | ResolveFork — require BFT supermajority proof     | **Critical** | Open   |
-| 13 | 2     | Wire AML, Suitability, Jurisdiction into Validate | **High**     | Open   |
-| 14 | 2     | Wire NCAReportingService into SealBlock           | **High**     | Open   |
-| 15 | 2     | Fix PEP rescreening — mutex safety and context    | **High**     | Open   |
-| 16 | 2     | STOR auto-creation in applyBlockState             | **High**     | Open   |
-| 17 | 2     | P2P — disable DHT discovery in production         | **High**     | Open   |
-| 18 | 2     | P2P — connection manager and GossipSub tuning     | **High**     | Open   |
-| 19 | 2     | P2P — peer reconnect and full-mesh delegates      | **High**     | Open   |
-| 20 | 2     | Explicit TLS/Noise transport enforcement          | **Medium**   | Open   |
+| 3  | 1     | ConfirmAndSettle data race (webhook path)         | **Critical** | Complete |
+| 4  | 1     | AllowlistGater — make functional                  | **Critical** | Complete |
+| 5  | 1     | GossipSub topic validator                         | **Critical** | Complete |
+| 6  | 1     | Block timestamp field                             | **High**     | Complete |
+| 7  | 1     | Key management — require OperatorKeyProvider      | **Critical** | Complete |
+| 8  | 2     | dBFT — real delegate Ed25519 signing              | **Critical** | Complete |
+| 9  | 2     | dBFT — distributed view-change protocol           | **Critical** | Complete |
+| 10 | 2     | dBFT — persist delegate set and WalletSequences   | **High**     | **Complete** |
+| 11 | 2     | ValidateBlock — typed transaction verification    | **High**     | Complete |
+| 12 | 2     | ResolveFork — require BFT supermajority proof     | **Critical** | Complete |
+| 13 | 2     | Wire AML, Suitability, Jurisdiction into Validate | **High**     | Complete |
+| 14 | 2     | Wire NCAReportingService into SealBlock           | **High**     | Complete |
+| 15 | 2     | Fix PEP rescreening — mutex safety and context    | **High**     | Complete |
+| 16 | 2     | STOR auto-creation in applyBlockState             | **High**     | Complete |
+| 17 | 2     | P2P — disable DHT discovery in production         | **High**     | Complete |
+| 18 | 2     | P2P — connection manager and GossipSub tuning     | **High**     | Complete |
+| 19 | 2     | P2P — peer reconnect and full-mesh delegates      | **High**     | Complete |
+| 20 | 2     | Explicit TLS/Noise transport enforcement          | **Medium**   | Complete |
 | 21 | 3     | Shutdown safety — WaitGroup for DHT goroutine     | **Medium**   | Open   |
 | 22 | 3     | Broadcast* use node lifecycle context             | **Medium**   | Open   |
 | 23 | 3     | dBFT inbox capacity and dropped-message metrics   | **Medium**   | Open   |
@@ -322,7 +322,7 @@ None, but implement before Item 8 (delegate signing depends on `blockHashInput` 
 
 ---
 
-### Item 7 — Key Management: Require OperatorKeyProvider
+### Item 7 — Key Management: Require OperatorKeyProvider ✅ COMPLETE
 
 **Gap IDs:** KM-01, KM-02, KM-04, KM-05
 **Severity:** Critical
@@ -340,33 +340,34 @@ There is also no mechanism to load a key from an encrypted file at startup.
 
 #### Fix
 
-**Step A:** Include `OperatorKeyProvider == nil` check in Item 2's production `log.Fatal` guard (already included there).
+**Step A ✅:** `productionReadinessError` already includes `OperatorKeyProvider == nil` check (implemented as part of Item 2).
 
-**Step B — Implement NewLocalKeyProviderFromEncryptedFile:**
-Add to `keymanager.go`:
-```go
-// NewLocalKeyProviderFromEncryptedFile decrypts an AES-256-GCM encrypted Ed25519
-// private key file and returns a LocalKeyProvider. File format:
-// [32-byte PBKDF2 salt][12-byte nonce][AES-256-GCM ciphertext of Ed25519 private key].
-// Key is derived from passphrase using PBKDF2-SHA256 with 600,000 iterations.
-func NewLocalKeyProviderFromEncryptedFile(path, passphrase string) (*LocalKeyProvider, error)
-```
+**Step B ✅ — Implement NewLocalKeyProviderFromEncryptedFile:**
+Added to `keymanager.go`. Reads a "v2:"-prefixed Argon2id+AES-256-GCM encrypted key file produced by `EncryptPrivateKey`, decrypts, and returns a ready `*LocalKeyProvider`.
 
-**Step C — Document VaultKeyProvider wiring:**
-Add a `cmd/README.md` section documenting how to wire `VaultKeyProvider` as the `OperatorKeyProvider` at startup, including the required Vault policy and `VAULT_ADDR` / `VAULT_TOKEN` / `VAULT_KEY_PATH` environment variables.
+**Step C ✅ — Document VaultKeyProvider wiring:**
+`cmd/README.md` created with full operator key management documentation covering all three production key provider options (file-based, HashiCorp Vault Transit, Google Cloud KMS) plus key rotation guidance.
 
-**Step D — Deprecate KMSKeyProvider:**
-Add a `// Deprecated: AWS KMS does not support raw Ed25519 signing. Use VaultKeyProvider or LocalKeyProvider.` comment to `KMSKeyProvider` at `keymanager.go:88`. Do not remove it (breaking change).
+**Step D ✅ — Deprecate KMSKeyProvider:**
+Added `// Deprecated: AWS KMS does not support raw Ed25519 signing...` comment to `KMSKeyProvider` struct in `keymanager.go`.
 
-**Step E — Key rotation support:**
-Add a `KeyVersion string` field to `Block` (and `blockHashInput`). Set it to `OperatorKeyProvider.PublicKeyString()` in `AddBlock`. This allows receiving nodes to look up the correct public key when keys are rotated.
+**Step E ✅ — Key rotation support:**
+`KeyVersion string \`json:"key_version,omitempty"\`` added to `Block` and `blockHashInput`. Set to `OperatorKeyProvider.PublicKeyString()` in `AddBlock` before `SetPayloadHash()`. Included in the signed hash so it cannot be substituted post-hoc.
+
+#### Tests Added
+
+- `TestNewLocalKeyProviderFromEncryptedFile_Roundtrip` — full encrypt→file→load→sign→verify lifecycle
+- `TestNewLocalKeyProviderFromEncryptedFile_WrongPassphrase` — wrong passphrase returns error
+- `TestNewLocalKeyProviderFromEncryptedFile_MissingFile` — missing file returns clear error
+- `TestNewLocalKeyProviderFromEncryptedFile_FileWithTrailingNewline` — trailing whitespace handled
+- `TestBlock_KeyVersionInPayloadHash` — different operators produce distinct PayloadHashes
 
 #### Acceptance Criteria
 
-- A node with no `OperatorKeyProvider` and `GH_ENV=production` fails at startup.
-- `NewLocalKeyProviderFromEncryptedFile` roundtrips: encrypt a key, write to file, reload, sign a message, verify with the original public key.
-- Blocks produced by `SealBlock` carry a non-empty `Signatures` slice when `OperatorKeyProvider` is set.
-- `KMSKeyProvider` is clearly marked deprecated in code.
+- ✅ A node with no `OperatorKeyProvider` and `GH_ENV=production` fails at startup.
+- ✅ `NewLocalKeyProviderFromEncryptedFile` roundtrips: encrypt a key, write to file, reload, sign a message, verify with the original public key.
+- ✅ Blocks produced by `SealBlock` carry a non-empty `Signatures` slice when `OperatorKeyProvider` is set.
+- ✅ `KMSKeyProvider` is clearly marked deprecated in code.
 
 #### Dependencies
 
@@ -414,6 +415,15 @@ For `AssetTransaction`: verify the `Tx.Sender` signature over the asset transact
 
 Depends on Items 6 (blockHashInput must be stable before signing) and 7 (keys must be loaded).
 
+#### ✅ COMPLETE
+
+Implemented in `dBFT.go` and `blockchain.go`. All three steps delivered:
+- **Step A**: `createBlock` pre-computes chain-linking fields and `SetPayloadHash()` before consensus; `AchieveConsensus` collects real Ed25519 signatures from keyed delegates; `finalizeBlock` preserves pre-collected signatures when the PayloadHash is stable.
+- **Step B**: `DefaultVotingStrategy.Vote` extended to verify `AssetTransaction` sender signatures (skipped when `RequiredSigs == 0`).
+- **Step C**: `ValidateBlock` `len(delegate.PublicKey) == 0` bypass removed; keyless delegates now contribute 0 valid signatures.
+
+Covered by 8 acceptance tests in `dbft_signing_test.go`. Full race suite passes.
+
 ---
 
 ### Item 9 — dBFT: Distributed View-Change Protocol
@@ -446,13 +456,22 @@ Depends on Items 6 (blockHashInput must be stable before signing) and 7 (keys mu
 
 Depends on Item 19 (delegates need network connectivity to exchange view-change messages over P2P).
 
+#### ✅ COMPLETE
+
+- **Step A** (`network.go`): Added `ViewChangeReq MessageType = "view_change_request"` and `ViewChangeResp MessageType = "view_change_response"` constants. Added `ViewChangeRequest{View int, NodeID string, Reason string}` struct in `dBFT.go`.
+- **Step B** (`dBFT.go` — `createBlock`): When `AchieveConsensus` returns `false`, a `ViewChangeRequest` is sent to every delegate inbox via `ReceiveMessage`.
+- **Step C** (`dBFT.go` — `ProcessMessages`): New `case ViewChangeReq` accumulates requests per view; when `f+1 = (len(Delegates)-1)/3 + 1` are received for the same view, `bc.currentView` is advanced and `selectSpeaker` is re-run.
+- **Step D** (`dBFT.go` — `createBlock`): `AchieveConsensus` is wrapped in a retry loop limited to `len(bc.Delegates)` attempts. If all fail, `EventConsensusFailure` is emitted and the function returns without sealing.
+- **`blockchain.go`**: Added `EventConsensusFailure = "consensus_failure"` event constant.
+- **`dbft_viewchange_test.go`**: 8 new tests covering Steps A–D, all passing with `-race`.
+
 ---
 
-### Item 10 — dBFT: Persist Delegate Set and WalletSequences
+### Item 10 — dBFT: Persist Delegate Set and WalletSequences ✅
 
 **Gap IDs:** dBFT GAP-05, dBFT GAP-11
 **Severity:** High
-**Files:** `dBFT.go`, `persistence.go`, `blockchain.go`
+**Files:** `dBFT.go`, `persistence.go`, `blockchain.go`, `persistence_delegates_test.go`
 
 #### Root Cause
 
@@ -460,25 +479,29 @@ The active delegate set (`bc.Delegates`) is assembled in-memory during `VoteForD
 
 #### Fix
 
-**Step A:** In `BlockStore` (BBolt), create a second bucket `"delegates"`. After every successful `VoteForDelegates` result, serialise the active `[]Node` slice to JSON and write to key `"active"` in this bucket.
+**Step A:** Added `delegatesBucket = "delegates"` constant to `persistence.go`. `OpenBlockStore` now creates the `"delegates"` bucket alongside `"blocks"` and `"state"`. Added `persistedDelegate` helper struct (excludes `Inbox`, `VotingStrategy`, `Blockchain`, `viewChangeRequests` to avoid circular references and unserialised types). `SaveDelegates([]Node) error` serialises the set to JSON under key `"active"`. `LoadDelegates(*Blockchain) error` reads it back, re-initialises runtime fields (`Inbox`, `Blockchain`, `viewChangeRequests`), and assigns to `bc.Delegates`. In `VoteForDelegates` (`dBFT.go`), after `bc.Mu.Unlock()`, calls `bc.BlockStore.SaveDelegates(bc.Delegates)` when `BlockStore != nil`.
 
-**Step B:** In the startup replay sequence (Item 1, Step B), after replaying all blocks, read `"delegates"/"active"` from BBolt. If present, unmarshal and assign to `bc.Delegates`.
+**Step B:** In `NewBlockchain` (`blockchain.go`), after the block-replay / `catchUpBlock` loop, calls `store.LoadDelegates(bc)` to restore the saved delegate set.
 
-**Step C:** If after state replay `bc.Delegates` is still empty but staking/credential data exists, automatically call `VoteForDelegates` to re-elect from the reconstructed state.
+**Step C:** After `LoadDelegates`, if `len(bc.Delegates) == 0` and credential or asset state exists, calls `bc.VoteForDelegates(nil)` to attempt re-election from reconstructed in-memory state. This is a best-effort hook; it is a no-op until `LockedWallets` and `Nodes` are also persisted (future Item 11+ work).
 
-#### Acceptance Criteria
+**WalletSequences:** Already persisted via `SaveState` (called by `SealBlock`/`finalizeBlock`) and restored via `LoadState` + `catchUpBlock`. No additional changes required.
 
-- Seal a block, elect delegates, restart. The restarted node has `len(bc.Delegates) > 0` before receiving any new transactions.
-- `AchieveConsensus` after restart requires the same supermajority threshold as before restart.
-- `bc.WalletSequences` after restart reflects the highest observed nonce per sender across all replayed blocks.
+#### Acceptance Criteria — Verified
+
+- ✅ `TestNewBlockchain_LoadsDelegatesFromStore_OnStartup` — restarted node has `len(bc.Delegates) > 0` after `GREENHOUSE_DB_PATH` startup.
+- ✅ `TestVoteForDelegates_WithBlockStore_PersistsDelegates` — `VoteForDelegates` persists elected delegates to BBolt.
+- ✅ `TestWalletSequences_RestoredAfterRestart` — `bc.WalletSequences` reflects the highest nonce sealed before restart.
+- ✅ `TestWalletSequences_CatchUpFromBlocks_AfterMissingSnapshot` — `catchUpBlock` rebuilds sequences from raw block data when snapshot is absent.
+- ✅ 11 tests in `persistence_delegates_test.go`, all passing with `-race`.
 
 #### Dependencies
 
-Depends on Item 1 (BBolt must be wired first).
+Item 1 (BBolt wiring) was already in place in `NewBlockchain`. No additional dependencies.
 
 ---
 
-### Item 11 — ValidateBlock: Typed Transaction Verification
+### Item 11 — ValidateBlock: Typed Transaction Verification ✅ COMPLETE
 
 **Gap IDs:** dBFT GAP-04, dBFT GAP-13
 **Severity:** High
@@ -509,7 +532,7 @@ Depends on Item 13 (jurisdiction/suitability wiring must exist before `at.Valida
 
 ---
 
-### Item 12 — ResolveFork: Require BFT Supermajority Proof
+### Item 12 — ResolveFork: Require BFT Supermajority Proof ✅ COMPLETE (Option A)
 
 **Gap ID:** dBFT GAP-07
 **Severity:** Critical
@@ -543,7 +566,7 @@ Depends on Item 8 (delegate signatures must be real before they can be verified 
 
 ---
 
-### Item 13 — Wire AML, Suitability, and Jurisdiction into AssetTransaction.Validate
+### Item 13 — Wire AML, Suitability, and Jurisdiction into AssetTransaction.Validate ✅ COMPLETE
 
 **Gap IDs:** GAP-KYC-02, GAP-REG-01, GAP-REG-02, GAP-AML-03
 **Severity:** High
@@ -586,7 +609,7 @@ None, but must be completed before Item 11 (which calls `at.Validate(bc)` from `
 
 ---
 
-### Item 14 — Wire NCAReportingService into SealBlock
+### Item 14 — Wire NCAReportingService into SealBlock ✅ COMPLETE
 
 **Gap ID:** GAP-REG-04
 **Severity:** High
@@ -616,7 +639,7 @@ Depends on Item 1 (BBolt must be wired for the outbox).
 
 ---
 
-### Item 15 — Fix PEP Rescreening: Mutex Safety and Context
+### Item 15 — Fix PEP Rescreening: Mutex Safety and Context ✅ COMPLETE
 
 **Gap IDs:** GAP-AML-02, GAP-REG-07
 **Severity:** High
@@ -666,7 +689,7 @@ None.
 
 ---
 
-### Item 16 — STOR Auto-Creation in applyBlockState
+### Item 16 — STOR Auto-Creation in applyBlockState ✅ COMPLETE
 
 **Gap ID:** GAP-AML-04
 **Severity:** High
@@ -700,7 +723,7 @@ Depends on Item 6 (block timestamps are needed to implement the 30-day rolling w
 
 ---
 
-### Item 17 — P2P: Disable DHT Discovery in Production
+### Item 17 — P2P: Disable DHT Discovery in Production ✅ COMPLETE
 
 **Gap IDs:** P2P GAP-04, P2P GAP-05
 **Severity:** High
@@ -730,7 +753,7 @@ Depends on Item 4 (static peer manifest must replace DHT before DHT is disabled)
 
 ---
 
-### Item 18 — P2P: Connection Manager and GossipSub Tuning
+### Item 18 — P2P: Connection Manager and GossipSub Tuning ✅ COMPLETE
 
 **Gap IDs:** P2P GAP-07, P2P GAP-11, P2P GAP-12
 **Severity:** High
@@ -771,7 +794,7 @@ None.
 
 ---
 
-### Item 19 — P2P: Peer Reconnect and Full-Mesh Delegates
+### Item 19 — P2P: Peer Reconnect and Full-Mesh Delegates ✅ COMPLETE
 
 **Gap IDs:** P2P GAP-08, P2P GAP-09
 **Severity:** High
@@ -811,7 +834,7 @@ Depends on Item 9 (view-change messages need the consensus topic established in 
 
 ---
 
-### Item 20 — Explicit TLS/Noise Transport Enforcement
+### Item 20 — Explicit TLS/Noise Transport Enforcement ✅ COMPLETE
 
 **Gap ID:** P2P GAP-13
 **Severity:** Medium
@@ -1318,3 +1341,69 @@ The current baseline is `ok gonetwork 169.296s` with zero failures and zero race
 ---
 
 *End of document. For the gap audit reports that informed this plan, see the session research artefacts dated May 2026.*
+
+---
+
+## The GreenHouse DLT Engine — Genuine Weaknesses
+
+The following weaknesses are inherent to the architecture rather than implementation gaps. They are documented here so that engineering, legal, and compliance teams have a clear-eyed picture of the trade-offs before regulatory submission.
+
+---
+
+### W-1 — Small, Well-Known Validator Set
+
+dBFT operates with 4–21 validators. With a small set, each validator is a higher-value target for attack or regulatory compulsion than an anonymous miner in a large public network. An adversary — including a regulator in a hostile jurisdiction — that can compromise or legally compel $\lfloor(n-1)/3\rfloor + 1$ validators can halt the network or produce a conflicting fork.
+
+This is the fundamental trade-off of permissioned BFT: you gain deterministic finality and regulatory compliance at the cost of the censorship-resistance that proof-of-work provides through its anonymous, globally distributed miner set.
+
+**Mitigations in scope:** Validator nodes should be operated across at least three independent legal jurisdictions so that no single regulatory authority can compel a blocking coalition. Key material must be held in HSMs (Vault or GCP KMS) so physical seizure of hardware does not yield signing keys.
+
+---
+
+### W-2 — Single-Region BBolt Is a Single Point of Failure
+
+The persistence layer is a single local BBolt file per node. There is no built-in replication, no multi-region failover, and no RAFT-backed distributed store. Loss or corruption of the BBolt file on all running nodes simultaneously would destroy the authoritative chain history.
+
+Item 25 (BBolt hot-backup) and the `BCP.md` runbook (Item 29) address the operational risk, but a file-copy backup is materially weaker than a continuously replicated distributed database. This limitation is acknowledged in the plan's exclusions: multi-region BBolt replication requires a distributed storage layer (etcd, TiKV) that is out of scope for the current single-operator architecture.
+
+**DORA relevance:** RTO/RPO targets in `BCP.md` must account for the time to restore a BBolt snapshot from backup. This should be measured and documented before the first production liquidity window.
+
+---
+
+### W-3 — No Smart-Contract Expressiveness
+
+Asset and compliance logic is hard-coded Go. Adding a new instrument type — for example, a convertible note with an automatic equity conversion trigger at a pre-agreed valuation — requires a Go code change and a coordinated redeployment across all validator nodes. There is no mechanism to deploy new instrument logic without an engineering release cycle.
+
+This is a deliberate trade-off: hard-coded, auditable Go is simpler to present to a regulator than an upgradeable Solidity contract, and it eliminates the class of vulnerabilities (reentrancy, delegatecall hijacking, storage collision) that have caused billions in losses on EVM chains. However, it limits the platform's ability to support novel instrument structures without software releases.
+
+**Long-term mitigation:** A Lua or Starlark embedded scripting engine for instrument-specific logic (similar to Hyperledger Fabric chaincode) could be added in a future major version without changing the consensus or P2P layers.
+
+---
+
+### W-4 — View-Change Is O(n²) Messages
+
+Once Item 9 is implemented, a Byzantine or unresponsive speaker triggers $O(n^2)$ view-change messages before the next speaker is elected and consensus resumes. For a 21-delegate network this produces at most 441 messages per failed round — manageable on a low-latency validator LAN. However, it sets a practical ceiling on validator count and means that a network with a persistently faulty speaker will experience noticeable latency spikes.
+
+This is acceptable for a private placement platform, which rarely needs more than 15–21 validators. It would not scale to a public permissionless network.
+
+**Mitigations in scope:** Item 18's GossipSub tuning (FloodPublish, reduced heartbeat interval) minimises propagation latency during view-change. Item 23's inbox capacity increase ensures view-change messages are not silently dropped.
+
+---
+
+### W-5 — Key Management Is Operationally Complex
+
+The security model requires every validator node to hold a live Ed25519 signing key (via Vault Transit or an encrypted key file), the network registry operator to sign every new peer admission into `peers.json`, and the identity registry to sign every KYC credential attestation. This creates three separate key hierarchies, each of which must be managed, rotated, and backed up independently.
+
+If the network registry operator's key is lost or compromised, the entire `AllowlistGater` access-control system must be rekeyed: a new registry key must be distributed to all validators, all existing `peers.json` entries must be re-signed, and all nodes must be restarted. Post-Items 7 and 28, the key rotation path exists technically, but it requires coordinated downtime across the full validator set.
+
+**Mitigations in scope:** `cmd/README.md` documents the rotation procedure. The production guard (Item 2) enforces that no node starts in production without a configured key provider, preventing accidental keyless deployments.
+
+---
+
+### W-6 — Compliance Rules Are Hard-Coded and Jurisdiction-Specific
+
+`JurisdictionRule` structs for GB, DE, LU, FR, and NL are seeded at node startup in `NewBlockchain`. When MiCA Level 2 implementing regulations change, when the FCA updates UK financial promotion rules, or when a new target market (e.g. Singapore MAS, UAE FSRA) is added, the Go source code must be updated and all validator nodes redeployed.
+
+There is no live feed from a regulatory rulebook API. Rules that are accurate today may become stale as implementing regulations evolve under MiCA (fully applicable from December 2024, with ongoing RTS/ITS being published through 2026).
+
+**Long-term mitigation:** An off-chain compliance oracle pattern — where jurisdiction rules are fetched from a version-controlled regulatory configuration service at startup — would allow rule updates without a full code release. This is out of scope for the current implementation but should be considered before expanding to more than five target jurisdictions.

@@ -153,13 +153,13 @@ func TestAMLScreener_WiredIntoValidate_BlocksTransfer(t *testing.T) {
 	require.NoError(t, err)
 
 	// Without screener — must pass.
-	require.NoError(t, at.Validate(assets, holdings, nil, nil))
+	require.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 
 	// Block sender and pass screener — must fail.
 	screener := NewMockAMLScreener()
 	screener.BlockAddress(senderKey, "TEST_LIST")
 
-	err = at.Validate(assets, holdings, nil, nil, screener)
+	err = at.Validate(nil, assets, holdings, nil, nil, screener)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "blocked by AML screening")
 }
@@ -182,7 +182,7 @@ func TestAMLScreener_WiredIntoValidate_AllowsClean(t *testing.T) {
 	require.NoError(t, err)
 
 	screener := NewMockAMLScreener() // no blocked addresses
-	assert.NoError(t, at.Validate(assets, holdings, nil, nil, screener))
+	assert.NoError(t, at.Validate(nil, assets, holdings, nil, nil, screener))
 }
 
 // TestAMLScreener_WiredIntoValidate_FlagDoesNotBlock verifies that a flag-severity
@@ -206,7 +206,7 @@ func TestAMLScreener_WiredIntoValidate_FlagDoesNotBlock(t *testing.T) {
 	screener.FlagAddress(senderKey, "PEP") // flagged but not blocked
 
 	// Must pass Validate (flag does not block).
-	assert.NoError(t, at.Validate(assets, holdings, nil, nil, screener))
+	assert.NoError(t, at.Validate(nil, assets, holdings, nil, nil, screener))
 	// Screener must have recorded the call.
 	assert.Len(t, screener.Calls, 1)
 }

@@ -31,6 +31,10 @@ type NCAReportingService struct {
 	endpoint   string
 	apiKey     string
 	httpClient *http.Client
+	// outbox is called with the report when NCA/ARM submission fails so the
+	// report is persisted for later retry by runReportingOutboxRetry. When
+	// nil the failure is logged but not persisted (legacy / test behaviour).
+	outbox func(*RegulatoryReport) error
 }
 
 // NewNCAReportingService creates an NCAReportingService using env-var configuration.
@@ -47,8 +51,9 @@ func NewNCAReportingService() *NCAReportingService {
 
 // GenerateReport implements ReportingService.  It generates the report via the
 // inner DefaultReportingService and — when an endpoint is configured — submits
-// the report to the NCA/ARM over HTTPS.  If submission fails the error is
-// logged but the report is still returned so on-chain storage succeeds.
+// the report to the NCA/ARM over HTTPS.  If submission fails and an outbox
+// writer is set, the report is persisted for retry; otherwise the error is
+// logged. The report is always returned so on-chain storage succeeds.
 func (s *NCAReportingService) GenerateReport(
 	reportType ReportType,
 	trade Trade,
@@ -61,11 +66,26 @@ func (s *NCAReportingService) GenerateReport(
 	}
 	if s.endpoint != "" {
 		if submitErr := s.submitToNCA(report); submitErr != nil {
-			// Non-fatal: log and continue — on-chain record is authoritative.
-			fmt.Printf("NCAReportingService: submission warning for report %s: %v\n", report.ID, submitErr)
+			if s.outbox != nil {
+				if outboxErr := s.outbox(report); outboxErr != nil {
+					fmt.Printf("NCAReportingService: outbox write failed for report %s: %v\n", report.ID, outboxErr)
+				}
+			} else {
+				// Non-fatal: log and continue — on-chain record is authoritative.
+				fmt.Printf("NCAReportingService: submission warning for report %s: %v\n", report.ID, submitErr)
+			}
 		}
 	}
 	return report, nil
+}
+
+// SubmitReport sends report to the configured NCA/ARM endpoint.
+// Returns nil immediately when no endpoint is configured (stub mode).
+func (s *NCAReportingService) SubmitReport(report *RegulatoryReport) error {
+	if s.endpoint == "" {
+		return nil
+	}
+	return s.submitToNCA(report)
 }
 
 // submitToNCA POSTs a single RegulatoryReport to the configured NCA/ARM endpoint.

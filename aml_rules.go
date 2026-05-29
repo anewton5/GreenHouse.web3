@@ -1,6 +1,7 @@
 package gonetwork
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -305,23 +306,48 @@ func tmRule06CrossBorderLargeTransfer() AMLRule {
 //
 // JMLSG 3.4.5 requires ongoing periodic re-screening; a 24-hour interval is
 // the recommended production setting.  Use a shorter interval only in tests.
-func StartPEPRescreeningScheduler(bc *Blockchain, interval time.Duration) {
+//
+// The goroutine stops cleanly when ctx is cancelled, enabling graceful shutdown
+// without goroutine leaks.
+func StartPEPRescreeningScheduler(ctx context.Context, bc *Blockchain, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			rescreenAllWallets(bc)
+		for {
+			select {
+			case <-ticker.C:
+				rescreenAllWallets(bc)
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 }
 
 // rescreenAllWallets is the single-pass re-screening function called by the scheduler.
+//
+// Lock discipline:
+//   - Wallet keys and the AML screener reference are captured under bc.Mu.RLock(),
+//     which is released immediately after the snapshot. This keeps the read-lock
+//     window to microseconds regardless of wallet count.
+//   - The potentially long-running ScreenTransaction call (network I/O with a
+//     10-second HTTP timeout per call) is executed WITHOUT holding any lock, so
+//     SealBlock, order matching, and credential operations are never stalled.
+//   - Each SAR write acquires bc.Mu.Lock() only for the duration of the map
+//     update + event emission, then releases immediately.
 func rescreenAllWallets(bc *Blockchain) {
-	bc.Mu.Lock()
-	defer bc.Mu.Unlock()
-	for walletKey := range bc.Credentials {
-		// Use a zero-amount self-transfer as a PEP/sanctions name-check trigger.
-		alert, err := bc.AMLScreener.ScreenTransaction(walletKey, walletKey, "", 0, "")
+	// Snapshot wallet keys and screener under RLock so we never stall writers.
+	bc.Mu.RLock()
+	wallets := make([]string, 0, len(bc.Credentials))
+	for k := range bc.Credentials {
+		wallets = append(wallets, k)
+	}
+	screener := bc.AMLScreener
+	bc.Mu.RUnlock()
+
+	// Screen each wallet WITHOUT holding the lock.
+	for _, walletKey := range wallets {
+		alert, err := screener.ScreenTransaction(walletKey, walletKey, "", 0, "")
 		if err != nil || alert == nil {
 			continue
 		}
@@ -329,25 +355,26 @@ func rescreenAllWallets(bc *Blockchain) {
 			continue
 		}
 		sarID := generateID("SAR")
-		if _, exists := bc.PendingSARs[sarID]; exists {
-			continue // extremely unlikely collision; skip
+		bc.Mu.Lock()
+		if _, exists := bc.PendingSARs[sarID]; !exists {
+			bc.PendingSARs[sarID] = &SARDraft{
+				ID:          sarID,
+				SenderKey:   walletKey,
+				ReceiverKey: walletKey,
+				AssetID:     "",
+				Reason:      "PEP/sanctions periodic re-screening alert: " + alert.Reason,
+				MatchedList: alert.MatchedList,
+				CreatedAt:   time.Now().Unix(),
+				Status:      SARStatusPending,
+			}
+			bc.emitEvent(EventSARCreated, map[string]any{
+				"sar_id":       sarID,
+				"wallet_key":   walletKey,
+				"matched_list": alert.MatchedList,
+				"source":       "pep_rescreening",
+			})
 		}
-		bc.PendingSARs[sarID] = &SARDraft{
-			ID:          sarID,
-			SenderKey:   walletKey,
-			ReceiverKey: walletKey,
-			AssetID:     "",
-			Reason:      "PEP/sanctions periodic re-screening alert: " + alert.Reason,
-			MatchedList: alert.MatchedList,
-			CreatedAt:   time.Now().Unix(),
-			Status:      SARStatusPending,
-		}
-		bc.emitEvent(EventSARCreated, map[string]any{
-			"sar_id":       sarID,
-			"wallet_key":   walletKey,
-			"matched_list": alert.MatchedList,
-			"source":       "pep_rescreening",
-		})
+		bc.Mu.Unlock()
 	}
 }
 

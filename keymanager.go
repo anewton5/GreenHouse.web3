@@ -73,6 +73,12 @@ func (p *LocalKeyProvider) Verify(msg, sig []byte) bool {
 
 // KMSKeyProvider is a production stub for managed key storage and signing.
 //
+// Deprecated: AWS KMS does not support raw Ed25519 signing. Use VaultKeyProvider
+// (HashiCorp Vault Transit / Google Cloud KMS with EC_SIGN_ED25519) or
+// NewLocalKeyProviderFromEncryptedFile for file-based key storage instead.
+// This type is retained to avoid breaking existing configurations; its Sign
+// method always returns an error rather than silently producing a nil signature.
+//
 // AWS KMS does NOT support Ed25519. If you choose AWS, you must migrate the
 // signing scheme to ECDSA P-256 throughout the codebase — a significant change.
 //
@@ -337,4 +343,36 @@ func (v *VaultKeyProvider) fetchPublicKey() (string, error) {
 func VerifySignatureBytes(pub *PublicKey, msg, sig []byte) bool {
 	s := &Signature{value: sig}
 	return s.Verify(pub, msg)
+}
+
+// NewLocalKeyProviderFromEncryptedFile reads an AES-256-GCM encrypted Ed25519
+// private key from path and returns a LocalKeyProvider ready for signing.
+// The file must contain the output of EncryptPrivateKey — a "v2:"-prefixed
+// hex string produced by the Argon2id + AES-256-GCM scheme in keys.go.
+//
+// Typical operator workflow:
+//
+//	// One-time: encrypt and persist the key
+//	encrypted, err := gonetwork.EncryptPrivateKey(privKey.Bytes(), passphrase)
+//	os.WriteFile("/etc/greenhouse/operator.key", []byte(encrypted), 0600)
+//
+//	// At node startup:
+//	provider, err := gonetwork.NewLocalKeyProviderFromEncryptedFile(
+//	    "/etc/greenhouse/operator.key", os.Getenv("GH_OPERATOR_PASSPHRASE"))
+//	bc.OperatorKeyProvider = provider
+func NewLocalKeyProviderFromEncryptedFile(path, passphrase string) (*LocalKeyProvider, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("NewLocalKeyProviderFromEncryptedFile: cannot read %s: %w", path, err)
+	}
+	encryptedKey := strings.TrimSpace(string(data))
+	seed, err := DecryptPrivateKey(encryptedKey, passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("NewLocalKeyProviderFromEncryptedFile: decryption failed: %w", err)
+	}
+	privKey, err := NewPrivateKeyFromSeed(seed)
+	if err != nil {
+		return nil, fmt.Errorf("NewLocalKeyProviderFromEncryptedFile: invalid key seed (expected %d bytes): %w", seedLen, err)
+	}
+	return NewLocalKeyProvider(privKey), nil
 }

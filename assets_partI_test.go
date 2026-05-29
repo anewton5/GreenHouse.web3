@@ -118,7 +118,7 @@ func TestValidate_TamperedAssetRejected(t *testing.T) {
 	// The next Validate call must detect the signature mismatch.
 	at2, err := NewAssetTransaction(issuerKey, recipientKey.Public(), asset.ID, 100, AssetTxTypeIssue)
 	require.NoError(t, err)
-	err = at2.Validate(assets, holdings, nil, nil)
+	err = at2.Validate(nil, assets, holdings, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tampered")
 }
@@ -132,7 +132,7 @@ func TestValidate_IntactSignatureAllowed(t *testing.T) {
 	at, err := NewAssetTransaction(issuerKey, recipientKey.Public(), asset.ID, 100, AssetTxTypeIssue)
 	require.NoError(t, err)
 	// A valid, unmodified asset must not be rejected by the signature check.
-	assert.NoError(t, at.Validate(assets, holdings, nil, nil))
+	assert.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 }
 
 func TestValidate_AssetWithoutSignatureIsAllowed(t *testing.T) {
@@ -159,7 +159,7 @@ func TestValidate_AssetWithoutSignatureIsAllowed(t *testing.T) {
 	recipientKey, _ := makeTestWallet(t)
 	at, err := NewAssetTransaction(key, recipientKey.Public(), asset.ID, 50_000, AssetTxTypeIssue)
 	require.NoError(t, err)
-	assert.NoError(t, at.Validate(assets, holdings, nil, nil))
+	assert.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ func TestIssue_ParticipationNoteBlockedWithoutCountersig(t *testing.T) {
 	recipientKey, _ := makeTestWallet(t)
 	at, err := NewAssetTransaction(issuerKey, recipientKey.Public(), asset.ID, 100, AssetTxTypeIssue)
 	require.NoError(t, err)
-	err = at.Validate(assets, holdings, nil, nil)
+	err = at.Validate(nil, assets, holdings, nil, nil)
 	require.Error(t, err, "issue to new holder should fail because CirculatingSupply is 0")
 }
 
@@ -272,7 +272,7 @@ func TestIssue_ParticipationNoteReleasedAfterCountersig(t *testing.T) {
 	recipientKey, _ := makeTestWallet(t)
 	at, err := NewAssetTransaction(issuerKey, recipientKey.Public(), asset.ID, 1_000, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	require.NoError(t, at.Validate(assets, holdings, nil, nil))
+	require.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 	require.NoError(t, ApplyAssetTransaction(at, assets, holdings))
 
 	assert.Equal(t, float64(1_000), holdings[HoldingKey(base64.StdEncoding.EncodeToString(recipientKey.Public().Bytes()), asset.ID)].Balance)

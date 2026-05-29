@@ -341,27 +341,38 @@ func transactionPoolLength(bc *Blockchain) int {
 // ResolveFork
 // ---------------------------------------------------------------------------
 
-func TestResolveFork_LongerChainWins(t *testing.T) {
+// Item 12: ResolveFork is removed. HandleFork must not replace the local chain
+// regardless of peer chain length — dBFT provides single-path finality.
+func TestHandleFork_LongerPeerChain_LocalChainUnchanged(t *testing.T) {
 	bc1 := newTestBlockchain(t)
 	bc2 := newTestBlockchain(t)
 
-	// Add 2 extra blocks to bc2
+	// Give bc2 a longer chain.
 	bc2.AddBlock(Block{Transactions: []Transaction{{Sender: "A", Receiver: "B", Amount: 1}}})
 	bc2.AddBlock(Block{Transactions: []Transaction{{Sender: "C", Receiver: "D", Amount: 2}}})
 
-	resolved := bc1.ResolveFork(bc2.Blocks)
-	assert.True(t, resolved, "longer chain should win")
-	assert.Equal(t, len(bc2.Blocks), len(bc1.Blocks))
+	want := len(bc1.Blocks)
+	n1 := &Node{ID: "n1", Blockchain: bc1}
+	n2 := &Node{ID: "n2", Blockchain: bc2}
+	n1.HandleFork(n2)
+
+	assert.Equal(t, want, len(n1.Blockchain.Blocks),
+		"HandleFork must not replace local chain: dBFT single-path finality")
 }
 
-func TestResolveFork_ShorterChainIgnored(t *testing.T) {
+func TestHandleFork_ShorterPeerChain_LocalChainUnchanged(t *testing.T) {
 	bc := newTestBlockchain(t)
 	bc.AddBlock(Block{Transactions: []Transaction{{Sender: "A", Receiver: "B", Amount: 1}}})
 	bc.AddBlock(Block{Transactions: []Transaction{{Sender: "A", Receiver: "B", Amount: 2}}})
 
-	shorter := []Block{bc.Blocks[0]} // just genesis
-	resolved := bc.ResolveFork(shorter)
-	assert.False(t, resolved, "shorter or equal chain must not replace longer chain")
+	shortBC := newTestBlockchain(t) // only genesis
+	want := len(bc.Blocks)
+	n := &Node{ID: "local", Blockchain: bc}
+	peer := &Node{ID: "peer", Blockchain: shortBC}
+	n.HandleFork(peer)
+
+	assert.Equal(t, want, len(n.Blockchain.Blocks),
+		"HandleFork must not modify local chain when peer is shorter")
 }
 
 // ---------------------------------------------------------------------------

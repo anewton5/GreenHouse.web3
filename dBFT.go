@@ -4,19 +4,33 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"golang.org/x/crypto/sha3"
 )
+
+// ViewChangeRequest is sent by a delegate when its AchieveConsensus round fails,
+// requesting all peers to advance to a new view and elect a fresh speaker.
+// Item 9 Step A.
+type ViewChangeRequest struct {
+	View   int    `json:"view"`    // proposed new view number
+	NodeID string `json:"node_id"` // ID of the requesting node
+	Reason string `json:"reason"`  // human-readable reason, e.g. "timeout"
+}
 
 // Simplified Node structure
 type Node struct {
 	ID             string
+	P2PPeerID      string
 	IsDelegate     bool
 	Stake          int
 	Votes          int
@@ -25,6 +39,10 @@ type Node struct {
 	Inbox          chan Message `json:"-"`
 	VotingStrategy VotingStrategy
 	Blockchain     *Blockchain
+	// viewChangeRequests accumulates incoming view-change request counts, keyed by
+	// proposed view number. Accessed only inside ProcessMessages (a single goroutine)
+	// so no separate mutex is required.
+	viewChangeRequests map[int]int
 }
 
 // VoteForDelegates selects delegates based on staked currency
@@ -56,6 +74,13 @@ func (bc *Blockchain) VoteForDelegates(p2pNode *P2PNode) {
 		}
 	}
 	bc.Mu.Unlock()
+
+	// Persist the elected delegate set so it survives a node restart (Item 10).
+	if bc.BlockStore != nil {
+		if err := bc.BlockStore.SaveDelegates(bc.Delegates); err != nil {
+			log.Printf("VoteForDelegates: SaveDelegates: %v", err)
+		}
+	}
 
 	// Log the elected delegates
 	for _, delegate := range bc.Delegates {
@@ -99,6 +124,7 @@ func (bc *Blockchain) RegisterDelegateVote(userID, delegateID string) {
 func (bc *Blockchain) startConsensus(p2pNode *P2PNode) {
 	bc.currentView = View{Number: 0}
 	bc.selectSpeaker()
+	bc.assertDelegateConnectivity(p2pNode)
 
 	// Snapshot the transaction pool under the read lock so the block content
 	// is consistent and no concurrent AddTransaction call races on the slice.
@@ -166,6 +192,38 @@ func (d *DefaultVotingStrategy) Vote(block Block) bool {
 			return false
 		}
 	}
+	// Item 8 Step B: verify AssetTransaction sender signatures.
+	// AssetTransactions with RequiredSigs == 0 are internal/legacy entries
+	// (e.g. genesis issuances) that do not carry end-user signatures; skip them.
+	for _, at := range block.AssetTransactions {
+		if at.Tx.RequiredSigs == 0 {
+			continue
+		}
+		pubKey, err := PublicKeyFromString(at.Tx.Sender)
+		if err != nil {
+			return false
+		}
+		if !at.Tx.VerifyMultiSignature([]*PublicKey{pubKey}) {
+			return false
+		}
+	}
+	// Item 11: verify OrderTransaction order signatures.
+	// Cancellations carry only a base Tx.Sender signature; new placements must
+	// also have a valid Ed25519 signature over the order fields from the placer.
+	// CredentialTransaction registry-signature verification requires access to
+	// bc.IdentityRegistry and is handled in ValidateBlock (Item 11 Step C).
+	for _, ot := range block.OrderTransactions {
+		if ot.IsCancellation {
+			continue
+		}
+		placerPub, err := PublicKeyFromString(ot.Order.PlacedBy)
+		if err != nil {
+			return false
+		}
+		if !ot.Order.VerifySignature(placerPub) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -180,7 +238,9 @@ func (bc *Blockchain) selectSpeaker() {
 }
 
 // AchieveConsensus collects votes from all delegates and finalises the block
-// if a BFT supermajority (⌈2n/3⌉) approves it.
+// if a BFT supermajority (⌈2n/3⌉) approves it. Delegates with a PrivateKey
+// that vote yes also sign block.PayloadHash with Ed25519; those signatures are
+// collected and stored on the block before it is finalised (Item 8 Step A).
 //
 // M-2: if bc.ConsensusTimeout > 0 the entire vote round is bounded by that
 // duration; a timeout triggers a view-change and returns false.
@@ -190,7 +250,10 @@ func (bc *Blockchain) AchieveConsensus(block Block) bool {
 		return false
 	}
 
-	type voteResult struct{ yes bool }
+	type voteResult struct {
+		yes bool
+		sig []byte // non-nil when delegate voted yes and holds a PrivateKey
+	}
 	ch := make(chan voteResult, len(bc.Delegates))
 
 	// voteCtx is cancelled when AchieveConsensus returns (via defer voteCancel).
@@ -202,9 +265,19 @@ func (bc *Blockchain) AchieveConsensus(block Block) bool {
 	for _, delegate := range bc.Delegates {
 		d := delegate // capture loop variable
 		go func() {
-			result := d.VoteOnBlock(block) // may block; cannot be interrupted
+			voted := d.VoteOnBlock(block) // may block; cannot be interrupted
+			var sig []byte
+			// Item 8 Step A: if the delegate approved the block and holds an
+			// Ed25519 private key, sign the PayloadHash bytes so the block
+			// carries a real cryptographic proof of approval.
+			if voted && len(d.PrivateKey) > 0 && block.PayloadHash != "" {
+				hashBytes, err := hex.DecodeString(block.PayloadHash)
+				if err == nil {
+					sig = ed25519.Sign(d.PrivateKey, hashBytes)
+				}
+			}
 			select {
-			case ch <- voteResult{yes: result}:
+			case ch <- voteResult{yes: voted, sig: sig}:
 			case <-voteCtx.Done(): // consensus already returned; discard result
 			}
 		}()
@@ -219,12 +292,16 @@ func (bc *Blockchain) AchieveConsensus(block Block) bool {
 	yesVotes := 0
 	noVotes := 0
 	consensusThreshold := int(math.Ceil(float64(2*len(bc.Delegates)) / 3.0))
+	var collectedSigs [][]byte
 
 	for collected := 0; collected < len(bc.Delegates); collected++ {
 		select {
 		case v := <-ch:
 			if v.yes {
 				yesVotes++
+				if v.sig != nil {
+					collectedSigs = append(collectedSigs, v.sig)
+				}
 			} else {
 				noVotes++
 			}
@@ -236,6 +313,7 @@ func (bc *Blockchain) AchieveConsensus(block Block) bool {
 
 	if yesVotes >= consensusThreshold {
 		fmt.Printf("Consensus achieved with %d yes votes out of %d\n", yesVotes, len(bc.Delegates))
+		block.Signatures = collectedSigs
 		bc.finalizeBlock(block)
 		return true
 	}
@@ -332,13 +410,24 @@ func (n *Node) VoteOnBlock(block Block) bool {
 // finalizeBlock appends a consensus-approved block to the chain and applies its
 // state transitions. It is always called from AchieveConsensus after reaching
 // the BFT supermajority threshold.
+//
+// Item 8: if createBlock pre-computed the chain-linking fields and called
+// SetPayloadHash before delegates signed, the PayloadHash produced here will
+// match the pre-computed one and the delegate signatures are preserved.
+// If a concurrent chain modification invalidated the pre-computed hash (should
+// not occur in normal single-speaker dBFT), the signatures are discarded.
 func (bc *Blockchain) finalizeBlock(block Block) {
 	bc.Mu.Lock()
 	defer bc.Mu.Unlock()
 
-	// Set chain-linking fields and append. Do not use AddBlock here because
-	// the block's signatures were collected before appending; we only need to
-	// stamp its Index and chain reference.
+	// Snapshot the pre-computed values so we can detect whether chain state
+	// changed between createBlock's proposal and this finalization.
+	precomputedPayloadHash := block.PayloadHash
+	precomputedSignatures := block.Signatures
+
+	// Set chain-linking fields. When createBlock pre-computes these under an
+	// RLock snapshot, the values will match what we derive here from the live
+	// chain state, making SetPayloadHash() produce the same hash both times.
 	block.Index = len(bc.Blocks)
 	block.Nonce = bc.Nonce
 	if len(bc.Blocks) > 0 {
@@ -347,6 +436,18 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 		block.PrevHash = strings.Repeat("0", 64)
 	}
 	block.SetPayloadHash()
+
+	// Restore pre-collected delegate signatures if the PayloadHash is still
+	// valid. If the hash changed (concurrent insertion — should not occur in
+	// normal operation), discard the signatures and log a warning.
+	if precomputedPayloadHash != "" {
+		if block.PayloadHash == precomputedPayloadHash {
+			block.Signatures = precomputedSignatures
+		} else {
+			log.Printf("finalizeBlock: PayloadHash changed during finalization — pre-collected delegate signatures discarded")
+			block.Signatures = nil
+		}
+	}
 
 	bc.Blocks = append(bc.Blocks, block)
 	bc.Nonce++
@@ -359,10 +460,19 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 
 	// Apply all transaction state (order matching, DVP, prospectus counts, etc.)
 	bc.applyBlockState(&bc.Blocks[len(bc.Blocks)-1])
+
+	// C-4: persist state snapshot so chain state survives restarts.
+	if bc.BlockStore != nil {
+		idx := len(bc.Blocks) - 1
+		if err := bc.BlockStore.SaveState(bc, idx); err != nil {
+			log.Printf("finalizeBlock: state snapshot failed: %v", err)
+		}
+	}
 }
 
 // createBlock proposes a new block from the current transaction pool,
-// collects delegate signatures, and attempts consensus.
+// pre-computes all chain-linking fields and PayloadHash, then collects real
+// Ed25519 delegate signatures via AchieveConsensus (Item 8 Step A).
 func (bc *Blockchain) createBlock(p2pNode *P2PNode) {
 	if len(bc.Delegates) == 0 {
 		fmt.Println("No delegates available to create a block.")
@@ -382,26 +492,83 @@ func (bc *Blockchain) createBlock(p2pNode *P2PNode) {
 	bc.TransactionPool = collectedTransactions
 	bc.ValidateTransactionsInParallel()
 
-	// Collect placeholder signatures (real Ed25519 signing added in Step 11).
-	signatures := [][]byte{}
-	for _, delegate := range bc.Delegates {
-		signatures = append(signatures, []byte(delegate.ID))
+	// Snapshot chain-linking fields under a read-lock so the PayloadHash is
+	// stable before delegates sign. finalizeBlock will derive the same values
+	// (assuming no concurrent block insertion, which cannot happen in normal
+	// single-speaker dBFT) and therefore produce an identical PayloadHash,
+	// preserving the pre-collected signatures.
+	bc.Mu.RLock()
+	nextIndex := len(bc.Blocks)
+	nextNonce := bc.Nonce
+	var prevHash string
+	if len(bc.Blocks) > 0 {
+		prevHash = bc.Blocks[len(bc.Blocks)-1].CalculateHash()
+	} else {
+		prevHash = strings.Repeat("0", 64)
 	}
+	bc.Mu.RUnlock()
 
 	block := Block{
+		Index:        nextIndex,
+		Nonce:        nextNonce,
+		PrevHash:     prevHash,
 		Transactions: bc.TransactionPool,
-		Signatures:   signatures,
+		SealedAt:     time.Now().UnixMicro(),
 	}
-	if bc.AchieveConsensus(block) {
-		// finalizeBlock appended the block; clear the shard pools.
-		for _, shard := range bc.Shards {
-			shard.TransactionPool = []Transaction{}
+	if bc.OperatorKeyProvider != nil {
+		block.KeyVersion = bc.OperatorKeyProvider.PublicKeyString()
+	}
+	// Compute a stable PayloadHash before delegates sign. AchieveConsensus
+	// will have each approving delegate sign this hash with their Ed25519 key.
+	block.SetPayloadHash()
+
+	// Item 9 Step D: retry consensus across all possible speakers before
+	// giving up. Each failed attempt triggers a view-change (Step B) so that
+	// nodes running ProcessMessages can track the advancing view number.
+	maxAttempts := len(bc.Delegates)
+	sealed := false
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		bc.selectSpeaker()
+
+		if bc.AchieveConsensus(block) {
+			// finalizeBlock appended the block; clear the shard pools.
+			for _, shard := range bc.Shards {
+				shard.TransactionPool = []Transaction{}
+			}
+			fmt.Printf("Block %d created with %d delegate signature(s)\n",
+				len(bc.Blocks)-1, len(bc.Blocks[len(bc.Blocks)-1].Signatures))
+			sealed = true
+			break
 		}
-		fmt.Printf("Block %d created with signatures: %v\n", len(bc.Blocks)-1, signatures)
-	} else {
-		fmt.Println("Failed to achieve consensus. Block not added.")
+
+		// Item 9 Step B: broadcast a ViewChangeRequest to all delegate inboxes
+		// so that nodes running ProcessMessages can advance their own view state.
+		speakerID := bc.Delegates[bc.currentSpeaker].ID
+		nextView := bc.currentView.Number + 1
+		vcReq := ViewChangeRequest{
+			View:   nextView,
+			NodeID: speakerID,
+			Reason: "timeout",
+		}
+		for i := range bc.Delegates {
+			bc.Delegates[i].ReceiveMessage(Message{
+				From:    speakerID,
+				Type:    ViewChangeReq,
+				Payload: vcReq,
+			})
+		}
+		bc.currentView = View{Number: nextView}
 	}
 
+	if !sealed {
+		fmt.Println("Failed to achieve consensus after all view attempts. Block not added.")
+		bc.emitEvent(EventConsensusFailure, map[string]any{
+			"attempts": maxAttempts,
+			"view":     bc.currentView.Number,
+		})
+	}
+
+	// Advance to the next view for the following block round.
 	bc.currentView = View{Number: bc.currentView.Number + 1}
 	bc.selectSpeaker()
 }
@@ -409,9 +576,10 @@ func (bc *Blockchain) createBlock(p2pNode *P2PNode) {
 // NewNode creates a new node
 func NewNode(id string, blockchain *Blockchain) *Node {
 	return &Node{
-		ID:         id,
-		Inbox:      make(chan Message, 10), // Buffered channel for messages
-		Blockchain: blockchain,             // Initialize the blockchain reference
+		ID:                 id,
+		Inbox:              make(chan Message, 10), // Buffered channel for messages
+		Blockchain:         blockchain,             // Initialize the blockchain reference
+		viewChangeRequests: make(map[int]int),
 	}
 }
 
@@ -439,19 +607,34 @@ func (n *Node) PeriodicStateSaving(ctx context.Context, filename string) {
 	}()
 }
 
+// HandleFork is a no-op under dBFT (Item 12). dBFT provides single-path
+// irreversible finality: once ⌈2n/3⌉ delegates have signed a block it
+// cannot be replaced. A peer presenting a longer chain is either
+// out-of-sync (it should catch up via SyncBlockchain) or Byzantine.
+// Longest-chain fork resolution has been removed — see blockchain.go.
 func (n *Node) HandleFork(peer *Node) {
-	fmt.Printf("Node %s checking for fork with peer %s\n", n.ID, peer.ID)
 	if len(peer.Blockchain.Blocks) > len(n.Blockchain.Blocks) {
-		if n.Blockchain.ResolveFork(peer.Blockchain.Blocks) {
-			fmt.Printf("Node %s resolved fork and updated its blockchain\n", n.ID)
-		} else {
-			fmt.Printf("Node %s detected invalid chain from peer %s\n", n.ID, peer.ID)
-		}
+		log.Printf("[dBFT] HandleFork: peer %s has a longer chain (%d > %d) — "+
+			"dBFT provides single-path finality; no fork resolution will be attempted. "+
+			"If this node is behind, use SyncBlockchain instead.",
+			peer.ID, len(peer.Blockchain.Blocks), len(n.Blockchain.Blocks))
 	}
 }
 
 // SendMessage sends a message to the network
 func (n *Node) SendMessage(p2pNode *P2PNode, msg Message) {
+	if p2pNode == nil {
+		fmt.Println("Failed to send message: p2p node is nil")
+		return
+	}
+
+	if msg.Type == BlockProposal || msg.Type == Vote || msg.Type == ViewChangeReq || msg.Type == ViewChangeResp {
+		if err := p2pNode.PublishConsensusMessage(msg); err != nil {
+			fmt.Printf("Failed to send consensus message: %v\n", err)
+		}
+		return
+	}
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		fmt.Printf("Failed to serialize message: %v\n", err)
@@ -460,6 +643,62 @@ func (n *Node) SendMessage(p2pNode *P2PNode, msg Message) {
 
 	if err := p2pNode.Topic.Publish(context.Background(), data); err != nil {
 		fmt.Printf("Failed to send message: %v\n", err)
+	}
+}
+
+// assertDelegateConnectivity checks that delegates with configured P2P peer IDs
+// are reachable before consensus starts. Each delegate gets up to 3 dial
+// attempts; unreachable delegates emit EventDelegateUnreachable (warning only).
+func (bc *Blockchain) assertDelegateConnectivity(p2pNode *P2PNode) {
+	if p2pNode == nil || p2pNode.Host == nil {
+		return
+	}
+
+	bc.Mu.RLock()
+	delegates := make([]Node, len(bc.Delegates))
+	copy(delegates, bc.Delegates)
+	bc.Mu.RUnlock()
+
+	for _, d := range delegates {
+		if d.P2PPeerID == "" {
+			continue
+		}
+		pid, err := peer.Decode(d.P2PPeerID)
+		if err != nil {
+			bc.emitEvent(EventDelegateUnreachable, map[string]any{
+				"delegate_id": d.ID,
+				"peer_id":     d.P2PPeerID,
+				"reason":      "invalid_peer_id",
+			})
+			continue
+		}
+
+		if p2pNode.Host.Network().Connectedness(pid) == network.Connected {
+			continue
+		}
+
+		reachable := false
+		for attempt := 1; attempt <= 3; attempt++ {
+			pi := p2pNode.Host.Peerstore().PeerInfo(pid)
+			if pi.ID == "" {
+				pi.ID = pid
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err = p2pNode.Host.Connect(ctx, pi)
+			cancel()
+			if err == nil || p2pNode.Host.Network().Connectedness(pid) == network.Connected {
+				reachable = true
+				break
+			}
+			time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+		}
+		if !reachable {
+			bc.emitEvent(EventDelegateUnreachable, map[string]any{
+				"delegate_id": d.ID,
+				"peer_id":     d.P2PPeerID,
+				"reason":      "unreachable_after_3_attempts",
+			})
+		}
 	}
 }
 
@@ -489,6 +728,39 @@ func (n *Node) ProcessMessages() {
 			tx, ok := msg.Payload.(Transaction)
 			if ok {
 				n.Blockchain.AddTransaction(tx)
+			}
+		// Item 9 Step C: accumulate view-change requests and advance the view
+		// when f+1 matching requests are received for the same proposed view.
+		case ViewChangeReq:
+			req, ok := msg.Payload.(ViewChangeRequest)
+			if !ok {
+				fmt.Printf("Node %s received malformed ViewChangeRequest\n", n.ID)
+				break
+			}
+			if n.viewChangeRequests == nil {
+				n.viewChangeRequests = make(map[int]int)
+			}
+			n.viewChangeRequests[req.View]++
+			if n.Blockchain == nil {
+				break
+			}
+			n.Blockchain.Mu.RLock()
+			numDelegates := len(n.Blockchain.Delegates)
+			n.Blockchain.Mu.RUnlock()
+			if numDelegates == 0 {
+				break
+			}
+			f := (numDelegates - 1) / 3
+			if n.viewChangeRequests[req.View] >= f+1 {
+				delete(n.viewChangeRequests, req.View)
+				n.Blockchain.Mu.Lock()
+				if n.Blockchain.currentView.Number < req.View {
+					n.Blockchain.currentView = View{Number: req.View}
+					n.Blockchain.selectSpeaker()
+					fmt.Printf("Node %s: view-change to view %d — new speaker index %d\n",
+						n.ID, req.View, n.Blockchain.currentSpeaker)
+				}
+				n.Blockchain.Mu.Unlock()
 			}
 		}
 	}

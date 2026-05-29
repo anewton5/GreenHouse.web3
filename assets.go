@@ -311,23 +311,36 @@ func NewAssetTransaction(
 // credentials may be nil; if nil, AccreditedOnly and BlockedJurisdictions checks
 // are skipped. This allows Week 1 assets to be tested before identity.go exists.
 //
+// bc may be nil. When non-nil, four additional compliance checks run (Item 13):
+//   - AML SeverityFlag results create a SARDraft in bc.PendingSARs.
+//   - Jurisdiction rules (bc.JurisdictionRules) are applied to Transfer transactions.
+//   - MiFID II suitability (bc.SuitabilityAssessments) is enforced for complex instruments.
+//   - Prospectus exemption limits (bc.ProspectusExemptions) are enforced.
+//
 // Validation order:
 //  0. AML screening (sender + receiver) — optional; pass a non-nil AMLScreener
+//     0a. AMLSeverityFlag → SARDraft created in bc.PendingSARs (requires bc != nil)
 //  1. Asset exists
-//  2. Quantity > 0
-//  3. Sender and Receiver are non-empty
-//  4. Transaction signature is valid
-//  5. Issue: sender must be asset.Issuer
-//  6. Transfer/Redeem: sender holds sufficient balance
-//  7. Transfer/Redeem: holding lockup period is not active
-//  8. Transfer: MaxHolders limit is not exceeded by adding a new holder
-//     8b. Transfer: ROFR check (if pendingActions != nil and asset has HasROFR set)
-//  9. Credential checks (AccreditedOnly, BlockedJurisdictions) if credentials != nil
+//  2. Issuer signature check (if IssuerSignature is present)
+//  3. Quantity > 0
+//  4. Sender and Receiver are non-empty
+//  5. Transaction signature is valid
+//  6. Issue: sender must be asset.Issuer
+//  7. Transfer/Redeem: sender holds sufficient balance
+//  8. Transfer/Redeem: holding lockup period is not active
+//  9. Transfer: MaxHolders limit is not exceeded by adding a new holder
+//     9b. Transfer: ROFR check (if pendingActions != nil and asset has HasROFR set)
+//
+// 10. Credential checks (AccreditedOnly, BlockedJurisdictions) if credentials != nil
+// 11. Jurisdiction rule enforcement (Transfer only; requires bc != nil)
+// 12. MiFID II suitability (Transfer only; complex instruments; requires bc != nil)
+// 13. Prospectus exemption cap + €8M value threshold (Transfer only; requires bc != nil)
 //
 // pendingActions is the blockchain's PendingCorporateActions map. Pass nil to skip
 // the ROFR check (e.g. in tests that don't exercise ROFR logic).
-// AML screening is optional: pass an AMLScreener as the 5th variadic argument.
+// AML screening is optional: pass an AMLScreener as the last variadic argument.
 func (at *AssetTransaction) Validate(
+	bc *Blockchain,
 	assets map[string]*Asset,
 	holdings map[string]*AssetHolding,
 	credentials map[string]*CredentialAttestation,
@@ -352,8 +365,32 @@ func (at *AssetTransaction) Validate(
 			return fmt.Errorf("transaction blocked by AML screening: %s (list: %s)",
 				alert.Reason, alert.MatchedList)
 		}
-		// AMLSeverityFlag: log and continue — the event is already recorded in
-		// the screener's Calls slice for compliance audit purposes.
+		// 0a. AMLSeverityFlag: record a SAR draft for compliance officer review.
+		// The transaction is not blocked but the flag is durably stored and emitted
+		// as an event so the issuer portal can surface it immediately.
+		if alert != nil && alert.Severity == AMLSeverityFlag && bc != nil {
+			sarID := generateID("SAR")
+			bc.PendingSARs[sarID] = &SARDraft{
+				ID:          sarID,
+				SenderKey:   at.Tx.Sender,
+				ReceiverKey: at.Tx.Receiver,
+				AssetID:     at.AssetID,
+				Amount:      at.Tx.Amount,
+				Currency:    currency,
+				Reason:      alert.Reason,
+				MatchedList: alert.MatchedList,
+				CreatedAt:   time.Now().Unix(),
+				Status:      SARStatusPending,
+			}
+			bc.emitEvent(EventSARCreated, map[string]any{
+				"sar_id":       sarID,
+				"sender_key":   at.Tx.Sender,
+				"receiver_key": at.Tx.Receiver,
+				"asset_id":     at.AssetID,
+				"matched_list": alert.MatchedList,
+				"source":       "aml_validate",
+			})
+		}
 	}
 
 	// 1. Asset must exist in the registry.
@@ -470,11 +507,70 @@ func (at *AssetTransaction) Validate(
 		}
 	}
 
-	// 9 & 10. Credential-based checks: AccreditedOnly and BlockedJurisdictions.
+	// 10. Credential-based checks: AccreditedOnly and BlockedJurisdictions.
 	// Skipped entirely when credentials map is nil (e.g., Week 1 tests, dev mode).
 	if credentials != nil {
 		if err := CheckTransferEligibility(at.Tx.Receiver, asset, credentials); err != nil {
 			return err
+		}
+	}
+
+	// 11. Jurisdiction rule enforcement (Transfer only; requires bc != nil).
+	// Looks up the JurisdictionRule keyed by the receiver's credential jurisdiction
+	// and calls ApplyJurisdictionRule to enforce blocked asset types, ticket-size
+	// limits, and the per-jurisdiction retail holder cap.
+	if bc != nil && at.TxType == AssetTxTypeTransfer && credentials != nil {
+		if receiverCred := credentials[at.Tx.Receiver]; receiverCred != nil {
+			if rule, ok := bc.JurisdictionRules[receiverCred.Jurisdiction]; ok {
+				senderCred := credentials[at.Tx.Sender]
+				// Count current retail holders of this asset in the receiver's jurisdiction
+				// so that ApplyJurisdictionRule can enforce the per-jurisdiction retail cap.
+				currentRetailCount := 0
+				suffix := ":" + at.AssetID
+				for key, h := range holdings {
+					if strings.HasSuffix(key, suffix) && h.Balance > 0 {
+						if cred, exists := credentials[h.HolderID]; exists {
+							if cred.InvestorClass == InvestorClassRetail && cred.Jurisdiction == receiverCred.Jurisdiction {
+								currentRetailCount++
+							}
+						}
+					}
+				}
+				// Use at.Tx.Amount as EUR-denominated ticket value proxy.
+				// Accurate when asset.Currency == "EUR"; for other currencies the
+				// caller should apply FX conversion before calling Validate.
+				if err := ApplyJurisdictionRule(rule, senderCred, receiverCred, asset, at.Tx.Amount, currentRetailCount); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// 12. MiFID II suitability check (Transfer only; complex instruments; requires bc != nil).
+	// Warrants and convertibles require a positive SuitabilityAssessment on the
+	// receiver's wallet before a transfer is permitted (MiFID II Art. 25).
+	if bc != nil && at.TxType == AssetTxTypeTransfer {
+		if err := CheckSuitability(at.Tx.Receiver, asset, bc.SuitabilityAssessments); err != nil {
+			return err
+		}
+	}
+
+	// 13. Prospectus exemption cap and €8M rolling value threshold (Transfer only; requires bc != nil).
+	// Enforces the Prospectus Regulation Art. 3(2) per-jurisdiction retail investor cap
+	// and the Art. 3(2) / national-law €8M 12-month value ceiling.
+	if bc != nil && at.TxType == AssetTxTypeTransfer {
+		if exemption, ok := bc.ProspectusExemptions[at.AssetID]; ok {
+			var receiverCred *CredentialAttestation
+			if credentials != nil {
+				receiverCred = credentials[at.Tx.Receiver]
+			}
+			if err := CheckProspectusLimits(receiverCred, exemption); err != nil {
+				return err
+			}
+			// Use at.Tx.Amount as EUR proxy (see note at check 11 above).
+			if err := CheckProspectusValueThreshold(exemption, at.Tx.Amount); err != nil {
+				return err
+			}
 		}
 	}
 

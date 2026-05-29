@@ -204,8 +204,15 @@ func (o *OnfidoIdentityRegistry) HandleWebhook(
 	validForDays int,
 ) (*CredentialAttestation, error) {
 	// Verify HMAC signature.
+	// In production (GH_ENV=production) HMAC is mandatory — a missing or
+	// incorrect signature returns an error and the webhook is not processed.
+	// In non-production environments the check is skipped only when
+	// ONFIDO_WEBHOOK_SECRET is empty (dev / test mode).
 	secret := os.Getenv("ONFIDO_WEBHOOK_SECRET")
-	if secret != "" {
+	if os.Getenv("GH_ENV") == "production" || secret != "" {
+		if secret == "" {
+			return nil, fmt.Errorf("onfido webhook: ONFIDO_WEBHOOK_SECRET not configured — cannot verify signature")
+		}
 		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write(body)
 		expected := hex.EncodeToString(mac.Sum(nil))

@@ -54,7 +54,7 @@ type IdentityCredential struct {
 // no personal data is committed to the blockchain.
 type CredentialAttestation struct {
 	WalletPublicKey   string
-	CredentialHash    string        // SHA3-256 hex of the IdentityCredential JSON
+	CredentialHash    string        // SHA3-256 hex of the IdentityCredential JSON (pre-signature; same hash that RegistrySignature covers)
 	InvestorClass     InvestorClass // duplicated for fast on-chain eligibility checks
 	KYCStatus         KYCStatus     // duplicated for fast on-chain eligibility checks
 	Jurisdiction      string        // duplicated for fast on-chain eligibility checks
@@ -163,10 +163,13 @@ func (c *IdentityCredential) IsExpired() bool {
 }
 
 // ToAttestation converts an IdentityCredential into an on-chain CredentialAttestation.
-// The hash commits the full credential; the eligibility fields are duplicated for
-// fast checking without re-reading the off-chain credential.
+// CredentialHash is the SHA3-256 of the credential JSON with RegistrySignature set to
+// nil — the same pre-signature hash that RegistrySignature actually covers. This allows
+// ValidateBlock to verify the signature on-chain without the full IdentityCredential.
 func (c *IdentityCredential) ToAttestation() *CredentialAttestation {
-	data, _ := json.Marshal(c)
+	credCopy := *c
+	credCopy.RegistrySignature = nil
+	data, _ := json.Marshal(credCopy)
 	hash := sha3.Sum256(data)
 
 	return &CredentialAttestation{

@@ -162,13 +162,41 @@ func TestStartPEPRescreeningScheduler_FiresWithinInterval(t *testing.T) {
 	// Use a short interval. Under the race detector with a loaded suite the OS
 	// scheduler can delay goroutines by tens of milliseconds, so we keep a
 	// generous 25x margin between the interval and the observation window.
-	StartPEPRescreeningScheduler(bc, 20*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stop the goroutine when the test ends
+	StartPEPRescreeningScheduler(ctx, bc, 20*time.Millisecond)
 
 	// Wait long enough for at least 2 ticks even under heavy goroutine load.
 	time.Sleep(500 * time.Millisecond)
 
 	called := atomic.LoadInt32(&screener.callCount)
 	assert.GreaterOrEqual(t, called, int32(2), "scheduler must trigger rescreening at least twice")
+}
+
+func TestStartPEPRescreeningScheduler_StopsOnContextCancel(t *testing.T) {
+	bc := newTestBlockchain(t)
+	screener := &controlledScreener{alert: nil}
+	bc.AMLScreener = screener
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	interval := 50 * time.Millisecond
+	StartPEPRescreeningScheduler(ctx, bc, interval)
+
+	// Let it fire at least once.
+	time.Sleep(80 * time.Millisecond)
+
+	// Cancel and capture the call count.
+	cancel()
+	time.Sleep(interval + 50*time.Millisecond) // one extra tick window
+
+	countAfterCancel := atomic.LoadInt32(&screener.callCount)
+
+	// Wait another full interval — count must not increase after cancellation.
+	time.Sleep(interval + 50*time.Millisecond)
+	countFinal := atomic.LoadInt32(&screener.callCount)
+
+	assert.Equal(t, countAfterCancel, countFinal, "scheduler must not fire after context is cancelled")
 }
 
 // ---------------------------------------------------------------------------

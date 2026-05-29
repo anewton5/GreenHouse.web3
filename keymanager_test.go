@@ -1,6 +1,7 @@
 package gonetwork
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -354,4 +356,133 @@ func TestVaultKeyProvider_ImplementsKeyProvider(t *testing.T) {
 	assert.Len(t, sig, ed25519.SignatureSize)
 	assert.True(t, provider.Verify(msg, sig))
 	assert.NotEmpty(t, provider.PublicKeyString())
+}
+
+// ---------------------------------------------------------------------------
+// TestNewLocalKeyProviderFromEncryptedFile
+// ---------------------------------------------------------------------------
+
+// TestNewLocalKeyProviderFromEncryptedFile_Roundtrip verifies the full
+// encrypt→write→read→sign→verify lifecycle for file-based key storage.
+func TestNewLocalKeyProviderFromEncryptedFile_Roundtrip(t *testing.T) {
+	// Generate a fresh Ed25519 keypair.
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	// Wrap in our PrivateKey type and encrypt.
+	privKey, err := NewPrivateKeyFromSeed(priv.Seed())
+	require.NoError(t, err)
+
+	const passphrase = "correct-horse-battery-staple"
+	encrypted, err := EncryptPrivateKey(priv.Seed(), passphrase)
+	require.NoError(t, err)
+
+	// Write the ciphertext to a temp file.
+	tmpFile := t.TempDir() + "/operator.key"
+	err = os.WriteFile(tmpFile, []byte(encrypted), 0600)
+	require.NoError(t, err)
+
+	// Load via the new helper.
+	provider, err := NewLocalKeyProviderFromEncryptedFile(tmpFile, passphrase)
+	require.NoError(t, err)
+	require.NotNil(t, provider)
+
+	// Public key must match.
+	origPubB64 := NewLocalKeyProvider(privKey).PublicKeyString()
+	assert.Equal(t, origPubB64, provider.PublicKeyString(), "loaded public key must match original")
+
+	// Sign and verify.
+	msg := []byte("greenhouse operator roundtrip message")
+	sig, err := provider.Sign(msg)
+	require.NoError(t, err)
+	assert.True(t, ed25519.Verify(pub, msg, sig), "signature must verify with original ed25519 public key")
+	assert.True(t, provider.Verify(msg, sig), "provider.Verify must also return true")
+}
+
+// TestNewLocalKeyProviderFromEncryptedFile_WrongPassphrase verifies that an
+// incorrect passphrase produces an error rather than a silently wrong key.
+func TestNewLocalKeyProviderFromEncryptedFile_WrongPassphrase(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	encrypted, err := EncryptPrivateKey(priv.Seed(), "right-passphrase")
+	require.NoError(t, err)
+
+	tmpFile := t.TempDir() + "/operator.key"
+	require.NoError(t, os.WriteFile(tmpFile, []byte(encrypted), 0600))
+
+	_, err = NewLocalKeyProviderFromEncryptedFile(tmpFile, "wrong-passphrase")
+	assert.Error(t, err, "wrong passphrase must be rejected")
+	assert.Contains(t, err.Error(), "decryption failed")
+}
+
+// TestNewLocalKeyProviderFromEncryptedFile_MissingFile verifies that a clear
+// error is returned when the key file does not exist.
+func TestNewLocalKeyProviderFromEncryptedFile_MissingFile(t *testing.T) {
+	_, err := NewLocalKeyProviderFromEncryptedFile("/nonexistent/path/operator.key", "passphrase")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot read")
+}
+
+// TestNewLocalKeyProviderFromEncryptedFile_FileWithTrailingNewline ensures that
+// trailing whitespace in the key file is handled correctly.
+func TestNewLocalKeyProviderFromEncryptedFile_FileWithTrailingNewline(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	encrypted, err := EncryptPrivateKey(priv.Seed(), "pass")
+	require.NoError(t, err)
+
+	tmpFile := t.TempDir() + "/operator.key"
+	// Write with trailing newline as a text editor would.
+	require.NoError(t, os.WriteFile(tmpFile, []byte(encrypted+"\n"), 0600))
+
+	provider, err := NewLocalKeyProviderFromEncryptedFile(tmpFile, "pass")
+	require.NoError(t, err, "trailing newline must not cause an error")
+	assert.NotEmpty(t, provider.PublicKeyString())
+}
+
+// ---------------------------------------------------------------------------
+// TestBlock_KeyVersionInPayloadHash
+// ---------------------------------------------------------------------------
+
+// TestBlock_KeyVersionInPayloadHash verifies that the KeyVersion field is
+// included in the PayloadHash so that substituting the operator key after
+// signing invalidates the hash.
+func TestBlock_KeyVersionInPayloadHash(t *testing.T) {
+	_, privA, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, privB, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	keyA, err := NewPrivateKeyFromSeed(privA.Seed())
+	require.NoError(t, err)
+	keyB, err := NewPrivateKeyFromSeed(privB.Seed())
+	require.NoError(t, err)
+
+	providerA := NewLocalKeyProvider(keyA)
+	providerB := NewLocalKeyProvider(keyB)
+
+	bc := NewBlockchain(context.Background(), "test")
+	bc.OperatorKeyProvider = providerA
+
+	bc.AddBlock(Block{Transactions: []Transaction{}})
+	require.Len(t, bc.Blocks, 2) // index 0 = genesis, index 1 = our block
+
+	blockWithA := bc.Blocks[1]
+	assert.Equal(t, providerA.PublicKeyString(), blockWithA.KeyVersion,
+		"KeyVersion must match the operator public key used at seal time")
+	assert.NotEmpty(t, blockWithA.PayloadHash)
+
+	// Build an equivalent block with keyB as the operator and confirm
+	// the PayloadHash differs — KeyVersion is part of the signed payload.
+	bc2 := NewBlockchain(context.Background(), "test2")
+	bc2.OperatorKeyProvider = providerB
+	bc2.AddBlock(Block{Transactions: []Transaction{}})
+	require.Len(t, bc2.Blocks, 2)
+
+	blockWithB := bc2.Blocks[1]
+	assert.Equal(t, providerB.PublicKeyString(), blockWithB.KeyVersion)
+	assert.NotEqual(t, blockWithA.PayloadHash, blockWithB.PayloadHash,
+		"blocks sealed by different operators must have distinct PayloadHashes")
 }

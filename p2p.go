@@ -2,6 +2,7 @@ package gonetwork
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -24,8 +25,11 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	mdns "github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
+	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/multiformats/go-multihash"
+	"golang.org/x/time/rate"
 )
 
 var logger = golog.Logger("p2pnode")
@@ -36,20 +40,33 @@ func init() {
 }
 
 type P2PNode struct {
-	Host        host.Host
-	PubSub      *pubsub.PubSub
-	Topic       *pubsub.Topic
-	Sub         *pubsub.Subscription
-	Blockchain  *Blockchain
-	MdnsService mdns.Service // Store the mDNS service
-	Gater       *AllowlistGater
+	Host           host.Host
+	PubSub         *pubsub.PubSub
+	Topic          *pubsub.Topic
+	Sub            *pubsub.Subscription
+	ConsensusTopic *pubsub.Topic
+	ConsensusSub   *pubsub.Subscription
+	Blockchain     *Blockchain
+	MdnsService    mdns.Service // Store the mDNS service
+	Gater          *AllowlistGater
+	// limiter throttles high-volume publish paths (block/tx) to reduce
+	// gossip overload and accidental message storms.
+	limiter *rate.Limiter
 	// cancelBackground cancels the context used by background goroutines
 	// (DHT bootstrap/discovery loop). Called by Shutdown to stop the loop.
 	cancelBackground context.CancelFunc
+	// reconnecting tracks peers that already have an active reconnect loop.
+	reconnecting sync.Map
 }
 
 type mdnsNotifee struct {
 	host host.Host
+}
+
+// peerReconnectNotifee listens for disconnect events and triggers an
+// exponential-backoff reconnect for explicitly allowlisted peers.
+type peerReconnectNotifee struct {
+	node *P2PNode
 }
 
 const (
@@ -141,6 +158,49 @@ func (g *AllowlistGater) RevokePeer(id peer.ID, sig []byte) error {
 	return nil
 }
 
+// LoadPeerManifest reads a JSON file at path of the form:
+//
+//	[{"peer_id":"12D3KooW...","signature":"<hex>"},...]
+//
+// Each entry's signature must equal Sign(SHA3-256([]byte(peer_id))) produced by
+// the network registry private key. Entries with invalid signatures are skipped
+// with a warning; the first file-level error (open, parse) is fatal and returned.
+// Call this before the node begins accepting connections so the allowlist is
+// populated prior to any incoming handshake.
+func LoadPeerManifest(path string, gater *AllowlistGater) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("LoadPeerManifest: cannot open %q: %w", path, err)
+	}
+	defer f.Close()
+
+	var entries []struct {
+		PeerID    string `json:"peer_id"`
+		Signature string `json:"signature"`
+	}
+	if err := json.NewDecoder(f).Decode(&entries); err != nil {
+		return fmt.Errorf("LoadPeerManifest: cannot parse %q: %w", path, err)
+	}
+
+	for _, e := range entries {
+		pid, err := peer.Decode(e.PeerID)
+		if err != nil {
+			log.Printf("LoadPeerManifest: skipping invalid peer_id %q: %v", e.PeerID, err)
+			continue
+		}
+		sigBytes, err := hex.DecodeString(e.Signature)
+		if err != nil {
+			log.Printf("LoadPeerManifest: skipping peer %q — invalid signature hex: %v", e.PeerID, err)
+			continue
+		}
+		if err := gater.AllowPeer(pid, sigBytes); err != nil {
+			log.Printf("LoadPeerManifest: skipping peer %q — %v", e.PeerID, err)
+			continue
+		}
+	}
+	return nil
+}
+
 // InterceptPeerDial short-circuits outbound dials to unlisted peers early.
 func (g *AllowlistGater) InterceptPeerDial(p peer.ID) bool {
 	g.mu.RLock()
@@ -188,157 +248,305 @@ func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 }
 
-func setupMdnsDiscovery(h host.Host) (mdns.Service, error) {
-	service := mdns.NewMdnsService(h, "greenhouse-mdns", &mdnsNotifee{host: h})
+func setupMdnsDiscovery(h host.Host, serviceTag string) (mdns.Service, error) {
+	service := mdns.NewMdnsService(h, serviceTag, &mdnsNotifee{host: h})
 	if service == nil {
 		return nil, fmt.Errorf("failed to create mDNS service")
 	}
 	if err := service.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start mDNS service: %v", err)
 	}
-	log.Println("mDNS discovery service started")
+	log.Printf("mDNS discovery service started (%s)", serviceTag)
 	return service, nil
+}
+
+func (n *peerReconnectNotifee) Listen(_ network.Network, _ ma.Multiaddr)      {}
+func (n *peerReconnectNotifee) ListenClose(_ network.Network, _ ma.Multiaddr) {}
+func (n *peerReconnectNotifee) Connected(_ network.Network, _ network.Conn)   {}
+
+func (n *peerReconnectNotifee) Disconnected(_ network.Network, c network.Conn) {
+	if n == nil || n.node == nil || n.node.Gater == nil {
+		return
+	}
+	pid := c.RemotePeer()
+	if !n.node.Gater.isExplicitlyAllowlisted(pid) {
+		return
+	}
+	go n.node.reconnectPeer(pid, c.RemoteMultiaddr())
+}
+
+// isExplicitlyAllowlisted returns true only when the peer is present in the
+// allowlist map. Unlike InterceptPeerDial, open-mode fallback does not apply.
+func (g *AllowlistGater) isExplicitlyAllowlisted(p peer.ID) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	_, ok := g.allowed[p]
+	return ok
+}
+
+// reconnectPeer retries host-level connect with exponential backoff
+// (100ms→...→30s cap, up to 10 attempts).
+func (n *P2PNode) reconnectPeer(pid peer.ID, remote ma.Multiaddr) {
+	if n == nil || n.Host == nil {
+		return
+	}
+	if _, loaded := n.reconnecting.LoadOrStore(pid.String(), struct{}{}); loaded {
+		return
+	}
+	defer n.reconnecting.Delete(pid.String())
+
+	backoff := 100 * time.Millisecond
+	for attempt := 1; attempt <= 10; attempt++ {
+		if n.Host.Network().Connectedness(pid) == network.Connected {
+			return
+		}
+		info := n.Host.Peerstore().PeerInfo(pid)
+		if info.ID == "" {
+			info.ID = pid
+		}
+		if remote != nil && len(info.Addrs) == 0 {
+			info.Addrs = []ma.Multiaddr{remote}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := n.Host.Connect(ctx, info)
+		cancel()
+		if err == nil && n.Host.Network().Connectedness(pid) == network.Connected {
+			logger.Infof("Reconnect succeeded for peer %s on attempt %d", pid, attempt)
+			return
+		}
+
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+	}
+	logger.Warnf("Reconnect exhausted for peer %s after 10 attempts", pid)
+}
+
+// tunedGossipSubParams derives mesh settings from expected validator count.
+// The values are intentionally conservative for small permissioned networks.
+func tunedGossipSubParams(validatorCount int) pubsub.GossipSubParams {
+	params := pubsub.DefaultGossipSubParams()
+	if validatorCount < 5 {
+		validatorCount = 5
+	}
+	d := validatorCount - 1
+	if d < 4 {
+		d = 4
+	}
+	if d > 8 {
+		d = 8
+	}
+	params.D = d
+	params.Dlo = d - 1
+	if params.Dlo < 3 {
+		params.Dlo = 3
+	}
+	params.Dhi = d + 1
+	params.Dscore = params.D
+	params.Dout = (params.D - 1) / 2
+	if params.Dout >= params.Dlo {
+		params.Dout = params.Dlo - 1
+	}
+	if params.Dout < 1 {
+		params.Dout = 1
+	}
+	params.HeartbeatInterval = 500 * time.Millisecond
+	return params
 }
 
 // NewP2PNode initializes a new libp2p node with mDNS and DHT-based peer discovery
 func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, bootstrapPeers []string) (*P2PNode, error) {
-	// Create an allowlist gater (open mode until the first peer is admitted).
-	gater := NewAllowlistGater(nil)
+	// Create an allowlist gater bound to the blockchain's registry key.
+	// When NetworkRegistryKey is nil (dev/test) the gater runs in open mode.
+	gater := NewAllowlistGater(blockchain.NetworkRegistryKey)
 
-	// Create a new libp2p host with the connection gater wired in.
-	h, err := libp2p.New(libp2p.ConnectionGater(gater))
+	// Load a static peer manifest if GREENHOUSE_PEER_MANIFEST is set.
+	// This pre-populates the allowlist from a signed JSON manifest before the
+	// node begins accepting connections, ensuring no unlisted peer can connect
+	// before the manifest is applied.
+	if manifestPath := os.Getenv("GREENHOUSE_PEER_MANIFEST"); manifestPath != "" {
+		if err := LoadPeerManifest(manifestPath, gater); err != nil {
+			return nil, fmt.Errorf("NewP2PNode: failed to load peer manifest %q: %w", manifestPath, err)
+		}
+		logger.Infof("Loaded peer manifest from %s", manifestPath)
+	}
+
+	// Create a bounded connection manager so peers cannot exhaust file
+	// descriptors by opening unbounded simultaneous connections.
+	cm, err := connmgr.NewConnManager(20, 40, connmgr.WithGracePeriod(time.Minute))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection manager: %v", err)
+	}
+
+	// Create a new libp2p host with connection gater + bounded conn manager.
+	h, err := libp2p.New(
+		libp2p.Security(noise.ID, noise.New),
+		libp2p.ConnectionGater(gater),
+		libp2p.ConnectionManager(cm),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create libp2p host: %v", err)
 	}
 	logger.Infof("Libp2p host created with ID: %s", h.ID())
-
-	// Initialize the DHT in client mode for peer discovery.
-	// Client mode means this node only queries the DHT and never accepts
-	// routing table entries from unknown peers, eliminating the Sybil attack
-	// surface described in GO-2024-3218. The bootstrap node (cmd/bootstrap)
-	// runs in ModeServer and is the sole authoritative DHT server.
-	dht, err := kaddht.New(ctx, h, kaddht.Mode(kaddht.ModeClient))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create DHT: %v", err)
-	}
-	logger.Infof("DHT initialized in client mode for peer discovery")
+	log.Printf("P2P: using Noise XX security transport (mutual auth)")
 
 	// Log listening addresses
 	for _, addr := range h.Addrs() {
 		logger.Infof("Listening on: %s/p2p/%s", addr.String(), h.ID().String())
 	}
 
-	// Bootstrap the DHT with the provided bootstrap peers
-	for _, addr := range bootstrapPeers {
-		logger.Infof("Attempting to connect to bootstrap peer: %s", addr)
-		peerAddr, err := peer.AddrInfoFromString(addr)
-		if err != nil {
-			logger.Warnf("Invalid bootstrap peer address: %s", addr)
-			continue
-		}
-		if err := h.Connect(ctx, *peerAddr); err != nil {
-			logger.Warnf("Failed to connect to bootstrap peer: %s", addr)
-		} else {
-			logger.Infof("Connected to bootstrap peer: %s", addr)
-		}
+	// Production guard (Item 17): DHT discovery is disabled in production.
+	// The node relies solely on the static peer manifest for bootstrap. Fail
+	// fast here — before any goroutine is launched — if no manifest was set.
+	if os.Getenv("GH_ENV") == "production" && os.Getenv("GREENHOUSE_PEER_MANIFEST") == "" {
+		return nil, fmt.Errorf("production: GREENHOUSE_PEER_MANIFEST must be set (DHT discovery is disabled in production)")
 	}
 
-	// Bootstrap the DHT and discover peers asynchronously in the background.
-	// bgCtx is derived from the caller context and is cancelled by Shutdown,
-	// so the goroutine terminates when the node is shut down.
+	// bgCtx/bgCancel: used by the DHT background goroutine (dev/test only).
+	// Always initialised so that Shutdown can call cancelBackground()
+	// unconditionally regardless of whether DHT is active.
 	bgCtx, bgCancel := context.WithCancel(ctx)
-	// If NewP2PNode returns an error, cancel bgCtx so the goroutine exits.
+	// If NewP2PNode returns an error, cancel bgCtx so any goroutine exits.
 	committed := false
 	defer func() {
 		if !committed {
 			bgCancel()
 		}
 	}()
-	go func() {
-		// Retry connecting to bootstrap peers
-		if len(bootstrapPeers) > 0 {
-			retryCount := 0
-			maxRetries := 10
-			for len(h.Network().Peers()) == 0 && retryCount < maxRetries {
-				logger.Debugf("Waiting for peers in the routing table... (attempt %d/%d)", retryCount+1, maxRetries)
-				select {
-				case <-bgCtx.Done():
-					return
-				case <-time.After(2 * time.Second):
-				}
-				retryCount++
-			}
-			logger.Infof("Current peers in the network: %v", h.Network().Peers())
-		}
 
-		if err := dht.Bootstrap(bgCtx); err != nil {
-			logger.Warnf("Failed to bootstrap DHT: %v", err)
-			return
-		}
-		logger.Infof("DHT bootstrapped successfully")
-
-		// Give DHT time to populate routing table
-		select {
-		case <-bgCtx.Done():
-			return
-		case <-time.After(5 * time.Second):
-		}
-		peersCount := len(dht.RoutingTable().ListPeers())
-		logger.Infof("DHT routing table now has %d peers", peersCount)
-
-		// Advertise the rendezvous point
-		rendezvous := "greenhouse-p2p-network"
-		logger.Infof("Advertising rendezvous point: %s", rendezvous)
-
-		// Generate a valid CID from the rendezvous string
-		hash := sha256.Sum256([]byte(rendezvous))
-		mh, err := multihash.Encode(hash[:], multihash.SHA2_256)
+	if os.Getenv("GH_ENV") != "production" {
+		// Initialize the DHT in client mode for peer discovery.
+		// Client mode means this node only queries the DHT and never accepts
+		// routing table entries from unknown peers, eliminating the Sybil
+		// attack surface described in GO-2024-3218. The bootstrap node
+		// (cmd/bootstrap) runs in ModeServer and is the sole authoritative
+		// DHT server.
+		dht, err := kaddht.New(ctx, h, kaddht.Mode(kaddht.ModeClient))
 		if err != nil {
-			logger.Warnf("Failed to create multihash for rendezvous: %v", err)
-			return
+			return nil, fmt.Errorf("failed to create DHT: %v", err)
 		}
-		rendezvousCID := cid.NewCidV1(cid.Raw, mh)
+		logger.Infof("DHT initialized in client mode for peer discovery")
 
-		if err := dht.Provide(bgCtx, rendezvousCID, true); err != nil {
-			logger.Warnf("Failed to advertise rendezvous point: %v", err)
-		} else {
-			logger.Infof("Rendezvous point advertised successfully")
-		}
-
-		// Discover peers advertising the same rendezvous point
-		for {
-			if bgCtx.Err() != nil {
-				return // node is shutting down
-			}
-			peers, err := dht.FindProviders(bgCtx, rendezvousCID)
+		// Bootstrap the DHT with the provided bootstrap peers
+		for _, addr := range bootstrapPeers {
+			logger.Infof("Attempting to connect to bootstrap peer: %s", addr)
+			peerAddr, err := peer.AddrInfoFromString(addr)
 			if err != nil {
-				logger.Debugf("Error finding providers: %v", err)
-			} else {
-				for _, p := range peers {
-					if p.ID != h.ID() {
-						logger.Infof("Discovered peer: %s", p.ID.String())
-						if err := h.Connect(bgCtx, p); err != nil {
-							logger.Debugf("Failed to connect to peer %s: %v", p.ID.String(), err)
-						} else {
-							logger.Infof("Successfully connected to peer: %s", p.ID.String())
-						}
-					}
-				}
+				logger.Warnf("Invalid bootstrap peer address: %s", addr)
+				continue
 			}
+			if err := h.Connect(ctx, *peerAddr); err != nil {
+				logger.Warnf("Failed to connect to bootstrap peer: %s", addr)
+			} else {
+				logger.Infof("Connected to bootstrap peer: %s", addr)
+			}
+		}
+
+		// Bootstrap the DHT and discover peers asynchronously in the background.
+		// bgCtx is derived from the caller context and is cancelled by Shutdown,
+		// so the goroutine terminates when the node is shut down.
+		go func() {
+			// Retry connecting to bootstrap peers
+			if len(bootstrapPeers) > 0 {
+				retryCount := 0
+				maxRetries := 10
+				for len(h.Network().Peers()) == 0 && retryCount < maxRetries {
+					logger.Debugf("Waiting for peers in the routing table... (attempt %d/%d)", retryCount+1, maxRetries)
+					select {
+					case <-bgCtx.Done():
+						return
+					case <-time.After(2 * time.Second):
+					}
+					retryCount++
+				}
+				logger.Infof("Current peers in the network: %v", h.Network().Peers())
+			}
+
+			if err := dht.Bootstrap(bgCtx); err != nil {
+				logger.Warnf("Failed to bootstrap DHT: %v", err)
+				return
+			}
+			logger.Infof("DHT bootstrapped successfully")
+
+			// Give DHT time to populate routing table
 			select {
 			case <-bgCtx.Done():
 				return
 			case <-time.After(5 * time.Second):
 			}
-		}
-	}()
+			peersCount := len(dht.RoutingTable().ListPeers())
+			logger.Infof("DHT routing table now has %d peers", peersCount)
 
-	// Create a new PubSub service IMMEDIATELY (non-blocking initialization)
-	ps, err := pubsub.NewGossipSub(ctx, h)
+			// Advertise the rendezvous point
+			rendezvous := "greenhouse-p2p-network"
+			logger.Infof("Advertising rendezvous point: %s", rendezvous)
+
+			// Generate a valid CID from the rendezvous string
+			hash := sha256.Sum256([]byte(rendezvous))
+			mh, err := multihash.Encode(hash[:], multihash.SHA2_256)
+			if err != nil {
+				logger.Warnf("Failed to create multihash for rendezvous: %v", err)
+				return
+			}
+			rendezvousCID := cid.NewCidV1(cid.Raw, mh)
+
+			if err := dht.Provide(bgCtx, rendezvousCID, true); err != nil {
+				logger.Warnf("Failed to advertise rendezvous point: %v", err)
+			} else {
+				logger.Infof("Rendezvous point advertised successfully")
+			}
+
+			// Discover peers advertising the same rendezvous point
+			for {
+				if bgCtx.Err() != nil {
+					return // node is shutting down
+				}
+				peers, err := dht.FindProviders(bgCtx, rendezvousCID)
+				if err != nil {
+					logger.Debugf("Error finding providers: %v", err)
+				} else {
+					for _, p := range peers {
+						if p.ID != h.ID() {
+							logger.Infof("Discovered peer: %s", p.ID.String())
+							if err := h.Connect(bgCtx, p); err != nil {
+								logger.Debugf("Failed to connect to peer %s: %v", p.ID.String(), err)
+							} else {
+								logger.Infof("Successfully connected to peer: %s", p.ID.String())
+							}
+						}
+					}
+				}
+				select {
+				case <-bgCtx.Done():
+					return
+				case <-time.After(5 * time.Second):
+				}
+			}
+		}()
+	} else {
+		logger.Infof("DHT discovery disabled in production (GH_ENV=production)")
+	}
+
+	// Create a tuned GossipSub service for validator-sized meshes.
+	validatorCount := len(blockchain.Delegates)
+	if validatorCount == 0 {
+		validatorCount = 5 // default expected validator set size in dev/test
+	}
+	gsParams := tunedGossipSubParams(validatorCount)
+	ps, err := pubsub.NewGossipSub(
+		ctx,
+		h,
+		pubsub.WithMaxMessageSize(256*1024),
+		pubsub.WithFloodPublish(true),
+		pubsub.WithGossipSubParams(gsParams),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pubsub: %v", err)
 	}
-	logger.Infof("PubSub service initialized")
+	logger.Infof("PubSub service initialized (D=%d Dlo=%d Dhi=%d heartbeat=%s)", gsParams.D, gsParams.Dlo, gsParams.Dhi, gsParams.HeartbeatInterval)
 
 	// Join a topic
 	topic, err := ps.Join(topicName)
@@ -347,6 +555,40 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	}
 	logger.Infof("Joined topic: %s", topicName)
 
+	consensusTopicName := topicName + "/consensus"
+	consensusTopic, err := ps.Join(consensusTopicName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to join consensus topic: %v", err)
+	}
+	logger.Infof("Joined consensus topic: %s", consensusTopicName)
+
+	// Register a topic validator so that GossipSub rejects messages from
+	// peers that are not in the allowlist. This closes the gap where a peer
+	// that obtained a connection (or was never connection-gated in open mode)
+	// could inject arbitrary payloads to all validators.
+	// In open mode (gater.allowed is empty) InterceptPeerDial returns true for
+	// all peers, so the validator accepts all messages — behaviour is unchanged
+	// for development and test environments.
+	if err := ps.RegisterTopicValidator(topicName, func(_ context.Context, pid peer.ID, _ *pubsub.Message) pubsub.ValidationResult {
+		if !gater.InterceptPeerDial(pid) {
+			return pubsub.ValidationReject
+		}
+		return pubsub.ValidationAccept
+	}); err != nil {
+		return nil, fmt.Errorf("failed to register topic validator: %w", err)
+	}
+	logger.Infof("Topic validator registered for %s", topicName)
+
+	if err := ps.RegisterTopicValidator(consensusTopicName, func(_ context.Context, pid peer.ID, _ *pubsub.Message) pubsub.ValidationResult {
+		if !gater.InterceptPeerDial(pid) {
+			return pubsub.ValidationReject
+		}
+		return pubsub.ValidationAccept
+	}); err != nil {
+		return nil, fmt.Errorf("failed to register consensus topic validator: %w", err)
+	}
+	logger.Infof("Topic validator registered for %s", consensusTopicName)
+
 	// Subscribe to the topic
 	sub, err := topic.Subscribe()
 	if err != nil {
@@ -354,13 +596,21 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	}
 	logger.Infof("Subscribed to topic")
 
+	consensusSub, err := consensusTopic.Subscribe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to consensus topic: %v", err)
+	}
+	logger.Infof("Subscribed to consensus topic")
+
 	// Enable mDNS for same-machine / LAN peer discovery before creating the
 	// node so the service reference can be stored (prevents GC and keeps it live).
 	// M-10: mDNS is only enabled outside production to avoid advertising
 	// node addresses on the local LAN in production deployments.
 	var mdnsSvc mdns.Service
 	if os.Getenv("GH_ENV") != "production" {
-		mdnsSvc, err = setupMdnsDiscovery(h)
+		sanitizedTopic := strings.NewReplacer("/", "-", " ", "-").Replace(topicName)
+		mdnsTag := "greenhouse-mdns-" + sanitizedTopic
+		mdnsSvc, err = setupMdnsDiscovery(h, mdnsTag)
 		if err != nil {
 			logger.Warnf("mDNS discovery unavailable: %v", err)
 		}
@@ -374,11 +624,17 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 		PubSub:           ps,
 		Topic:            topic,
 		Sub:              sub,
+		ConsensusTopic:   consensusTopic,
+		ConsensusSub:     consensusSub,
 		Blockchain:       blockchain,
 		MdnsService:      mdnsSvc,
 		Gater:            gater,
+		limiter:          rate.NewLimiter(rate.Every(100*time.Millisecond), 10),
 		cancelBackground: bgCancel,
 	}
+
+	// Register reconnect notifee (Item 19 Step B).
+	h.Network().Notify(&peerReconnectNotifee{node: node})
 
 	// Set a stream handler for direct messaging
 	h.SetStreamHandler("/p2p/1.0.0", node.handleStream)
@@ -408,6 +664,19 @@ func (n *P2PNode) BroadcastAllowlistTransaction(at AllowlistTransaction) error {
 	return n.Topic.Publish(context.Background(), data)
 }
 
+// PublishConsensusMessage sends a dBFT coordination message to the dedicated
+// consensus sub-topic (Item 19 Step D).
+func (n *P2PNode) PublishConsensusMessage(msg Message) error {
+	if n == nil || n.ConsensusTopic == nil {
+		return fmt.Errorf("P2PNode or ConsensusTopic is not initialized")
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to serialize consensus message: %w", err)
+	}
+	return n.ConsensusTopic.Publish(context.Background(), data)
+}
+
 func (n *P2PNode) BroadcastPing(ctx context.Context) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
@@ -423,6 +692,11 @@ func (n *P2PNode) BroadcastPing(ctx context.Context) error {
 func (n *P2PNode) BroadcastTransaction(tx Transaction) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	if n.limiter != nil {
+		if err := n.limiter.Wait(context.Background()); err != nil {
+			return fmt.Errorf("broadcast transaction rate-limited: %w", err)
+		}
 	}
 
 	// Serialize the transaction
@@ -450,6 +724,11 @@ func (n *P2PNode) BroadcastTransaction(tx Transaction) error {
 func (n *P2PNode) BroadcastBlock(block Block) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	if n.limiter != nil {
+		if err := n.limiter.Wait(context.Background()); err != nil {
+			return fmt.Errorf("broadcast block rate-limited: %w", err)
+		}
 	}
 
 	// Serialize the block
@@ -523,6 +802,10 @@ func (n *P2PNode) BroadcastPaymentConfirmation(pc PaymentConfirmation) error {
 }
 
 func (n *P2PNode) HandleMessages(ctx context.Context) {
+	if n != nil && n.ConsensusSub != nil {
+		go n.handleConsensusMessages(ctx)
+	}
+
 	for {
 		// Sub.Next blocks until a message arrives, the context is cancelled,
 		// or Sub.Cancel() is called (which closes the internal channel and
@@ -539,6 +822,14 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 		}
 
 		if msg.ReceivedFrom == n.Host.ID() {
+			continue
+		}
+
+		// Drop messages from peers that have been revoked since the connection
+		// was established. The topic validator catches new messages at the
+		// GossipSub layer, but in-flight messages may slip through the narrow
+		// window between revocation and GossipSub validator propagation.
+		if !n.Gater.InterceptPeerDial(msg.ReceivedFrom) {
 			continue
 		}
 
@@ -605,7 +896,7 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 				continue
 			}
 			n.Blockchain.Mu.Lock()
-			if err := at.Validate(n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials, n.Blockchain.PendingCorporateActions, n.Blockchain.AMLScreener); err == nil {
+			if err := at.Validate(n.Blockchain, n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials, n.Blockchain.PendingCorporateActions, n.Blockchain.AMLScreener); err == nil {
 				n.Blockchain.PendingAssetTransactions = append(n.Blockchain.PendingAssetTransactions, at)
 			} else {
 				log.Printf("Received invalid asset transaction: %v", err)
@@ -664,6 +955,37 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 		default:
 			log.Printf("Unknown message type: %s", p2pMessage.Type)
 		}
+	}
+}
+
+func (n *P2PNode) handleConsensusMessages(ctx context.Context) {
+	for {
+		msg, err := n.ConsensusSub.Next(ctx)
+		if err != nil {
+			return
+		}
+		if msg.ReceivedFrom == n.Host.ID() {
+			continue
+		}
+		if !n.Gater.InterceptPeerDial(msg.ReceivedFrom) {
+			continue
+		}
+
+		var consensusMsg Message
+		if err := json.Unmarshal(msg.Data, &consensusMsg); err != nil {
+			log.Printf("Failed to deserialize consensus Message: %v", err)
+			continue
+		}
+
+		n.Blockchain.Mu.RLock()
+		for i := range n.Blockchain.Delegates {
+			d := &n.Blockchain.Delegates[i]
+			if consensusMsg.To != "" && d.ID != consensusMsg.To {
+				continue
+			}
+			d.ReceiveMessage(consensusMsg)
+		}
+		n.Blockchain.Mu.RUnlock()
 	}
 }
 
@@ -771,12 +1093,22 @@ func (n *P2PNode) Shutdown(ctx context.Context) error {
 		log.Println("Closing PubSub subscription...")
 		n.Sub.Cancel() // No error handling needed
 	}
+	if n.ConsensusSub != nil {
+		log.Println("Closing consensus PubSub subscription...")
+		n.ConsensusSub.Cancel()
+	}
 
 	// Close the PubSub topic
 	if n.Topic != nil {
 		log.Println("Closing PubSub topic...")
 		if err := n.Topic.Close(); err != nil {
 			log.Printf("Error closing PubSub topic: %v", err)
+		}
+	}
+	if n.ConsensusTopic != nil {
+		log.Println("Closing consensus PubSub topic...")
+		if err := n.ConsensusTopic.Close(); err != nil {
+			log.Printf("Error closing consensus PubSub topic: %v", err)
 		}
 	}
 

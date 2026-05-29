@@ -64,7 +64,7 @@ func issueTokens(
 	t.Helper()
 	at, err := NewAssetTransaction(issuerKey, recipientKey.Public(), asset.ID, quantity, AssetTxTypeIssue)
 	require.NoError(t, err)
-	require.NoError(t, at.Validate(assets, holdings, nil, nil))
+	require.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 	require.NoError(t, ApplyAssetTransaction(at, assets, holdings))
 }
 
@@ -226,7 +226,7 @@ func TestAssetIssueTransaction(t *testing.T) {
 	at, err := NewAssetTransaction(issuerKey, recipientKey, asset.ID, 250_000, AssetTxTypeIssue)
 	require.NoError(t, err)
 
-	require.NoError(t, at.Validate(assets, holdings, nil, nil))
+	require.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 	require.NoError(t, ApplyAssetTransaction(at, assets, holdings))
 
 	holdingKey := HoldingKey(recipientKeyStr, asset.ID)
@@ -251,7 +251,7 @@ func TestAssetIssuerOnlyIssuance(t *testing.T) {
 	at, err := NewAssetTransaction(nonIssuerPrivKey, receiverPubKey, asset.ID, 100, AssetTxTypeIssue)
 	require.NoError(t, err)
 
-	err = at.Validate(assets, holdings, nil, nil)
+	err = at.Validate(nil, assets, holdings, nil, nil)
 	assert.ErrorContains(t, err, "only the asset issuer may issue tokens")
 }
 
@@ -273,7 +273,7 @@ func TestAssetTransfer_Valid(t *testing.T) {
 	// Transfer 200 from Alice to Bob.
 	at, err := NewAssetTransaction(aliceKey, bobKey.Public(), asset.ID, 200, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	require.NoError(t, at.Validate(assets, holdings, nil, nil))
+	require.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 	require.NoError(t, ApplyAssetTransaction(at, assets, holdings))
 
 	aliceHolding := holdings[HoldingKey(aliceKeyStr, asset.ID)]
@@ -302,7 +302,7 @@ func TestAssetTransfer_InsufficientBalance(t *testing.T) {
 	at, err := NewAssetTransaction(aliceKey, bobKey.Public(), asset.ID, 100, AssetTxTypeTransfer)
 	require.NoError(t, err)
 
-	err = at.Validate(assets, holdings, nil, nil)
+	err = at.Validate(nil, assets, holdings, nil, nil)
 	assert.ErrorContains(t, err, "insufficient balance")
 }
 
@@ -317,7 +317,7 @@ func TestAssetTransfer_NoHolding(t *testing.T) {
 	at, err := NewAssetTransaction(aliceKey, bobKey.Public(), asset.ID, 10, AssetTxTypeTransfer)
 	require.NoError(t, err)
 
-	err = at.Validate(assets, holdings, nil, nil)
+	err = at.Validate(nil, assets, holdings, nil, nil)
 	assert.ErrorContains(t, err, "insufficient balance")
 }
 
@@ -337,7 +337,7 @@ func TestAssetTransfer_InvalidSignature(t *testing.T) {
 	// Corrupt the first byte of the signature.
 	at.Tx.Signatures[0][0] ^= 0xff
 
-	err = at.Validate(assets, holdings, nil, nil)
+	err = at.Validate(nil, assets, holdings, nil, nil)
 	assert.ErrorContains(t, err, "invalid transaction signature")
 }
 
@@ -358,7 +358,7 @@ func TestAssetTransfer_LockupActive(t *testing.T) {
 	at, err := NewAssetTransaction(aliceKey, bobKey.Public(), asset.ID, 50, AssetTxTypeTransfer)
 	require.NoError(t, err)
 
-	err = at.Validate(assets, holdings, nil, nil)
+	err = at.Validate(nil, assets, holdings, nil, nil)
 	assert.ErrorContains(t, err, "holding is locked until")
 }
 
@@ -380,7 +380,7 @@ func TestAssetTransfer_LockupExpired(t *testing.T) {
 	require.NoError(t, err)
 
 	// Validate should pass — lockup is expired.
-	assert.NoError(t, at.Validate(assets, holdings, nil, nil))
+	assert.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +402,7 @@ func TestAssetRedeem(t *testing.T) {
 	issuerPubKey := issuerKey.Public()
 	at, err := NewAssetTransaction(aliceKey, issuerPubKey, asset.ID, 75, AssetTxTypeRedeem)
 	require.NoError(t, err)
-	require.NoError(t, at.Validate(assets, holdings, nil, nil))
+	require.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 	require.NoError(t, ApplyAssetTransaction(at, assets, holdings))
 
 	aliceHolding := holdings[HoldingKey(aliceKeyStr, asset.ID)]
@@ -423,7 +423,7 @@ func TestAssetRedeem_FullBalance(t *testing.T) {
 	// Redeem entire balance — holding should be removed from the map.
 	at, err := NewAssetTransaction(aliceKey, issuerKey.Public(), asset.ID, 100, AssetTxTypeRedeem)
 	require.NoError(t, err)
-	require.NoError(t, at.Validate(assets, holdings, nil, nil))
+	require.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 	require.NoError(t, ApplyAssetTransaction(at, assets, holdings))
 
 	_, exists := holdings[HoldingKey(aliceKeyStr, asset.ID)]
@@ -465,13 +465,13 @@ func TestAssetMaxHolders(t *testing.T) {
 	// Transfer from Alice to Charlie (would create a 3rd holder) — must fail.
 	at, err := NewAssetTransaction(aliceKey, charlieKey.Public(), asset.ID, 10, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	err = at.Validate(assets, holdings, nil, nil)
+	err = at.Validate(nil, assets, holdings, nil, nil)
 	assert.ErrorContains(t, err, "max holders reached")
 
 	// Transfer from Alice to Bob (Bob already holds — no new holder) — must pass.
 	at2, err := NewAssetTransaction(aliceKey, bobKey.Public(), asset.ID, 10, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	assert.NoError(t, at2.Validate(assets, holdings, nil, nil))
+	assert.NoError(t, at2.Validate(nil, assets, holdings, nil, nil))
 
 	_ = aliceKeyStr // used implicitly via HoldingKey in holdings map
 }
@@ -517,7 +517,7 @@ func TestAssetBlockedJurisdiction(t *testing.T) {
 	// Transfer to German wallet — should fail (DE is blocked).
 	at, err := NewAssetTransaction(aliceKey, germanPubKey, asset.ID, 50, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	err = at.Validate(assets, holdings, credentials, nil)
+	err = at.Validate(nil, assets, holdings, credentials, nil)
 	assert.ErrorContains(t, err, "jurisdiction")
 	assert.ErrorContains(t, err, "DE")
 
@@ -558,7 +558,7 @@ func TestAssetAccreditedOnly_Accredited(t *testing.T) {
 
 	at, err := NewAssetTransaction(aliceKey, bobKey.Public(), asset.ID, 50, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	assert.NoError(t, at.Validate(assets, holdings, credentials, nil))
+	assert.NoError(t, at.Validate(nil, assets, holdings, credentials, nil))
 }
 
 func TestAssetAccreditedOnly_RetailBlocked(t *testing.T) {
@@ -595,7 +595,7 @@ func TestAssetAccreditedOnly_RetailBlocked(t *testing.T) {
 
 	at, err := NewAssetTransaction(aliceKey, retailKey.Public(), asset.ID, 50, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	err = at.Validate(assets, holdings, credentials, nil)
+	err = at.Validate(nil, assets, holdings, credentials, nil)
 	assert.ErrorContains(t, err, "retail")
 }
 
@@ -625,7 +625,7 @@ func TestAssetAccreditedOnly_NoCredential(t *testing.T) {
 
 	at, err := NewAssetTransaction(aliceKey, bobKey.Public(), asset.ID, 50, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	err = at.Validate(assets, holdings, credentials, nil)
+	err = at.Validate(nil, assets, holdings, credentials, nil)
 	assert.ErrorContains(t, err, "accreditation")
 }
 
@@ -643,7 +643,7 @@ func TestAssetNoRestrictions_NoCredentialRequired(t *testing.T) {
 
 	at, err := NewAssetTransaction(aliceKey, bobKey.Public(), asset.ID, 50, AssetTxTypeTransfer)
 	require.NoError(t, err)
-	assert.NoError(t, at.Validate(assets, holdings, credentials, nil))
+	assert.NoError(t, at.Validate(nil, assets, holdings, credentials, nil))
 }
 
 // ---------------------------------------------------------------------------
@@ -665,7 +665,7 @@ func TestApplyAssetTransaction_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 
 	// First application: should succeed.
-	require.NoError(t, at.Validate(assets, holdings, nil, nil))
+	require.NoError(t, at.Validate(nil, assets, holdings, nil, nil))
 	require.NoError(t, ApplyAssetTransaction(at, assets, holdings))
 
 	// Second application: Alice's balance is now 0 — must fail.
@@ -687,7 +687,7 @@ func TestValidate_UnknownAsset(t *testing.T) {
 	at, err := NewAssetTransaction(aliceKey, bobKey.Public(), "nonexistent-asset-id", 10, AssetTxTypeTransfer)
 	require.NoError(t, err)
 
-	err = at.Validate(assets, holdings, nil, nil)
+	err = at.Validate(nil, assets, holdings, nil, nil)
 	assert.ErrorContains(t, err, "unknown asset ID")
 }
 

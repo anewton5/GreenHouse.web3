@@ -84,7 +84,12 @@ func TestDefaultVotingStrategy_BlockWithAssetTx_ReturnsTrue(t *testing.T) {
 
 func TestDefaultVotingStrategy_BlockWithOrderTx_ReturnsTrue(t *testing.T) {
 	s := &DefaultVotingStrategy{}
-	b := Block{OrderTransactions: []OrderTransaction{{Order: Order{AssetID: "asset-1"}}}}
+	// Item 11: Vote now verifies Order.PlacedBy signature; use a properly signed order.
+	placerKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	order, err := NewOrder(placerKey, "asset-1", OrderSideBid, 10.0, 5.0, 0)
+	require.NoError(t, err)
+	b := Block{OrderTransactions: []OrderTransaction{{Order: *order}}}
 	assert.True(t, s.Vote(b))
 }
 
@@ -276,7 +281,10 @@ func TestNode_SyncBlockchain_CopiesPeerChain(t *testing.T) {
 // Node.HandleFork
 // ---------------------------------------------------------------------------
 
-func TestNode_HandleFork_LongerChainWins(t *testing.T) {
+// Item 12: HandleFork no longer replaces the local chain even when the peer is
+// longer. dBFT provides single-path irreversible finality; use SyncBlockchain
+// for legitimate catch-up.
+func TestNode_HandleFork_LongerChain_LocalChainUnchanged(t *testing.T) {
 	bc1 := newTestBlockchain(t)
 	bc2 := newTestBlockchain(t)
 
@@ -286,9 +294,11 @@ func TestNode_HandleFork_LongerChainWins(t *testing.T) {
 	n1 := makeNode(t, "n1", bc1)
 	n2 := makeNode(t, "n2", bc2)
 
+	wantLen := len(n1.Blockchain.Blocks)
 	n1.HandleFork(n2)
 
-	assert.Equal(t, len(bc2.Blocks), len(n1.Blockchain.Blocks))
+	assert.Equal(t, wantLen, len(n1.Blockchain.Blocks),
+		"HandleFork must not replace the local chain (dBFT single-path finality)")
 }
 
 func TestNode_HandleFork_ShorterChain_NoChange(t *testing.T) {

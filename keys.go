@@ -93,6 +93,19 @@ func PublicKeyFromString(pubKeyStr string) (*PublicKey, error) {
 	}
 	return &PublicKey{key: ed25519.PublicKey(pubKeyBytes)}, nil
 }
+// PublicKeyFromHex decodes a 64-character lowercase hex string (32 raw bytes)
+// into a PublicKey. This is the format used by GREENHOUSE_REGISTRY_PUBKEY.
+func PublicKeyFromHex(hexStr string) (*PublicKey, error) {
+	keyBytes, err := hex.DecodeString(hexStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid hex-encoded public key: %w", err)
+	}
+	if len(keyBytes) != pubKeyLen {
+		return nil, fmt.Errorf("invalid public key length: expected %d bytes, got %d", pubKeyLen, len(keyBytes))
+	}
+	return &PublicKey{key: ed25519.PublicKey(keyBytes)}, nil
+}
+
 func GeneratePublicKey(privateKey *PrivateKey) *PublicKey {
 	pubKey := privateKey.key.Public()
 	if pubKey == nil {
