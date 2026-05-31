@@ -9,8 +9,10 @@ import (
 	"log"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -163,6 +165,12 @@ type View struct {
 	Number int
 }
 
+const (
+	ConsensusModeHTTP   = "http"
+	ConsensusModeDBFT   = "dbft"
+	consensusModeHybrid = "hybrid"
+)
+
 type Blockchain struct {
 	// Mu guards all mutable state on this struct. Callers must hold Mu.RLock()
 	// for reads and Mu.Lock() for writes. Internal helpers (applyBlockState,
@@ -301,6 +309,25 @@ type Blockchain struct {
 	// Set to 0 to disable the timeout (not recommended for production).
 	ConsensusTimeout time.Duration
 
+	// ConsensusMode controls which block production path is enabled.
+	// "http" enables SealBlock and disables dBFT startConsensus.
+	// "dbft" enables dBFT startConsensus and disables SealBlock.
+	// "hybrid" (dev/test default) permits both paths for compatibility.
+	ConsensusMode string
+
+	// CommittedTxHashes stores hashes for all committed block transactions,
+	// across base/asset/order/credential transaction families, to prevent
+	// replaying already-committed entries in subsequently validated blocks.
+	CommittedTxHashes map[string]struct{}
+
+	// observability counters for enterprise monitoring and alerting.
+	consensusModeRejects      uint64
+	duplicateTxHashRejections uint64
+
+	metricsMu                 sync.RWMutex
+	consensusModeRejectByPath map[string]uint64
+	duplicateTxRejectByReason map[string]uint64
+
 	// OperatorKeyProvider is the node-operator's signing key used to add an
 	// operator Ed25519 signature to every sealed block (C-2). When nil (default
 	// in dev/test mode) the signing step is skipped. Set to a LocalKeyProvider
@@ -367,6 +394,14 @@ const (
 	// EventSTORCreated is emitted when a pattern-detection rule in applyBlockState
 	// creates a new STORDraft (MAR Article 16 — market manipulation suspicion).
 	EventSTORCreated = "stor_created"
+	// EventConsensusModeInvariant records the resolved startup mode and enabled
+	// block-production services after invariant evaluation.
+	EventConsensusModeInvariant = "consensus_mode_invariant"
+	// EventConsensusModeRejected is emitted when a mode-gated path is invoked.
+	EventConsensusModeRejected = "consensus_mode_rejected"
+	// EventDuplicateTransactionRejected is emitted when ValidateBlock rejects a
+	// duplicate transaction hash (already committed or duplicated in-block).
+	EventDuplicateTransactionRejected = "duplicate_transaction_rejected"
 )
 
 // EmitEvent is the exported entry point for emitEvent, allowing external
@@ -731,6 +766,12 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 // BroadcastBlock is called AFTER bc.Mu is released so network I/O does not
 // stall other readers/writers waiting on the mutex.
 func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTransaction, credTxs []CredentialTransaction) {
+	if bc.ConsensusMode == ConsensusModeDBFT {
+		bc.recordConsensusModeReject("SealBlock", ConsensusModeHTTP)
+		log.Printf("SealBlock: disabled in %q consensus mode", ConsensusModeDBFT)
+		return
+	}
+
 	var sealedBlock Block
 
 	func() {
@@ -1026,8 +1067,134 @@ func (bc *Blockchain) AddBlock(block Block) {
 		block.KeyVersion = bc.OperatorKeyProvider.PublicKeyString()
 	}
 	block.SetPayloadHash()
+	bc.markCommittedTxHashes(&block)
 	bc.Blocks = append(bc.Blocks, block)
 	bc.Nonce++
+}
+
+func (bc *Blockchain) recordConsensusModeReject(path string, expectedMode string) {
+	count := atomic.AddUint64(&bc.consensusModeRejects, 1)
+	bc.metricsMu.Lock()
+	bc.consensusModeRejectByPath[path]++
+	bc.metricsMu.Unlock()
+	log.Printf("consensus mode reject: path=%s mode=%s expected=%s count=%d", path, bc.ConsensusMode, expectedMode, count)
+	bc.emitEvent(EventConsensusModeRejected, map[string]any{
+		"path":          path,
+		"active_mode":   bc.ConsensusMode,
+		"expected_mode": expectedMode,
+		"count":         count,
+	})
+}
+
+func (bc *Blockchain) recordDuplicateTxHashRejection(hashKey string, reason string) {
+	count := atomic.AddUint64(&bc.duplicateTxHashRejections, 1)
+	bc.metricsMu.Lock()
+	bc.duplicateTxRejectByReason[reason]++
+	bc.metricsMu.Unlock()
+	log.Printf("duplicate tx hash rejected: reason=%s hash=%s count=%d", reason, hashKey, count)
+	bc.emitEvent(EventDuplicateTransactionRejected, map[string]any{
+		"reason":    reason,
+		"hash":      hashKey,
+		"count":     count,
+		"blockMode": bc.ConsensusMode,
+	})
+}
+
+func (bc *Blockchain) ConsensusModeRejectCount() uint64 {
+	if bc == nil {
+		return 0
+	}
+	return atomic.LoadUint64(&bc.consensusModeRejects)
+}
+
+func (bc *Blockchain) DuplicateTxHashRejectCount() uint64 {
+	if bc == nil {
+		return 0
+	}
+	return atomic.LoadUint64(&bc.duplicateTxHashRejections)
+}
+
+func (bc *Blockchain) ConsensusModeRejectByPathSnapshot() map[string]uint64 {
+	if bc == nil {
+		return map[string]uint64{}
+	}
+	bc.metricsMu.RLock()
+	defer bc.metricsMu.RUnlock()
+	result := make(map[string]uint64, len(bc.consensusModeRejectByPath))
+	for path, count := range bc.consensusModeRejectByPath {
+		result[path] = count
+	}
+	return result
+}
+
+func (bc *Blockchain) DuplicateTxRejectByReasonSnapshot() map[string]uint64 {
+	if bc == nil {
+		return map[string]uint64{}
+	}
+	bc.metricsMu.RLock()
+	defer bc.metricsMu.RUnlock()
+	result := make(map[string]uint64, len(bc.duplicateTxRejectByReason))
+	for reason, count := range bc.duplicateTxRejectByReason {
+		result[reason] = count
+	}
+	return result
+}
+
+func transactionHashKey(tx Transaction) string {
+	return "base:" + hex.EncodeToString(tx.hash())
+}
+
+func typedTransactionHashKey(prefix string, tx any) string {
+	data, _ := json.Marshal(tx)
+	hash := sha3.Sum256(data)
+	return prefix + ":" + hex.EncodeToString(hash[:])
+}
+
+func blockTransactionHashKeys(block *Block) []string {
+	count := len(block.Transactions) + len(block.AssetTransactions) + len(block.OrderTransactions) + len(block.CredentialTransactions)
+	keys := make([]string, 0, count)
+
+	for _, tx := range block.Transactions {
+		keys = append(keys, transactionHashKey(tx))
+	}
+	for _, tx := range block.AssetTransactions {
+		keys = append(keys, typedTransactionHashKey("asset", tx))
+	}
+	for _, tx := range block.OrderTransactions {
+		keys = append(keys, typedTransactionHashKey("order", tx))
+	}
+	for _, tx := range block.CredentialTransactions {
+		keys = append(keys, typedTransactionHashKey("credential", tx))
+	}
+
+	return keys
+}
+
+func (bc *Blockchain) markCommittedTxHashes(block *Block) {
+	if bc.CommittedTxHashes == nil {
+		bc.CommittedTxHashes = make(map[string]struct{})
+	}
+	for _, key := range blockTransactionHashKeys(block) {
+		bc.CommittedTxHashes[key] = struct{}{}
+	}
+}
+
+func (bc *Blockchain) rebuildCommittedTxHashes() {
+	bc.CommittedTxHashes = make(map[string]struct{})
+	for i := range bc.Blocks {
+		bc.markCommittedTxHashes(&bc.Blocks[i])
+	}
+}
+
+func (bc *Blockchain) committedTxHashesSnapshot() map[string]struct{} {
+	bc.Mu.RLock()
+	defer bc.Mu.RUnlock()
+
+	snapshot := make(map[string]struct{}, len(bc.CommittedTxHashes))
+	for key := range bc.CommittedTxHashes {
+		snapshot[key] = struct{}{}
+	}
+	return snapshot
 }
 
 // SignTransaction signs the transaction with the given private key
@@ -1082,6 +1249,24 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 		len(block.OrderTransactions) == 0 && len(block.CredentialTransactions) == 0 {
 		fmt.Println("Invalid block: contains no transactions of any kind")
 		return false
+	}
+
+	// Item 24: reject duplicate transactions already committed on-chain and
+	// reject duplicate transaction hashes repeated within the same block.
+	committed := bc.committedTxHashesSnapshot()
+	seen := make(map[string]struct{})
+	for _, key := range blockTransactionHashKeys(&block) {
+		if _, exists := seen[key]; exists {
+			bc.recordDuplicateTxHashRejection(key, "duplicate_within_block")
+			fmt.Printf("Invalid block: duplicate transaction hash within block (%s)\n", key)
+			return false
+		}
+		seen[key] = struct{}{}
+		if _, exists := committed[key]; exists {
+			bc.recordDuplicateTxHashRejection(key, "already_committed")
+			fmt.Printf("Invalid block: transaction hash already committed (%s)\n", key)
+			return false
+		}
 	}
 
 	// Verify all transactions in the block
@@ -1410,6 +1595,89 @@ func (bc *Blockchain) CommitBlock(block Block) {
 	bc.finalizeBlock(block)
 }
 
+func testConsensusModeOverrideEnabled() bool {
+	return os.Getenv("GONETWORK_ALLOW_TEST_CONSENSUS_HYBRID") == "1"
+}
+
+func resolveConsensusMode(raw string, production bool) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	testOverride := testConsensusModeOverrideEnabled() && !production
+	if mode == "" {
+		if testOverride {
+			return consensusModeHybrid, nil
+		}
+		return "", fmt.Errorf("GREENHOUSE_CONSENSUS_MODE must be set to %q or %q", ConsensusModeHTTP, ConsensusModeDBFT)
+	}
+
+	switch mode {
+	case ConsensusModeHTTP, ConsensusModeDBFT:
+		return mode, nil
+	case consensusModeHybrid:
+		if testOverride {
+			return mode, nil
+		}
+		return "", fmt.Errorf("GREENHOUSE_CONSENSUS_MODE=%q is only allowed in unit tests when GONETWORK_ALLOW_TEST_CONSENSUS_HYBRID=1", consensusModeHybrid)
+	default:
+		return "", fmt.Errorf("invalid GREENHOUSE_CONSENSUS_MODE %q: expected %q or %q", mode, ConsensusModeHTTP, ConsensusModeDBFT)
+	}
+}
+
+func parseOptionalBoolEnv(name string) (bool, bool, error) {
+	raw, ok := os.LookupEnv(name)
+	if !ok {
+		return false, false, nil
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, true, fmt.Errorf("invalid %s=%q: expected boolean", name, raw)
+	}
+	return v, true, nil
+}
+
+func (bc *Blockchain) enforceConsensusStartupInvariant() error {
+	httpEnabled := bc.ConsensusMode == ConsensusModeHTTP
+	dbftEnabled := bc.ConsensusMode == ConsensusModeDBFT
+	if bc.ConsensusMode == consensusModeHybrid {
+		httpEnabled = true
+		dbftEnabled = true
+	}
+
+	if v, set, err := parseOptionalBoolEnv("GREENHOUSE_ENABLE_HTTP_SEAL"); err != nil {
+		return err
+	} else if set {
+		httpEnabled = v
+	}
+	if v, set, err := parseOptionalBoolEnv("GREENHOUSE_ENABLE_DBFT_CONSENSUS"); err != nil {
+		return err
+	} else if set {
+		dbftEnabled = v
+	}
+
+	if httpEnabled && dbftEnabled && !(bc.ConsensusMode == consensusModeHybrid && testConsensusModeOverrideEnabled()) {
+		return fmt.Errorf("startup invariant failed: conflicting services enabled (http_seal=true, dbft_consensus=true)")
+	}
+	if !httpEnabled && !dbftEnabled {
+		return fmt.Errorf("startup invariant failed: both block production services are disabled")
+	}
+	if bc.ConsensusMode == ConsensusModeHTTP && dbftEnabled {
+		return fmt.Errorf("startup invariant failed: mode=%s but dbft consensus service is enabled", bc.ConsensusMode)
+	}
+	if bc.ConsensusMode == ConsensusModeDBFT && httpEnabled {
+		return fmt.Errorf("startup invariant failed: mode=%s but http seal service is enabled", bc.ConsensusMode)
+	}
+
+	log.Printf("consensus startup invariant: mode=%s http_seal=%t dbft_consensus=%t", bc.ConsensusMode, httpEnabled, dbftEnabled)
+	bc.emitEvent(EventConsensusModeInvariant, map[string]any{
+		"mode":               bc.ConsensusMode,
+		"http_seal":          httpEnabled,
+		"dbft_consensus":     dbftEnabled,
+		"test_override":      testConsensusModeOverrideEnabled(),
+		"consensus_mode_raw": strings.TrimSpace(os.Getenv("GREENHOUSE_CONSENSUS_MODE")),
+	})
+
+	return nil
+}
+
 func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc := &Blockchain{
 		Blocks:          []Block{},
@@ -1418,11 +1686,21 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 		// (which updates that map) and VoteForDelegates (which reads bc.LockedWallets)
 		// both see the same data. Without this alignment the two stores diverge
 		// and delegate elections never see any staked balances (H-6).
-		LockedWallets:      GetLockedWallets(),
-		PublicKeyToID:      make(map[string]string),
-		UserIDToDelegateID: make(map[string]string),
-		Wallets:            make(map[string]*Wallet),
+		LockedWallets:             GetLockedWallets(),
+		PublicKeyToID:             make(map[string]string),
+		UserIDToDelegateID:        make(map[string]string),
+		Wallets:                   make(map[string]*Wallet),
+		ConsensusMode:             consensusModeHybrid,
+		CommittedTxHashes:         make(map[string]struct{}),
+		consensusModeRejectByPath: make(map[string]uint64),
+		duplicateTxRejectByReason: make(map[string]uint64),
 	}
+
+	consensusMode, err := resolveConsensusMode(os.Getenv("GREENHOUSE_CONSENSUS_MODE"), os.Getenv("GH_ENV") == "production")
+	if err != nil {
+		log.Fatalf("NewBlockchain: %v", err)
+	}
+	bc.ConsensusMode = consensusMode
 
 	// Add the genesis block. The PrevHash is a 64-character zero-value hex
 	// string (matching the length of a SHA3-256 hex digest) so the genesis
@@ -1527,6 +1805,10 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 
 	// Track 4: Real-time event stream (256-event buffer)
 	bc.Events = make(chan StreamEvent, 256)
+
+	if err := bc.enforceConsensusStartupInvariant(); err != nil {
+		log.Fatalf("NewBlockchain: %v", err)
+	}
 
 	// Settlement router — populated by RegisterSettlementProvider after construction.
 	bc.SettlementRouter = make(map[SettlementMethod]PaymentProvider)
@@ -1650,6 +1932,8 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 			bc.VoteForDelegates(nil)
 		}
 	}
+
+	bc.rebuildCommittedTxHashes()
 
 	var bootstrapPeers []string
 	if raw := os.Getenv("GREENHOUSE_BOOTSTRAP_PEERS"); raw != "" {

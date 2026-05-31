@@ -4,6 +4,13 @@ build:
 run: build
 	./bin/gonetwork
 
+check-consensus-mode:
+	./scripts/check_consensus_mode.sh
+
+# Production CI/CD guardrail: fail fast if runtime consensus mode is not explicit.
+ci-production-preflight: check-consensus-mode
+	@echo "Production preflight checks passed"
+
 test:
 	go test -v ./...
 
@@ -19,7 +26,7 @@ bootstrap-linux:
 # Usage: make deploy-bootstrap SSH_USER=root
 SSH_USER ?= root
 DO_HOST   = 206.189.29.191
-deploy-bootstrap: bootstrap-linux
+deploy-bootstrap: ci-production-preflight bootstrap-linux
 	scp bin/bootstrap-linux $(SSH_USER)@$(DO_HOST):~/bootstrap
 	@echo ""
 	@echo "Binary uploaded. Now SSH in and run:"

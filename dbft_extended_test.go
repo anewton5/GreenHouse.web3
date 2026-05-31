@@ -362,4 +362,5 @@ func TestNewNode_FieldsInitialised(t *testing.T) {
 	assert.Equal(t, "node-abc", n.ID)
 	assert.Equal(t, bc, n.Blockchain)
 	require.NotNil(t, n.Inbox, "Inbox channel must be initialised")
+	assert.Equal(t, 1000, cap(n.Inbox), "Item 23: inbox capacity must absorb consensus bursts")
 }

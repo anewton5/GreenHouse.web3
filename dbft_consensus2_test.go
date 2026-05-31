@@ -116,6 +116,37 @@ func TestReceiveMessage_PushesToInbox(t *testing.T) {
 	}
 }
 
+func TestReceiveMessage_DropsWhenInboxFull_IncrementsCounter(t *testing.T) {
+	bc := newTestBlockchain(t)
+	n := makeNode(t, "n1", bc)
+
+	// Use a tiny inbox so the non-blocking default path is exercised deterministically.
+	n.Inbox = make(chan Message, 1)
+	n.Inbox <- Message{Type: Vote, Payload: "first"}
+
+	n.ReceiveMessage(Message{Type: Consensus, Payload: "second"})
+
+	require.Eventually(t, func() bool {
+		return n.DroppedMessages() == 1
+	}, 500*time.Millisecond, 10*time.Millisecond)
+	assert.Equal(t, 1, len(n.Inbox), "full inbox should keep only the first message")
+}
+
+func TestReceiveMessage_BurstWithinCapacity_NoDrops(t *testing.T) {
+	bc := newTestBlockchain(t)
+	n := NewNode("n1", bc)
+
+	const burst = 50
+	for i := 0; i < burst; i++ {
+		n.ReceiveMessage(Message{Type: Vote, Payload: i})
+	}
+
+	require.Eventually(t, func() bool {
+		return len(n.Inbox) == burst
+	}, 1*time.Second, 10*time.Millisecond)
+	assert.Zero(t, n.DroppedMessages(), "messages within capacity should not be dropped")
+}
+
 // ---------------------------------------------------------------------------
 // PeriodicStateSaving
 // ---------------------------------------------------------------------------

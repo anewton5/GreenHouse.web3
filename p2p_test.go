@@ -3,6 +3,7 @@ package gonetwork
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -150,6 +151,9 @@ func TestHandleMessages(t *testing.T) {
 // TestPeerDiscovery_Local verifies that two in-process libp2p nodes can
 // discover each other without any external network dependency.
 func TestPeerDiscovery_Local(t *testing.T) {
+	t.Setenv("GONETWORK_DISABLE_P2P_DHT", "")
+	t.Setenv("GONETWORK_DISABLE_P2P_MDNS", "")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -293,6 +297,20 @@ func TestP2PNodeShutdown(t *testing.T) {
 	assert.NoError(t, err, "Shutdown should not return an error")
 
 	t.Log("P2PNode shutdown successfully")
+}
+
+func TestBroadcastBlock_AfterShutdown_ReturnsErrNodeShutdown(t *testing.T) {
+	ctx := context.Background()
+	blockchain := &Blockchain{}
+
+	node, err := NewP2PNode(ctx, blockchain, "test-item22-shutdown", nil)
+	require.NoError(t, err)
+
+	require.NoError(t, node.Shutdown(ctx))
+
+	err = node.BroadcastBlock(Block{Transactions: []Transaction{{Sender: "A", Receiver: "B", Amount: 1}}})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrNodeShutdown), "expected ErrNodeShutdown, got: %v", err)
 }
 
 func TestRealPeersCommunication(t *testing.T) {

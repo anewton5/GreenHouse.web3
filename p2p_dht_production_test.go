@@ -112,6 +112,8 @@ func TestNewP2PNode_DevMode_StartsSuccessfully(t *testing.T) {
 	// Ensure GH_ENV and peer manifest are NOT set so we exercise dev/test path.
 	t.Setenv("GH_ENV", "")
 	t.Setenv("GREENHOUSE_PEER_MANIFEST", "")
+	t.Setenv("GONETWORK_DISABLE_P2P_DHT", "")
+	t.Setenv("GONETWORK_DISABLE_P2P_MDNS", "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

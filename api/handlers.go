@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -683,6 +684,72 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version":   "2.0.0",
 		"timestamp": time.Now().UTC().Unix(),
 	})
+}
+
+func prometheusEscapeLabelValue(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	value = strings.ReplaceAll(value, "\"", "\\\"")
+	return value
+}
+
+// handleMetrics exports Prometheus text metrics for operational monitoring.
+// GET /metrics
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	modeRejectByPath := s.bc.ConsensusModeRejectByPathSnapshot()
+	duplicateRejectByReason := s.bc.DuplicateTxRejectByReasonSnapshot()
+
+	pathLabels := make([]string, 0, len(modeRejectByPath))
+	for path := range modeRejectByPath {
+		pathLabels = append(pathLabels, path)
+	}
+	sort.Strings(pathLabels)
+
+	reasonLabels := make([]string, 0, len(duplicateRejectByReason))
+	for reason := range duplicateRejectByReason {
+		reasonLabels = append(reasonLabels, reason)
+	}
+	sort.Strings(reasonLabels)
+
+	var out strings.Builder
+	out.WriteString("# HELP gonetwork_consensus_mode_rejections_total Number of consensus mode path rejections.\n")
+	out.WriteString("# TYPE gonetwork_consensus_mode_rejections_total counter\n")
+	out.WriteString(fmt.Sprintf("gonetwork_consensus_mode_rejections_total %d\n", s.bc.ConsensusModeRejectCount()))
+
+	out.WriteString("# HELP gonetwork_consensus_mode_rejections_by_path_total Number of consensus mode path rejections by path label.\n")
+	out.WriteString("# TYPE gonetwork_consensus_mode_rejections_by_path_total counter\n")
+	for _, path := range pathLabels {
+		out.WriteString(fmt.Sprintf(
+			"gonetwork_consensus_mode_rejections_by_path_total{path=\"%s\"} %d\n",
+			prometheusEscapeLabelValue(path),
+			modeRejectByPath[path],
+		))
+	}
+
+	out.WriteString("# HELP gonetwork_duplicate_transaction_rejections_total Number of rejected duplicate transaction hashes.\n")
+	out.WriteString("# TYPE gonetwork_duplicate_transaction_rejections_total counter\n")
+	out.WriteString(fmt.Sprintf("gonetwork_duplicate_transaction_rejections_total %d\n", s.bc.DuplicateTxHashRejectCount()))
+
+	out.WriteString("# HELP gonetwork_duplicate_transaction_rejections_by_reason_total Number of rejected duplicate transaction hashes by reason label.\n")
+	out.WriteString("# TYPE gonetwork_duplicate_transaction_rejections_by_reason_total counter\n")
+	for _, reason := range reasonLabels {
+		out.WriteString(fmt.Sprintf(
+			"gonetwork_duplicate_transaction_rejections_by_reason_total{reason=\"%s\"} %d\n",
+			prometheusEscapeLabelValue(reason),
+			duplicateRejectByReason[reason],
+		))
+	}
+
+	out.WriteString("# HELP gonetwork_consensus_mode_active Active consensus mode gauge (one-hot).\n")
+	out.WriteString("# TYPE gonetwork_consensus_mode_active gauge\n")
+	out.WriteString(fmt.Sprintf(
+		"gonetwork_consensus_mode_active{mode=\"%s\"} 1\n",
+		prometheusEscapeLabelValue(s.bc.ConsensusMode),
+	))
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(out.String()))
 }
 
 // ---------------------------------------------------------------------------

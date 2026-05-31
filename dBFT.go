@@ -11,6 +11,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -29,16 +30,17 @@ type ViewChangeRequest struct {
 
 // Simplified Node structure
 type Node struct {
-	ID             string
-	P2PPeerID      string
-	IsDelegate     bool
-	Stake          int
-	Votes          int
-	PrivateKey     ed25519.PrivateKey
-	PublicKey      ed25519.PublicKey
-	Inbox          chan Message `json:"-"`
-	VotingStrategy VotingStrategy
-	Blockchain     *Blockchain
+	ID              string
+	P2PPeerID       string
+	IsDelegate      bool
+	Stake           int
+	Votes           int
+	PrivateKey      ed25519.PrivateKey
+	PublicKey       ed25519.PublicKey
+	Inbox           chan Message `json:"-"`
+	droppedMessages uint64       `json:"-"`
+	VotingStrategy  VotingStrategy
+	Blockchain      *Blockchain
 	// viewChangeRequests accumulates incoming view-change request counts, keyed by
 	// proposed view number. Accessed only inside ProcessMessages (a single goroutine)
 	// so no separate mutex is required.
@@ -122,6 +124,12 @@ func (bc *Blockchain) RegisterDelegateVote(userID, delegateID string) {
 
 // Start the consensus process
 func (bc *Blockchain) startConsensus(p2pNode *P2PNode) {
+	if bc.ConsensusMode == ConsensusModeHTTP {
+		bc.recordConsensusModeReject("startConsensus", ConsensusModeDBFT)
+		log.Printf("startConsensus: disabled in %q consensus mode", ConsensusModeHTTP)
+		return
+	}
+
 	bc.currentView = View{Number: 0}
 	bc.selectSpeaker()
 	bc.assertDelegateConnectivity(p2pNode)
@@ -449,7 +457,22 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 		}
 	}
 
+	// Item 24: co-sign every dBFT-finalized block with the operator key so both
+	// HTTP and dBFT production paths emit a consistent signature set.
+	if bc.OperatorKeyProvider != nil {
+		payloadBytes, err := hex.DecodeString(block.PayloadHash)
+		if err == nil {
+			sig, err := bc.OperatorKeyProvider.Sign(payloadBytes)
+			if err == nil {
+				block.Signatures = append(block.Signatures, sig)
+			} else {
+				log.Printf("finalizeBlock: operator signing failed: %v", err)
+			}
+		}
+	}
+
 	bc.Blocks = append(bc.Blocks, block)
+	bc.markCommittedTxHashes(&bc.Blocks[len(bc.Blocks)-1])
 	bc.Nonce++
 
 	bc.emitEvent(EventBlockFinalised, map[string]any{
@@ -474,6 +497,12 @@ func (bc *Blockchain) finalizeBlock(block Block) {
 // pre-computes all chain-linking fields and PayloadHash, then collects real
 // Ed25519 delegate signatures via AchieveConsensus (Item 8 Step A).
 func (bc *Blockchain) createBlock(p2pNode *P2PNode) {
+	if bc.ConsensusMode == ConsensusModeHTTP {
+		bc.recordConsensusModeReject("createBlock", ConsensusModeDBFT)
+		log.Printf("createBlock: disabled in %q consensus mode", ConsensusModeHTTP)
+		return
+	}
+
 	if len(bc.Delegates) == 0 {
 		fmt.Println("No delegates available to create a block.")
 		return
@@ -577,10 +606,19 @@ func (bc *Blockchain) createBlock(p2pNode *P2PNode) {
 func NewNode(id string, blockchain *Blockchain) *Node {
 	return &Node{
 		ID:                 id,
-		Inbox:              make(chan Message, 10), // Buffered channel for messages
-		Blockchain:         blockchain,             // Initialize the blockchain reference
+		Inbox:              make(chan Message, 1000), // Buffered channel for consensus bursts
+		Blockchain:         blockchain,               // Initialize the blockchain reference
 		viewChangeRequests: make(map[int]int),
 	}
+}
+
+// DroppedMessages returns the cumulative number of messages dropped because
+// the node inbox was full.
+func (n *Node) DroppedMessages() uint64 {
+	if n == nil {
+		return 0
+	}
+	return atomic.LoadUint64(&n.droppedMessages)
 }
 
 func (n *Node) SyncBlockchain(peer *Node) {
@@ -627,11 +665,19 @@ func (n *Node) SendMessage(p2pNode *P2PNode, msg Message) {
 		fmt.Println("Failed to send message: p2p node is nil")
 		return
 	}
+	if p2pNode.Topic == nil {
+		fmt.Println("Failed to send message: p2p topic is nil")
+		return
+	}
 
 	if msg.Type == BlockProposal || msg.Type == Vote || msg.Type == ViewChangeReq || msg.Type == ViewChangeResp {
 		if err := p2pNode.PublishConsensusMessage(msg); err != nil {
 			fmt.Printf("Failed to send consensus message: %v\n", err)
 		}
+		return
+	}
+	if err := p2pNode.ensureOpen(); err != nil {
+		fmt.Printf("Failed to send message: %v\n", err)
 		return
 	}
 
@@ -641,7 +687,7 @@ func (n *Node) SendMessage(p2pNode *P2PNode, msg Message) {
 		return
 	}
 
-	if err := p2pNode.Topic.Publish(context.Background(), data); err != nil {
+	if err := p2pNode.Topic.Publish(p2pNode.publishCtx(), data); err != nil {
 		fmt.Printf("Failed to send message: %v\n", err)
 	}
 }
@@ -704,12 +750,14 @@ func (bc *Blockchain) assertDelegateConnectivity(p2pNode *P2PNode) {
 
 // ReceiveMessage handles incoming messages
 func (n *Node) ReceiveMessage(msg Message) {
-	// Use a non-blocking send: if Inbox (cap 10) is full the message is
+	// Use a non-blocking send: if Inbox is full the message is
 	// dropped rather than leaving a goroutine permanently blocked on the send.
 	go func() {
 		select {
 		case n.Inbox <- msg:
 		default:
+			dropped := atomic.AddUint64(&n.droppedMessages, 1)
+			log.Printf("Node %s inbox full — dropping message type %q (dropped=%d)", n.ID, msg.Type, dropped)
 			fmt.Printf("Node %s inbox full — message dropped\n", n.ID)
 		}
 	}()

@@ -160,6 +160,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	// Unauthenticated
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.Handle("POST /v1/auth/challenge", AuthRateLimitMiddleware(http.HandlerFunc(s.handleChallenge)))
 	mux.Handle("POST /v1/auth/verify", AuthRateLimitMiddleware(http.HandlerFunc(s.handleVerify)))
 	mux.Handle("POST /v1/auth/refresh", AuthRateLimitMiddleware(http.HandlerFunc(s.handleRefreshToken)))

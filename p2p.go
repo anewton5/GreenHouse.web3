@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"crypto/sha256"
@@ -34,6 +36,8 @@ import (
 
 var logger = golog.Logger("p2pnode")
 
+var ErrNodeShutdown = errors.New("p2p: node is shutting down")
+
 func init() {
 	// Enable debug logging for the "p2pnode" logger
 	golog.SetLogLevel("p2pnode", "debug")
@@ -55,11 +59,22 @@ type P2PNode struct {
 	// cancelBackground cancels the context used by background goroutines
 	// (DHT bootstrap/discovery loop). Called by Shutdown to stop the loop.
 	cancelBackground context.CancelFunc
+	// bgCtx is the node lifecycle context used by publish/connect operations.
+	bgCtx context.Context
+	// closed is atomically set to 1 when Shutdown begins.
+	closed int32
+	// bgWg tracks background goroutines (currently DHT bootstrap/discovery)
+	// so Shutdown can wait for them to exit before closing the host.
+	bgWg sync.WaitGroup
+	// bgMu serializes background goroutine registration with Shutdown's wait
+	// boundary to prevent Add/Wait races.
+	bgMu sync.Mutex
 	// reconnecting tracks peers that already have an active reconnect loop.
 	reconnecting sync.Map
 }
 
 type mdnsNotifee struct {
+	ctx  context.Context
 	host host.Host
 }
 
@@ -241,15 +256,19 @@ func (g *AllowlistGater) InterceptUpgraded(_ network.Conn) (bool, control.Discon
 }
 
 func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
-	if err := n.host.Connect(context.Background(), pi); err != nil {
+	ctx := n.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := n.host.Connect(ctx, pi); err != nil {
 		log.Printf("Failed to connect to mDNS peer: %v", err)
 	} else {
 		log.Printf("Connected to mDNS peer: %s", pi.ID.String())
 	}
 }
 
-func setupMdnsDiscovery(h host.Host, serviceTag string) (mdns.Service, error) {
-	service := mdns.NewMdnsService(h, serviceTag, &mdnsNotifee{host: h})
+func setupMdnsDiscovery(ctx context.Context, h host.Host, serviceTag string) (mdns.Service, error) {
+	service := mdns.NewMdnsService(h, serviceTag, &mdnsNotifee{ctx: ctx, host: h})
 	if service == nil {
 		return nil, fmt.Errorf("failed to create mDNS service")
 	}
@@ -272,7 +291,9 @@ func (n *peerReconnectNotifee) Disconnected(_ network.Network, c network.Conn) {
 	if !n.node.Gater.isExplicitlyAllowlisted(pid) {
 		return
 	}
-	go n.node.reconnectPeer(pid, c.RemoteMultiaddr())
+	n.node.startTrackedBackground(func() {
+		n.node.reconnectPeer(pid, c.RemoteMultiaddr())
+	})
 }
 
 // isExplicitlyAllowlisted returns true only when the peer is present in the
@@ -297,6 +318,15 @@ func (n *P2PNode) reconnectPeer(pid peer.ID, remote ma.Multiaddr) {
 
 	backoff := 100 * time.Millisecond
 	for attempt := 1; attempt <= 10; attempt++ {
+		if atomic.LoadInt32(&n.closed) == 1 {
+			return
+		}
+
+		baseCtx := n.publishCtx()
+		if baseCtx.Err() != nil {
+			return
+		}
+
 		if n.Host.Network().Connectedness(pid) == network.Connected {
 			return
 		}
@@ -308,7 +338,7 @@ func (n *P2PNode) reconnectPeer(pid peer.ID, remote ma.Multiaddr) {
 			info.Addrs = []ma.Multiaddr{remote}
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(baseCtx, 5*time.Second)
 		err := n.Host.Connect(ctx, info)
 		cancel()
 		if err == nil && n.Host.Network().Connectedness(pid) == network.Connected {
@@ -316,13 +346,38 @@ func (n *P2PNode) reconnectPeer(pid peer.ID, remote ma.Multiaddr) {
 			return
 		}
 
-		time.Sleep(backoff)
+		t := time.NewTimer(backoff)
+		select {
+		case <-baseCtx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
 		backoff *= 2
 		if backoff > 30*time.Second {
 			backoff = 30 * time.Second
 		}
 	}
 	logger.Warnf("Reconnect exhausted for peer %s after 10 attempts", pid)
+}
+
+// startTrackedBackground launches fn as a tracked background goroutine unless
+// shutdown has already started.
+func (n *P2PNode) startTrackedBackground(fn func()) bool {
+	if n == nil || fn == nil {
+		return false
+	}
+	n.bgMu.Lock()
+	defer n.bgMu.Unlock()
+	if atomic.LoadInt32(&n.closed) == 1 {
+		return false
+	}
+	n.bgWg.Add(1)
+	go func() {
+		defer n.bgWg.Done()
+		fn()
+	}()
+	return true
 }
 
 // tunedGossipSubParams derives mesh settings from expected validator count.
@@ -413,18 +468,25 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	committed := false
 	defer func() {
 		if !committed {
+			if h != nil {
+				if err := h.Close(); err != nil {
+					logger.Warnf("NewP2PNode cleanup: failed to close host: %v", err)
+				}
+			}
 			bgCancel()
 		}
 	}()
 
-	if os.Getenv("GH_ENV") != "production" {
+	var dht *kaddht.IpfsDHT
+
+	if os.Getenv("GH_ENV") != "production" && os.Getenv("GONETWORK_DISABLE_P2P_DHT") != "1" {
 		// Initialize the DHT in client mode for peer discovery.
 		// Client mode means this node only queries the DHT and never accepts
 		// routing table entries from unknown peers, eliminating the Sybil
 		// attack surface described in GO-2024-3218. The bootstrap node
 		// (cmd/bootstrap) runs in ModeServer and is the sole authoritative
 		// DHT server.
-		dht, err := kaddht.New(ctx, h, kaddht.Mode(kaddht.ModeClient))
+		dht, err = kaddht.New(ctx, h, kaddht.Mode(kaddht.ModeClient))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create DHT: %v", err)
 		}
@@ -438,96 +500,17 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 				logger.Warnf("Invalid bootstrap peer address: %s", addr)
 				continue
 			}
-			if err := h.Connect(ctx, *peerAddr); err != nil {
+			if err := h.Connect(bgCtx, *peerAddr); err != nil {
 				logger.Warnf("Failed to connect to bootstrap peer: %s", addr)
 			} else {
 				logger.Infof("Connected to bootstrap peer: %s", addr)
 			}
 		}
 
-		// Bootstrap the DHT and discover peers asynchronously in the background.
-		// bgCtx is derived from the caller context and is cancelled by Shutdown,
-		// so the goroutine terminates when the node is shut down.
-		go func() {
-			// Retry connecting to bootstrap peers
-			if len(bootstrapPeers) > 0 {
-				retryCount := 0
-				maxRetries := 10
-				for len(h.Network().Peers()) == 0 && retryCount < maxRetries {
-					logger.Debugf("Waiting for peers in the routing table... (attempt %d/%d)", retryCount+1, maxRetries)
-					select {
-					case <-bgCtx.Done():
-						return
-					case <-time.After(2 * time.Second):
-					}
-					retryCount++
-				}
-				logger.Infof("Current peers in the network: %v", h.Network().Peers())
-			}
-
-			if err := dht.Bootstrap(bgCtx); err != nil {
-				logger.Warnf("Failed to bootstrap DHT: %v", err)
-				return
-			}
-			logger.Infof("DHT bootstrapped successfully")
-
-			// Give DHT time to populate routing table
-			select {
-			case <-bgCtx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-			peersCount := len(dht.RoutingTable().ListPeers())
-			logger.Infof("DHT routing table now has %d peers", peersCount)
-
-			// Advertise the rendezvous point
-			rendezvous := "greenhouse-p2p-network"
-			logger.Infof("Advertising rendezvous point: %s", rendezvous)
-
-			// Generate a valid CID from the rendezvous string
-			hash := sha256.Sum256([]byte(rendezvous))
-			mh, err := multihash.Encode(hash[:], multihash.SHA2_256)
-			if err != nil {
-				logger.Warnf("Failed to create multihash for rendezvous: %v", err)
-				return
-			}
-			rendezvousCID := cid.NewCidV1(cid.Raw, mh)
-
-			if err := dht.Provide(bgCtx, rendezvousCID, true); err != nil {
-				logger.Warnf("Failed to advertise rendezvous point: %v", err)
-			} else {
-				logger.Infof("Rendezvous point advertised successfully")
-			}
-
-			// Discover peers advertising the same rendezvous point
-			for {
-				if bgCtx.Err() != nil {
-					return // node is shutting down
-				}
-				peers, err := dht.FindProviders(bgCtx, rendezvousCID)
-				if err != nil {
-					logger.Debugf("Error finding providers: %v", err)
-				} else {
-					for _, p := range peers {
-						if p.ID != h.ID() {
-							logger.Infof("Discovered peer: %s", p.ID.String())
-							if err := h.Connect(bgCtx, p); err != nil {
-								logger.Debugf("Failed to connect to peer %s: %v", p.ID.String(), err)
-							} else {
-								logger.Infof("Successfully connected to peer: %s", p.ID.String())
-							}
-						}
-					}
-				}
-				select {
-				case <-bgCtx.Done():
-					return
-				case <-time.After(5 * time.Second):
-				}
-			}
-		}()
-	} else {
+	} else if os.Getenv("GH_ENV") == "production" {
 		logger.Infof("DHT discovery disabled in production (GH_ENV=production)")
+	} else {
+		logger.Infof("DHT discovery disabled (GONETWORK_DISABLE_P2P_DHT=1)")
 	}
 
 	// Create a tuned GossipSub service for validator-sized meshes.
@@ -607,15 +590,17 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	// M-10: mDNS is only enabled outside production to avoid advertising
 	// node addresses on the local LAN in production deployments.
 	var mdnsSvc mdns.Service
-	if os.Getenv("GH_ENV") != "production" {
+	if os.Getenv("GH_ENV") != "production" && os.Getenv("GONETWORK_DISABLE_P2P_MDNS") != "1" {
 		sanitizedTopic := strings.NewReplacer("/", "-", " ", "-").Replace(topicName)
 		mdnsTag := "greenhouse-mdns-" + sanitizedTopic
-		mdnsSvc, err = setupMdnsDiscovery(h, mdnsTag)
+		mdnsSvc, err = setupMdnsDiscovery(bgCtx, h, mdnsTag)
 		if err != nil {
 			logger.Warnf("mDNS discovery unavailable: %v", err)
 		}
-	} else {
+	} else if os.Getenv("GH_ENV") == "production" {
 		logger.Infof("mDNS discovery disabled in production (GH_ENV=production)")
+	} else {
+		logger.Infof("mDNS discovery disabled (GONETWORK_DISABLE_P2P_MDNS=1)")
 	}
 
 	// Create and return the P2PNode
@@ -631,6 +616,92 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 		Gater:            gater,
 		limiter:          rate.NewLimiter(rate.Every(100*time.Millisecond), 10),
 		cancelBackground: bgCancel,
+		bgCtx:            bgCtx,
+	}
+
+	// Bootstrap the DHT and discover peers asynchronously in the background.
+	// bgCtx is derived from the caller context and is cancelled by Shutdown,
+	// so the goroutine terminates when the node is shut down.
+	if dht != nil {
+		node.startTrackedBackground(func() {
+
+			// Retry connecting to bootstrap peers
+			if len(bootstrapPeers) > 0 {
+				retryCount := 0
+				maxRetries := 10
+				for len(h.Network().Peers()) == 0 && retryCount < maxRetries {
+					logger.Debugf("Waiting for peers in the routing table... (attempt %d/%d)", retryCount+1, maxRetries)
+					select {
+					case <-bgCtx.Done():
+						return
+					case <-time.After(2 * time.Second):
+					}
+					retryCount++
+				}
+				logger.Infof("Current peers in the network: %v", h.Network().Peers())
+			}
+
+			if err := dht.Bootstrap(bgCtx); err != nil {
+				logger.Warnf("Failed to bootstrap DHT: %v", err)
+				return
+			}
+			logger.Infof("DHT bootstrapped successfully")
+
+			// Give DHT time to populate routing table
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+			peersCount := len(dht.RoutingTable().ListPeers())
+			logger.Infof("DHT routing table now has %d peers", peersCount)
+
+			// Advertise the rendezvous point
+			rendezvous := "greenhouse-p2p-network"
+			logger.Infof("Advertising rendezvous point: %s", rendezvous)
+
+			// Generate a valid CID from the rendezvous string
+			hash := sha256.Sum256([]byte(rendezvous))
+			mh, err := multihash.Encode(hash[:], multihash.SHA2_256)
+			if err != nil {
+				logger.Warnf("Failed to create multihash for rendezvous: %v", err)
+				return
+			}
+			rendezvousCID := cid.NewCidV1(cid.Raw, mh)
+
+			if err := dht.Provide(bgCtx, rendezvousCID, true); err != nil {
+				logger.Warnf("Failed to advertise rendezvous point: %v", err)
+			} else {
+				logger.Infof("Rendezvous point advertised successfully")
+			}
+
+			// Discover peers advertising the same rendezvous point
+			for {
+				if bgCtx.Err() != nil {
+					return // node is shutting down
+				}
+				peers, err := dht.FindProviders(bgCtx, rendezvousCID)
+				if err != nil {
+					logger.Debugf("Error finding providers: %v", err)
+				} else {
+					for _, p := range peers {
+						if p.ID != h.ID() {
+							logger.Infof("Discovered peer: %s", p.ID.String())
+							if err := h.Connect(bgCtx, p); err != nil {
+								logger.Debugf("Failed to connect to peer %s: %v", p.ID.String(), err)
+							} else {
+								logger.Infof("Successfully connected to peer: %s", p.ID.String())
+							}
+						}
+					}
+				}
+				select {
+				case <-bgCtx.Done():
+					return
+				case <-time.After(5 * time.Second):
+				}
+			}
+		})
 	}
 
 	// Register reconnect notifee (Item 19 Step B).
@@ -648,6 +719,9 @@ func (n *P2PNode) BroadcastAllowlistTransaction(at AllowlistTransaction) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
 	}
+	if err := n.ensureOpen(); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(at)
 	if err != nil {
 		return fmt.Errorf("failed to serialize allowlist transaction: %w", err)
@@ -661,7 +735,7 @@ func (n *P2PNode) BroadcastAllowlistTransaction(at AllowlistTransaction) error {
 	if err != nil {
 		return fmt.Errorf("failed to serialize P2PMessage: %w", err)
 	}
-	return n.Topic.Publish(context.Background(), data)
+	return n.Topic.Publish(n.publishCtx(), data)
 }
 
 // PublishConsensusMessage sends a dBFT coordination message to the dedicated
@@ -670,21 +744,30 @@ func (n *P2PNode) PublishConsensusMessage(msg Message) error {
 	if n == nil || n.ConsensusTopic == nil {
 		return fmt.Errorf("P2PNode or ConsensusTopic is not initialized")
 	}
+	if err := n.ensureOpen(); err != nil {
+		return err
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to serialize consensus message: %w", err)
 	}
-	return n.ConsensusTopic.Publish(context.Background(), data)
+	return n.ConsensusTopic.Publish(n.publishCtx(), data)
 }
 
 func (n *P2PNode) BroadcastPing(ctx context.Context) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
 	}
+	if err := n.ensureOpen(); err != nil {
+		return err
+	}
 	message := P2PMessage{Type: MessageTypePing, Payload: []byte("ping")}
 	data, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("failed to serialize ping: %v", err)
+	}
+	if ctx == nil {
+		ctx = n.publishCtx()
 	}
 	return n.Topic.Publish(ctx, data)
 }
@@ -693,8 +776,11 @@ func (n *P2PNode) BroadcastTransaction(tx Transaction) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
 	}
+	if err := n.ensureOpen(); err != nil {
+		return err
+	}
 	if n.limiter != nil {
-		if err := n.limiter.Wait(context.Background()); err != nil {
+		if err := n.limiter.Wait(n.publishCtx()); err != nil {
 			return fmt.Errorf("broadcast transaction rate-limited: %w", err)
 		}
 	}
@@ -718,15 +804,18 @@ func (n *P2PNode) BroadcastTransaction(tx Transaction) error {
 	}
 
 	// Publish the message to the topic
-	return n.Topic.Publish(context.Background(), data)
+	return n.Topic.Publish(n.publishCtx(), data)
 }
 
 func (n *P2PNode) BroadcastBlock(block Block) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
 	}
+	if err := n.ensureOpen(); err != nil {
+		return err
+	}
 	if n.limiter != nil {
-		if err := n.limiter.Wait(context.Background()); err != nil {
+		if err := n.limiter.Wait(n.publishCtx()); err != nil {
 			return fmt.Errorf("broadcast block rate-limited: %w", err)
 		}
 	}
@@ -750,12 +839,15 @@ func (n *P2PNode) BroadcastBlock(block Block) error {
 	}
 
 	// Publish the message to the topic
-	return n.Topic.Publish(context.Background(), data)
+	return n.Topic.Publish(n.publishCtx(), data)
 }
 
 func (n *P2PNode) BroadcastAssetTransaction(at AssetTransaction) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	if err := n.ensureOpen(); err != nil {
+		return err
 	}
 	payload, err := json.Marshal(at)
 	if err != nil {
@@ -766,12 +858,15 @@ func (n *P2PNode) BroadcastAssetTransaction(at AssetTransaction) error {
 	if err != nil {
 		return fmt.Errorf("failed to serialize P2PMessage: %w", err)
 	}
-	return n.Topic.Publish(context.Background(), data)
+	return n.Topic.Publish(n.publishCtx(), data)
 }
 
 func (n *P2PNode) BroadcastCredential(ct CredentialTransaction) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	if err := n.ensureOpen(); err != nil {
+		return err
 	}
 	payload, err := json.Marshal(ct)
 	if err != nil {
@@ -782,12 +877,15 @@ func (n *P2PNode) BroadcastCredential(ct CredentialTransaction) error {
 	if err != nil {
 		return fmt.Errorf("failed to serialize P2PMessage: %w", err)
 	}
-	return n.Topic.Publish(context.Background(), data)
+	return n.Topic.Publish(n.publishCtx(), data)
 }
 
 func (n *P2PNode) BroadcastPaymentConfirmation(pc PaymentConfirmation) error {
 	if n == nil || n.Topic == nil {
 		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	if err := n.ensureOpen(); err != nil {
+		return err
 	}
 	payload, err := json.Marshal(pc)
 	if err != nil {
@@ -798,7 +896,7 @@ func (n *P2PNode) BroadcastPaymentConfirmation(pc PaymentConfirmation) error {
 	if err != nil {
 		return fmt.Errorf("failed to serialize P2PMessage: %w", err)
 	}
-	return n.Topic.Publish(context.Background(), data)
+	return n.Topic.Publish(n.publishCtx(), data)
 }
 
 func (n *P2PNode) HandleMessages(ctx context.Context) {
@@ -935,7 +1033,12 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 				continue
 			}
 			if n.Gater != nil {
-				if err := n.Gater.AllowPeer(peer.ID(at.PeerID), at.Signature); err != nil {
+				pid, err := peer.Decode(at.PeerID)
+				if err != nil {
+					log.Printf("Rejected allowlist_add with invalid peer ID %q: %v", at.PeerID, err)
+					continue
+				}
+				if err := n.Gater.AllowPeer(pid, at.Signature); err != nil {
 					log.Printf("Rejected allowlist_add for peer %s: %v", at.PeerID, err)
 				}
 			}
@@ -947,7 +1050,12 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 				continue
 			}
 			if n.Gater != nil {
-				if err := n.Gater.RevokePeer(peer.ID(at.PeerID), at.Signature); err != nil {
+				pid, err := peer.Decode(at.PeerID)
+				if err != nil {
+					log.Printf("Rejected allowlist_revoke with invalid peer ID %q: %v", at.PeerID, err)
+					continue
+				}
+				if err := n.Gater.RevokePeer(pid, at.Signature); err != nil {
 					log.Printf("Rejected allowlist_revoke for peer %s: %v", at.PeerID, err)
 				}
 			}
@@ -1012,12 +1120,12 @@ func (n *P2PNode) SendMessage(peerID string, message string) error {
 	}
 
 	// Connect to the peer
-	if err := n.Host.Connect(context.Background(), peerInfo); err != nil {
+	if err := n.Host.Connect(n.publishCtx(), peerInfo); err != nil {
 		return fmt.Errorf("failed to connect to peer %s: %v", peerInfo.ID, err)
 	}
 
 	// Open a stream
-	stream, err := n.Host.NewStream(context.Background(), peerInfo.ID, "/p2p/1.0.0")
+	stream, err := n.Host.NewStream(n.publishCtx(), peerInfo.ID, "/p2p/1.0.0")
 	if err != nil {
 		return fmt.Errorf("failed to open stream to peer %s: %v", peerInfo.ID, err)
 	}
@@ -1034,6 +1142,12 @@ func (n *P2PNode) SendMessage(peerID string, message string) error {
 }
 
 func (n *P2PNode) SendPing(peerID string) error {
+	if n == nil || n.Topic == nil {
+		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	if err := n.ensureOpen(); err != nil {
+		return err
+	}
 	pingMessage := P2PMessage{
 		Type:    MessageTypePing,
 		Payload: []byte("ping"),
@@ -1044,10 +1158,16 @@ func (n *P2PNode) SendPing(peerID string) error {
 		return fmt.Errorf("failed to serialize ping message: %v", err)
 	}
 
-	return n.Topic.Publish(context.Background(), data)
+	return n.Topic.Publish(n.publishCtx(), data)
 }
 
 func (n *P2PNode) SendAck(peerID string) error {
+	if n == nil || n.Topic == nil {
+		return fmt.Errorf("P2PNode or Topic is not initialized")
+	}
+	if err := n.ensureOpen(); err != nil {
+		return err
+	}
 	ackMessage := P2PMessage{
 		Type:    MessageTypeAck,
 		Payload: []byte("ack"),
@@ -1058,7 +1178,24 @@ func (n *P2PNode) SendAck(peerID string) error {
 		return fmt.Errorf("failed to serialize acknowledgment message: %v", err)
 	}
 
-	return n.Topic.Publish(context.Background(), data)
+	return n.Topic.Publish(n.publishCtx(), data)
+}
+
+func (n *P2PNode) ensureOpen() error {
+	if n == nil {
+		return fmt.Errorf("P2PNode is nil")
+	}
+	if atomic.LoadInt32(&n.closed) == 1 {
+		return ErrNodeShutdown
+	}
+	return nil
+}
+
+func (n *P2PNode) publishCtx() context.Context {
+	if n != nil && n.bgCtx != nil {
+		return n.bgCtx
+	}
+	return context.Background()
 }
 
 func (n *P2PNode) handleStream(stream network.Stream) {
@@ -1081,12 +1218,18 @@ func (n *P2PNode) Shutdown(ctx context.Context) error {
 	}
 
 	log.Println("Shutting down P2PNode...")
+	atomic.StoreInt32(&n.closed, 1)
+	// Establish the wait boundary after closing the registration gate.
+	n.bgMu.Lock()
+	n.bgMu.Unlock()
 
 	// Cancel the background DHT discovery goroutine first so it stops
 	// polling and making network calls before we tear down the host.
 	if n.cancelBackground != nil {
 		n.cancelBackground()
 	}
+	// Wait for DHT bootstrap/discovery goroutine to exit before closing host.
+	n.bgWg.Wait()
 
 	// Cancel the PubSub subscription
 	if n.Sub != nil {
