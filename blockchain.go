@@ -5,10 +5,12 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,15 @@ import (
 	"time"
 
 	"golang.org/x/crypto/sha3"
+)
+
+const (
+	defaultBackupInterval            = 24 * time.Hour
+	minBackupInterval                = 1 * time.Minute
+	maxBackupInterval                = 7 * 24 * time.Hour
+	defaultBackupKeep                = 30
+	maxBackupKeep                    = 1000
+	defaultConfirmedPaymentRetention = 90 * 24 * time.Hour
 )
 
 type Transaction struct {
@@ -309,6 +320,12 @@ type Blockchain struct {
 	// Set to 0 to disable the timeout (not recommended for production).
 	ConsensusTimeout time.Duration
 
+	// ConfirmedPaymentRetention bounds how long confirmations are kept in the
+	// in-memory cache before they are pruned. The durable bbolt ledger retains
+	// historical confirmations so duplicate callbacks remain idempotent after
+	// pruning and across restarts.
+	ConfirmedPaymentRetention time.Duration
+
 	// ConsensusMode controls which block production path is enabled.
 	// "http" enables SealBlock and disables dBFT startConsensus.
 	// "dbft" enables dBFT startConsensus and disables SealBlock.
@@ -402,6 +419,15 @@ const (
 	// EventDuplicateTransactionRejected is emitted when ValidateBlock rejects a
 	// duplicate transaction hash (already committed or duplicated in-block).
 	EventDuplicateTransactionRejected = "duplicate_transaction_rejected"
+	// EventPaymentConfirmationRejected is emitted when a payment webhook carries
+	// an amount or currency that does not match the on-chain instruction (F-3).
+	// Downstream consumers should treat this as a terminal non-retryable condition.
+	EventPaymentConfirmationRejected = "payment_confirmation_rejected"
+	// EventPaymentRegistrationFailed is emitted when the async goroutine that
+	// calls SettlementRegistrar.RegisterSettlement fails after a block is sealed.
+	// The instruction remains in PendingInstructions and can be retried via
+	// POST /v1/payments/{tradeID}/register (F-4).
+	EventPaymentRegistrationFailed = "payment_registration_failed"
 )
 
 // EmitEvent is the exported entry point for emitEvent, allowing external
@@ -470,6 +496,27 @@ func (bc *Blockchain) ProviderForMethod(method SettlementMethod) PaymentProvider
 	return bc.PaymentProvider
 }
 
+// PreferredSettlementMethod returns the optimal payment rail for the given
+// trade currency, automatically upgrading to a higher-fidelity method when the
+// corresponding provider is registered in SettlementRouter (F-5).
+//
+// Currently the only upgrade path is EUR: EURC → CeBM when a Pontes provider
+// has been registered via RegisterSettlementProvider(SettlementCeBM, …).
+// GBP, USD, CHF, and all other currencies pass through DefaultSettlementMethod
+// unchanged and are unaffected by router state.
+func (bc *Blockchain) PreferredSettlementMethod(currency string) SettlementMethod {
+	base := DefaultSettlementMethod(currency)
+	upgrades := map[SettlementMethod]SettlementMethod{
+		SettlementEURC: SettlementCeBM,
+	}
+	if upgraded, ok := upgrades[base]; ok {
+		if _, registered := bc.SettlementRouter[upgraded]; registered {
+			return upgraded
+		}
+	}
+	return base
+}
+
 // ExpireStaleInstructions removes PendingInstructions whose ExpiresAt deadline
 // has passed without a confirmed payment. An EventPaymentExpired is emitted for
 // each expired instruction. The DVP asset transfer is not applied — the trade
@@ -488,19 +535,27 @@ func (bc *Blockchain) ExpireStaleInstructions() {
 		}
 		// Skip instructions that have already been settled (webhook may have
 		// arrived before the expiry sweep runs).
-		if _, settled := bc.ConfirmedPayments[tradeID]; settled {
+		settled, err := bc.confirmedPaymentExistsLocked(tradeID)
+		if err != nil {
+			log.Printf("ExpireStaleInstructions: confirmed payment lookup failed trade=%s: %v", tradeID, err)
+			continue
+		}
+		if settled {
 			continue
 		}
 		delete(bc.PendingInstructions, tradeID)
+		delete(bc.PendingSettlements, tradeID)
 		bc.emitEvent(EventPaymentExpired, map[string]any{
-			"trade_id":   tradeID,
-			"asset_id":   instr.AssetID,
-			"payer":      instr.PayerWalletID,
-			"payee":      instr.PayeeWalletID,
-			"amount":     instr.TotalAmount,
-			"currency":   instr.Currency,
-			"method":     string(instr.Method),
-			"expired_at": instr.ExpiresAt,
+			"trade_id":              tradeID,
+			"asset_id":              instr.AssetID,
+			"payer":                 instr.PayerWalletID,
+			"payee":                 instr.PayeeWalletID,
+			"amount":                instr.TotalAmount,
+			"currency":              instr.Currency,
+			"method":                string(instr.Method),
+			"settlement_method":     string(instr.Method),
+			"pontes_transaction_id": instr.PontesTransactionID,
+			"expired_at":            instr.ExpiresAt,
 		})
 	}
 }
@@ -522,6 +577,12 @@ func (bc *Blockchain) ConfirmAndSettle(reference string, amount float64, currenc
 	return bc.confirmAndSettleLocked(reference, amount, currency)
 }
 
+// ErrPaymentMismatch is returned by ConfirmAndSettle when the amount or
+// currency in the webhook callback does not match the on-chain instruction.
+// Callers (webhook handlers) should respond with HTTP 422 Unprocessable Entity
+// to signal the provider that retrying this callback is futile (F-3).
+var ErrPaymentMismatch = errors.New("payment mismatch")
+
 // confirmAndSettleLocked is the lock-free body of ConfirmAndSettle.
 // bc.Mu must be held by the caller (e.g. applyBlockState).
 func (bc *Blockchain) confirmAndSettleLocked(reference string, amount float64, currency string) error {
@@ -541,15 +602,39 @@ func (bc *Blockchain) confirmAndSettleLocked(reference string, amount float64, c
 		return nil
 	}
 
-	// Idempotency: skip if already settled.
-	if _, settled := bc.ConfirmedPayments[tradeID]; settled {
-		return nil
+	// F-3: Validate the callback values against the on-chain instruction before
+	// any state mutation. Currency is checked first (cheaper); amount second.
+	// No state is mutated on mismatch — PendingSettlements is left intact.
+	if currency != instruction.Currency {
+		bc.emitEvent(EventPaymentConfirmationRejected, map[string]any{
+			"reference":         reference,
+			"expected_currency": instruction.Currency,
+			"received_currency": currency,
+			"expected_amount":   instruction.TotalAmount,
+			"received_amount":   amount,
+		})
+		return fmt.Errorf("ConfirmAndSettle: currency mismatch ref=%s got=%s want=%s: %w",
+			reference, currency, instruction.Currency, ErrPaymentMismatch)
+	}
+	if amount != instruction.TotalAmount {
+		bc.emitEvent(EventPaymentConfirmationRejected, map[string]any{
+			"reference":         reference,
+			"expected_currency": instruction.Currency,
+			"received_currency": currency,
+			"expected_amount":   instruction.TotalAmount,
+			"received_amount":   amount,
+		})
+		return fmt.Errorf("ConfirmAndSettle: amount mismatch ref=%s got=%.2f want=%.2f: %w",
+			reference, amount, instruction.TotalAmount, ErrPaymentMismatch)
 	}
 
-	// Record the confirmation via the registered provider.
-	provider := bc.ProviderForMethod(instruction.Method)
-	if err := provider.ConfirmPayment(reference, amount, currency); err != nil {
-		return fmt.Errorf("ConfirmAndSettle: provider confirm failed: %w", err)
+	// Idempotency: skip if already settled.
+	settled, err := bc.confirmedPaymentExistsLocked(tradeID)
+	if err != nil {
+		return fmt.Errorf("ConfirmAndSettle: confirmation lookup failed for trade %s: %w", tradeID, err)
+	}
+	if settled {
+		return nil
 	}
 
 	// Build and oracle-sign the on-chain confirmation.
@@ -561,7 +646,7 @@ func (bc *Blockchain) confirmAndSettleLocked(reference string, amount float64, c
 		ConfirmedAt:     time.Now().Unix(),
 	}
 	confirmation, _ = bc.OracleService.SignConfirmation(confirmation)
-	bc.ConfirmedPayments[tradeID] = confirmation
+	bc.cacheConfirmedPaymentLocked(confirmation)
 
 	bc.emitEvent(EventPaymentConfirmed, map[string]any{
 		"trade_id":  tradeID,
@@ -584,7 +669,77 @@ func (bc *Blockchain) confirmAndSettleLocked(reference string, amount float64, c
 		}
 	}
 
+	if err := bc.persistConfirmedPaymentLocked(confirmation); err != nil {
+		return fmt.Errorf("ConfirmAndSettle: confirmed payment persistence failed for trade %s: %w", tradeID, err)
+	}
+
 	return nil
+}
+
+func (bc *Blockchain) confirmedPaymentRetention() time.Duration {
+	if bc == nil || bc.ConfirmedPaymentRetention <= 0 {
+		return defaultConfirmedPaymentRetention
+	}
+	return bc.ConfirmedPaymentRetention
+}
+
+func resolveConfirmedPaymentRetention(raw string) time.Duration {
+	if raw == "" {
+		return defaultConfirmedPaymentRetention
+	}
+	days, err := strconv.Atoi(raw)
+	if err != nil || days <= 0 {
+		return defaultConfirmedPaymentRetention
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+func (bc *Blockchain) cacheConfirmedPaymentLocked(conf *PaymentConfirmation) {
+	if bc == nil || conf == nil {
+		return
+	}
+	if bc.ConfirmedPayments == nil {
+		bc.ConfirmedPayments = make(map[string]*PaymentConfirmation)
+	}
+	bc.ConfirmedPayments[conf.InstructionID] = conf
+	bc.pruneConfirmedPaymentsLocked(time.Now())
+}
+
+func (bc *Blockchain) persistConfirmedPaymentLocked(conf *PaymentConfirmation) error {
+	if bc == nil || conf == nil || bc.BlockStore == nil {
+		return nil
+	}
+	return bc.BlockStore.SaveConfirmedPayment(conf)
+}
+
+func (bc *Blockchain) confirmedPaymentExistsLocked(tradeID string) (bool, error) {
+	if bc == nil {
+		return false, nil
+	}
+	if conf, ok := bc.ConfirmedPayments[tradeID]; ok && conf != nil {
+		return true, nil
+	}
+	if bc.BlockStore == nil {
+		return false, nil
+	}
+	_, found, err := bc.BlockStore.LoadConfirmedPayment(tradeID)
+	return found, err
+}
+
+func (bc *Blockchain) pruneConfirmedPaymentsLocked(now time.Time) {
+	if bc == nil || len(bc.ConfirmedPayments) == 0 {
+		return
+	}
+	retention := bc.confirmedPaymentRetention()
+	if retention <= 0 {
+		return
+	}
+	cutoff := now.Add(-retention).Unix()
+	for tradeID, conf := range bc.ConfirmedPayments {
+		if conf == nil || conf.ConfirmedAt <= 0 || conf.ConfirmedAt < cutoff {
+			delete(bc.ConfirmedPayments, tradeID)
+		}
+	}
 }
 
 // applyBlockState processes all transactions contained in a block and updates
@@ -699,7 +854,7 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 				PricePerUnit:  trade.Price,
 				TotalAmount:   trade.Price * trade.Quantity,
 				Currency:      trade.Currency,
-				Method:        DefaultSettlementMethod(trade.Currency),
+				Method:        bc.PreferredSettlementMethod(trade.Currency),
 				PayerWalletID: trade.BuyerID,
 				PayeeWalletID: trade.SellerID,
 				Reference:     fmt.Sprintf("GH-%s", trade.ID[:8]),
@@ -725,16 +880,55 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			bc.PendingInstructions[trade.ID] = instruction
 			bc.PendingSettlements[trade.ID] = assetTxs[i]
 
+			// F-4: If the provider implements SettlementRegistrar, launch an async
+			// goroutine to register the DLT delivery leg with the external bridge
+			// (e.g. Pontes). Registration is non-blocking so block application is
+			// not delayed by provider network latency. We capture the instruction
+			// by value so the goroutine holds stable immutable input data; the
+			// result (transactionID) is written back under bc.Mu.
+			providerForReg := bc.ProviderForMethod(instruction.Method)
+			if registrar, ok := providerForReg.(SettlementRegistrar); ok {
+				instrSnap := *instruction // copy: goroutine must not read live ptr without lock
+				tradeIDSnap := trade.ID
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					_ = ctx // retryHTTP context threading is tracked in F-10
+					txID, err := registrar.RegisterSettlement(&instrSnap)
+					if err != nil {
+						log.Printf("[settlement] RegisterSettlement failed trade=%s ref=%s: %v",
+							tradeIDSnap, instrSnap.Reference, err)
+						bc.emitEvent(EventPaymentRegistrationFailed, map[string]any{
+							"trade_id":  tradeIDSnap,
+							"reference": instrSnap.Reference,
+							"error":     err.Error(),
+						})
+						return
+					}
+					// Write the Pontes transaction ID back to the live instruction
+					// under the lock so readers always see a consistent value.
+					bc.Mu.Lock()
+					if instr, exists := bc.PendingInstructions[tradeIDSnap]; exists {
+						instr.PontesTransactionID = txID
+						instr.SettlementNetwork = "eurosystem-pontes"
+					}
+					bc.Mu.Unlock()
+				}()
+			}
+
 			// 7. Attempt immediate synchronous confirmation (mock / local providers).
 			// Production providers (Modulr, EURC, Pontes) leave status pending and
 			// call ConfirmAndSettle via their webhook handler when payment arrives.
 			provider := bc.ProviderForMethod(instruction.Method)
-			_ = provider.ConfirmPayment(
+			if err := provider.ConfirmPayment(
+				context.Background(),
 				instruction.Reference,
 				instruction.TotalAmount,
 				instruction.Currency,
-			)
-			status, _ := provider.GetPaymentStatus(instruction.Reference)
+			); err != nil {
+				log.Printf("ConfirmPayment error for trade %s: %v", trade.ID, err)
+			}
+			status, _ := provider.GetPaymentStatus(context.Background(), instruction.Reference)
 			if status == PaymentStatusConfirmed {
 				// 8. DVP: apply the asset transfer now that payment is confirmed.
 				// applyBlockState already holds bc.Mu, so use the lock-free variant.
@@ -1560,6 +1754,12 @@ func productionReadinessError(bc *Blockchain) error {
 	if os.Getenv("GREENHOUSE_REGISTRY_PUBKEY") == "" {
 		return fmt.Errorf("production: GREENHOUSE_REGISTRY_PUBKEY is not set — set a hex-encoded Ed25519 registry public key")
 	}
+	// F-2: require MODULR_WEBHOOK_SECRET when the Modulr rail (FasterPay or SEPA) is active.
+	_, fasterPayActive := bc.SettlementRouter[SettlementFasterPay]
+	_, sepaActive := bc.SettlementRouter[SettlementSEPA]
+	if (fasterPayActive || sepaActive) && os.Getenv("MODULR_WEBHOOK_SECRET") == "" {
+		return fmt.Errorf("production: MODULR_WEBHOOK_SECRET is not set — required when SettlementFasterPay or SettlementSEPA is active")
+	}
 	return nil
 }
 
@@ -1857,6 +2057,7 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 
 	// Per-wallet sequence/nonce tracking for replay prevention.
 	bc.WalletSequences = make(map[string]int64)
+	bc.ConfirmedPaymentRetention = resolveConfirmedPaymentRetention(os.Getenv("GREENHOUSE_PAYMENT_RETENTION_DAYS"))
 
 	// Default consensus view-change timeout (M-2).
 	bc.ConsensusTimeout = 30 * time.Second
@@ -1917,6 +2118,8 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 			}
 		}
 
+		bc.pruneConfirmedPaymentsLocked(time.Now())
+
 		// Restore the active delegate set saved by the last VoteForDelegates call
 		// (Item 10 Step B). Re-initialises Inbox and viewChangeRequests so delegates
 		// are immediately usable for consensus without a new election round.
@@ -1934,6 +2137,14 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	}
 
 	bc.rebuildCommittedTxHashes()
+
+	if bc.BlockStore != nil {
+		if backupDir := strings.TrimSpace(os.Getenv("GREENHOUSE_BACKUP_DIR")); backupDir != "" {
+			interval := resolveBackupInterval(os.Getenv("GREENHOUSE_BACKUP_INTERVAL"))
+			keep := resolveBackupRetention(os.Getenv("GREENHOUSE_BACKUP_KEEP"))
+			go bc.runBlockStoreBackup(ctx, backupDir, interval, keep)
+		}
+	}
 
 	var bootstrapPeers []string
 	if raw := os.Getenv("GREENHOUSE_BOOTSTRAP_PEERS"); raw != "" {
@@ -2026,6 +2237,119 @@ func (bc *Blockchain) runReportingOutboxRetry(ctx context.Context, svc *NCARepor
 			}
 		} else {
 			delay = initialDelay
+		}
+	}
+}
+
+func resolveBackupInterval(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultBackupInterval
+	}
+	interval, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Printf("GREENHOUSE_BACKUP_INTERVAL parse error for %q: %v (using default %s)", raw, err, defaultBackupInterval)
+		return defaultBackupInterval
+	}
+	if interval < minBackupInterval {
+		log.Printf("GREENHOUSE_BACKUP_INTERVAL %s below minimum %s; clamping", interval, minBackupInterval)
+		return minBackupInterval
+	}
+	if interval > maxBackupInterval {
+		log.Printf("GREENHOUSE_BACKUP_INTERVAL %s above maximum %s; clamping", interval, maxBackupInterval)
+		return maxBackupInterval
+	}
+	return interval
+}
+
+func resolveBackupRetention(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultBackupKeep
+	}
+	keep, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("GREENHOUSE_BACKUP_KEEP parse error for %q: %v (using default %d)", raw, err, defaultBackupKeep)
+		return defaultBackupKeep
+	}
+	if keep < 0 {
+		log.Printf("GREENHOUSE_BACKUP_KEEP must be >= 0; got %d (using default %d)", keep, defaultBackupKeep)
+		return defaultBackupKeep
+	}
+	if keep > maxBackupKeep {
+		log.Printf("GREENHOUSE_BACKUP_KEEP %d above maximum %d; clamping", keep, maxBackupKeep)
+		return maxBackupKeep
+	}
+	return keep
+}
+
+func pruneOldBackups(backupDir string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		return err
+	}
+	var backups []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if filepath.Ext(e.Name()) == ".bak" {
+			backups = append(backups, e.Name())
+		}
+	}
+	if len(backups) <= keep {
+		return nil
+	}
+	for _, name := range backups[:len(backups)-keep] {
+		if err := os.Remove(filepath.Join(backupDir, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// runBlockStoreBackup writes periodic BBolt hot backups to backupDir.
+// keep controls retention of .bak files: 0 disables pruning, N keeps newest N.
+// The goroutine exits when ctx is cancelled.
+func (bc *Blockchain) runBlockStoreBackup(ctx context.Context, backupDir string, interval time.Duration, keep int) {
+	if bc == nil || bc.BlockStore == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = defaultBackupInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ts := <-ticker.C:
+			if err := os.MkdirAll(backupDir, 0700); err != nil {
+				log.Printf("runBlockStoreBackup: mkdir %q failed: %v", backupDir, err)
+				continue
+			}
+			if err := pruneOldBackups(backupDir, keep); err != nil {
+				log.Printf("runBlockStoreBackup: prune failed: %v", err)
+			}
+			name := fmt.Sprintf("greenhouse-%s.bak", ts.UTC().Format("20060102T150405Z"))
+			path := filepath.Join(backupDir, name)
+
+			f, err := os.Create(path)
+			if err != nil {
+				log.Printf("runBlockStoreBackup: create %q failed: %v", path, err)
+				continue
+			}
+			if err := bc.BlockStore.Backup(f); err != nil {
+				log.Printf("runBlockStoreBackup: backup write failed: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				log.Printf("runBlockStoreBackup: close %q failed: %v", path, err)
+			}
 		}
 	}
 }

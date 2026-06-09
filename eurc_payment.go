@@ -2,6 +2,7 @@ package gonetwork
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,75 +15,32 @@ import (
 	"time"
 )
 
-// EURCPaymentProvider implements PaymentProvider using Circle's EURC
-// euro stablecoin. EURC is a MiCA-regulated, euro-denominated stablecoin
-// issued by Circle Internet Financial in Europe. It provides near-instant
-// settlement finality on-chain and eliminates commercial-bank credit risk —
-// making it the primary EUR settlement bridge until the ECB's Pontes CeBM
-// pilot launches in Q3 2026.
-//
-// Upgrade path: once a PontesPaymentProvider is registered via
-// Blockchain.RegisterSettlementProvider(SettlementCeBM, pontesProvider),
-// new EUR instructions automatically route to CeBM. Existing EURC
-// instructions already in-flight continue to settle via this provider.
-//
-// Configuration (environment variables):
-//
-//	CIRCLE_API_KEY          — Circle API key
-//	CIRCLE_BASE_URL         — API base URL (default: https://api.circle.com/v1)
-//	CIRCLE_WALLET_SET_ID    — WalletSet to create EURC wallets under
-//	CIRCLE_WEBHOOK_SECRET   — HMAC-SHA256 secret for webhook signature verification
+// ----------------------------
+// EURC Provider
+// ----------------------------
+
 type EURCPaymentProvider struct {
-	apiKey        string
-	baseURL       string
-	walletSetID   string
-	webhookSecret string
-	client        *http.Client
+	apiKey           string
+	baseURL          string
+	walletSetID      string
+	webhookSecret    string
+	client           *http.Client
+	store            PaymentStore
+	operationTimeout time.Duration
 
-	mu       sync.Mutex
-	accounts map[string]string        // walletID → on-chain address
-	payments map[string]PaymentStatus // reference → status
+	mu             sync.Mutex
+	accounts       map[string]string
+	pendingAccount map[string]*eurcAccountRequest
+	payments       map[string]PaymentStatus
 }
 
-// NewEURCPaymentProviderFromEnv creates an EURCPaymentProvider from environment
-// variables. Returns an error if required variables are missing.
-func NewEURCPaymentProviderFromEnv() (*EURCPaymentProvider, error) {
-	apiKey := os.Getenv("CIRCLE_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("eurc: CIRCLE_API_KEY environment variable is required")
-	}
-	baseURL := os.Getenv("CIRCLE_BASE_URL")
-	if baseURL == "" {
-		baseURL = "https://api.circle.com/v1"
-	}
-	walletSetID := os.Getenv("CIRCLE_WALLET_SET_ID")
-	if walletSetID == "" {
-		return nil, fmt.Errorf("eurc: CIRCLE_WALLET_SET_ID environment variable is required")
-	}
-	webhookSecret := os.Getenv("CIRCLE_WEBHOOK_SECRET")
-	return NewEURCPaymentProvider(apiKey, baseURL, walletSetID, webhookSecret)
+type eurcAccountRequest struct {
+	done chan struct{}
+	addr string
+	err  error
+	mu   sync.Mutex
 }
 
-// NewEURCPaymentProvider creates an EURCPaymentProvider with explicit credentials.
-func NewEURCPaymentProvider(apiKey, baseURL, walletSetID, webhookSecret string) (*EURCPaymentProvider, error) {
-	if apiKey == "" {
-		return nil, fmt.Errorf("eurc: apiKey must not be empty")
-	}
-	if baseURL == "" {
-		return nil, fmt.Errorf("eurc: baseURL must not be empty")
-	}
-	return &EURCPaymentProvider{
-		apiKey:        apiKey,
-		baseURL:       baseURL,
-		walletSetID:   walletSetID,
-		webhookSecret: webhookSecret,
-		client:        &http.Client{Timeout: 30 * time.Second},
-		accounts:      make(map[string]string),
-		payments:      make(map[string]PaymentStatus),
-	}, nil
-}
-
-// circleWalletResponse is the shape of Circle's POST /wallets response.
 type circleWalletResponse struct {
 	Data struct {
 		Wallet struct {
@@ -92,103 +50,292 @@ type circleWalletResponse struct {
 	} `json:"data"`
 }
 
-// CreateVirtualAccount provisions a Circle EURC wallet for a participant and
-// returns its Ethereum on-chain address. The call is idempotent — repeated
-// calls for the same walletID return the cached address without re-calling the API.
-func (e *EURCPaymentProvider) CreateVirtualAccount(walletID string) (string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func NewEURCPaymentProviderFromEnv() (*EURCPaymentProvider, error) {
+	apiKey := os.Getenv("CIRCLE_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("eurc: CIRCLE_API_KEY required")
+	}
 
+	baseURL := os.Getenv("CIRCLE_BASE_URL")
+	if baseURL == "" {
+		baseURL = "https://api.circle.com/v1"
+	}
+
+	walletSetID := os.Getenv("CIRCLE_WALLET_SET_ID")
+	if walletSetID == "" {
+		return nil, fmt.Errorf("eurc: CIRCLE_WALLET_SET_ID required")
+	}
+
+	webhookSecret := os.Getenv("CIRCLE_WEBHOOK_SECRET")
+
+	store := NewMemoryPaymentStore()
+
+	return NewEURCPaymentProvider(apiKey, baseURL, walletSetID, webhookSecret, store)
+}
+
+func NewEURCPaymentProvider(apiKey, baseURL, walletSetID, webhookSecret string, store PaymentStore) (*EURCPaymentProvider, error) {
+	if apiKey == "" {
+		return nil, fmt.Errorf("eurc: apiKey must not be empty")
+	}
+	if baseURL == "" {
+		return nil, fmt.Errorf("eurc: baseURL must not be empty")
+	}
+	if store == nil {
+		return nil, fmt.Errorf("eurc: store must not be nil")
+	}
+	if webhookSecret == "" {
+		return nil, fmt.Errorf("eurc: webhookSecret must not be empty; webhook signature verification is required for production")
+	}
+
+	return &EURCPaymentProvider{
+		apiKey:           apiKey,
+		baseURL:          baseURL,
+		walletSetID:      walletSetID,
+		webhookSecret:    webhookSecret,
+		store:            store,
+		client:           &http.Client{Timeout: 30 * time.Second},
+		accounts:         make(map[string]string),
+		pendingAccount:   make(map[string]*eurcAccountRequest),
+		payments:         make(map[string]PaymentStatus),
+		operationTimeout: 10 * time.Second,
+	}, nil
+}
+
+// ----------------------------
+// Wallet creation
+// ----------------------------
+
+func (e *EURCPaymentProvider) CreateVirtualAccount(
+	ctx context.Context,
+	walletID string,
+) (string, error) {
+
+	ctx, cancel := context.WithTimeout(ctx, e.operationTimeout)
+	defer cancel()
+
+	// -------------------------
+	// Fast path cache
+	// -------------------------
+	e.mu.Lock()
 	if addr, ok := e.accounts[walletID]; ok {
+		e.mu.Unlock()
 		return addr, nil
 	}
 
-	// Build a collision-resistant idempotency key within Circle's 36-char limit.
-	// Naive prefix truncation would make two walletIDs that share the first 33
-	// characters map to the same key — hash the full ID instead.
-	idempotencyKey := "gh-" + walletID
-	if len(idempotencyKey) > 36 {
-		h := sha256.Sum256([]byte(walletID))
-		idempotencyKey = "gh-" + hex.EncodeToString(h[:])[:33]
+	// -------------------------
+	// In-flight dedupe
+	// -------------------------
+	if req, ok := e.pendingAccount[walletID]; ok {
+		e.mu.Unlock()
+
+		select {
+		case <-req.done:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+
+		return req.addr, req.err
 	}
 
-	payload := map[string]any{
-		"idempotencyKey": idempotencyKey,
-		"walletSetId":    e.walletSetID,
-		"blockchains":    []string{"ETH"},
+	// Create request holder
+	req := &eurcAccountRequest{
+		done: make(chan struct{}),
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("eurc: failed to marshal wallet request: %w", err)
-	}
+	e.pendingAccount[walletID] = req
+	e.mu.Unlock()
 
-	req, err := http.NewRequest(http.MethodPost, e.baseURL+"/wallets", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("eurc: failed to build wallet request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+e.apiKey)
+	var (
+		resultAddr string
+		resultErr  error
+	)
 
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("eurc: wallet creation request failed: %w", err)
-	}
-	defer resp.Body.Close()
+	// -------------------------
+	// SINGLE-FLIGHT EXECUTION
+	// -------------------------
+	func() {
+		defer func() {
+			// ALWAYS finalize exactly once
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("eurc: wallet creation returned HTTP %d: %s", resp.StatusCode, string(body))
-	}
+			e.mu.Lock()
+			delete(e.pendingAccount, walletID)
+			e.mu.Unlock()
 
-	var result circleWalletResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("eurc: failed to decode wallet response: %w", err)
-	}
+			req.addr = resultAddr
+			req.err = resultErr
 
-	addr := result.Data.Wallet.Address
-	if addr == "" {
-		return "", fmt.Errorf("eurc: wallet creation returned no address")
-	}
+			// safe close
+			select {
+			case <-req.done:
+			default:
+				close(req.done)
+			}
+		}()
 
-	e.accounts[walletID] = addr
-	return addr, nil
+		idempotencyKey := buildIdempotencyKey(walletID)
+
+		payload := map[string]any{
+			"idempotencyKey": idempotencyKey,
+			"walletSetId":    e.walletSetID,
+			"blockchains":    []string{"ETH"},
+		}
+
+		body, err := json.Marshal(payload)
+		if err != nil {
+			resultErr = fmt.Errorf("eurc: marshal error: %w", err)
+			return
+		}
+
+		endpoint := e.baseURL + "/wallets"
+
+		resp, err := retryHTTPWithConfig(
+			ctx,
+			retryConfig{maxAttempts: 3, safeToRetry: true},
+			func(ctx context.Context) (*http.Response, error) {
+				reqHTTP, err := http.NewRequestWithContext(
+					ctx,
+					http.MethodPost,
+					endpoint,
+					bytes.NewReader(body),
+				)
+				if err != nil {
+					return nil, err
+				}
+
+				reqHTTP.Header.Set("Content-Type", "application/json")
+				reqHTTP.Header.Set("Authorization", "Bearer "+e.apiKey)
+				reqHTTP.Header.Set("Idempotency-Key", idempotencyKey)
+
+				return e.client.Do(reqHTTP)
+			},
+		)
+
+		if err != nil {
+			resultErr = fmt.Errorf("eurc: wallet creation request failed: %w", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			resultErr = fmt.Errorf(
+				"eurc: wallet creation returned HTTP %d: %s",
+				resp.StatusCode,
+				string(b),
+			)
+			return
+		}
+
+		var result circleWalletResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resultErr = fmt.Errorf("eurc: failed to decode wallet response: %w", err)
+			return
+		}
+
+		addr := result.Data.Wallet.Address
+		if addr == "" {
+			resultErr = fmt.Errorf("eurc: no address in wallet response")
+			return
+		}
+
+		// commit
+		e.mu.Lock()
+		e.accounts[walletID] = addr
+		e.mu.Unlock()
+
+		resultAddr = addr
+	}()
+
+	return resultAddr, resultErr
 }
 
-// GetPaymentStatus returns the current status of an on-chain EURC transfer.
-// Returns PaymentStatusPending for references not yet confirmed via webhook.
-func (e *EURCPaymentProvider) GetPaymentStatus(reference string) (PaymentStatus, error) {
+// ----------------------------
+// Payment status
+// ----------------------------
+
+func (e *EURCPaymentProvider) GetPaymentStatus(
+	ctx context.Context,
+	reference string,
+) (PaymentStatus, error) {
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if s, ok := e.payments[reference]; ok {
 		return s, nil
 	}
+
 	return PaymentStatusPending, nil
 }
 
-// ConfirmPayment records an on-chain EURC transfer as confirmed. In production
-// this is called by Blockchain.ConfirmAndSettle which is invoked from the
-// POST /v1/webhooks/eurc handler when Circle delivers a transfer.complete event.
-// It must not be called directly from finalizeBlock.
-func (e *EURCPaymentProvider) ConfirmPayment(reference string, amount float64, currency string) error {
-	if currency != "EUR" && currency != "EURC" {
-		return fmt.Errorf("eurc: unexpected currency %q; this provider only handles EUR/EURC", currency)
+func (e *EURCPaymentProvider) ConfirmPayment(
+	ctx context.Context,
+	reference string,
+	amount float64,
+	currency string,
+) error {
+
+	expectedAmount, expectedCurrency, found, err :=
+		e.store.GetExpected(ctx, reference)
+
+	if err != nil {
+		return err
 	}
+
+	if !found {
+		return fmt.Errorf("eurc: unknown reference %s", reference)
+	}
+
+	if currency != expectedCurrency {
+		return fmt.Errorf("eurc: currency mismatch")
+	}
+
+	diff := amount - expectedAmount
+	if diff < 0 {
+		diff = -diff
+	}
+
+	if expectedAmount > 0 && diff/expectedAmount > amountTolerancePct {
+		return fmt.Errorf("eurc: amount mismatch")
+	}
+
+	if err := e.store.SetStatus(ctx, reference, PaymentStatusConfirmed); err != nil {
+		return err
+	}
+
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.payments[reference] = PaymentStatusConfirmed
+	e.mu.Unlock()
+
 	return nil
 }
 
-// VerifyWebhookSignature validates a Circle webhook payload against the
-// HMAC-SHA256 signature in the Circle-Signature header. Returns true only when
-// the signatures match (constant-time comparison).
+// ----------------------------
+// Webhook verification
+// ----------------------------
+
 func (e *EURCPaymentProvider) VerifyWebhookSignature(payload []byte, signature string) bool {
 	if e.webhookSecret == "" {
 		return false
 	}
+
 	mac := hmac.New(sha256.New, []byte(e.webhookSecret))
 	mac.Write(payload)
+
 	expected := hex.EncodeToString(mac.Sum(nil))
+
 	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
+// ----------------------------
+// Helpers
+// ----------------------------
+
+func buildIdempotencyKey(walletID string) string {
+	key := "gh-" + walletID
+	if len(key) <= 36 {
+		return key
+	}
+
+	sum := sha256.Sum256([]byte(walletID))
+	return "gh-" + hex.EncodeToString(sum[:])[:33]
 }

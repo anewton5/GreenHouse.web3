@@ -4,9 +4,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -891,14 +894,21 @@ func (s *Server) handleAdminKYCApprove(w http.ResponseWriter, r *http.Request) {
 // handlePaymentWebhook receives Modulr payment-received notifications.
 // POST /v1/webhooks/payment
 //
-// When ModulrProvider is configured the HMAC-SHA256 signature in
-// X-Mod-Nonce is verified before any payload processing. When it is nil
-// (e.g. in development using MockPaymentProvider) the signature check is
-// skipped and the event is still processed.
+// In production (GH_ENV=production) ModulrProvider must be set and the
+// HMAC-SHA256 signature in X-Mod-Nonce is always verified. When ModulrProvider
+// is nil in production the request is rejected with 401 (F-2). In development
+// the signature check is skipped when ModulrProvider is nil.
 func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB cap
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	// F-2: In production, reject any request when ModulrProvider is nil —
+	// there is no key material available to verify the signature.
+	if s.ModulrProvider == nil && os.Getenv("GH_ENV") == "production" {
+		writeError(w, http.StatusUnauthorized, "Modulr provider not configured")
 		return
 	}
 
@@ -926,10 +936,20 @@ func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if event.Type == "PAYMENT_RECEIVED" && event.Reference != "" {
-		// ConfirmAndSettle confirms the payment AND applies the DVP asset transfer
-		// if the corresponding PaymentInstruction is pending. Errors are swallowed
-		// so Modulr does not retry events that are already processed or unknown.
-		_ = s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency)
+		// ConfirmAndSettle confirms the payment and applies the DVP asset transfer.
+		// HTTP 422 on mismatch tells Modulr this callback is permanently rejected.
+		// HTTP 500 on other errors instructs Modulr to retry until the issue resolves.
+		// HTTP 200 on nil error (unknown reference) prevents unnecessary retries.
+		if err := s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency); err != nil {
+			if errors.Is(err, gonetwork.ErrPaymentMismatch) {
+				log.Printf("[payment] mismatch ref=%s: %v", event.Reference, err)
+				writeError(w, http.StatusUnprocessableEntity, "payment mismatch")
+				return
+			}
+			log.Printf("[payment] ConfirmAndSettle failed ref=%s: %v", event.Reference, err)
+			writeError(w, http.StatusInternalServerError, "settlement failed")
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -975,7 +995,18 @@ func (s *Server) handlePontesWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if event.Type == "settlement.confirmed" && event.Reference != "" {
-		_ = s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency)
+		// HTTP 422 on mismatch tells the Pontes bridge this callback is permanently rejected.
+		// HTTP 500 on other errors instructs the Pontes bridge to retry.
+		if err := s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency); err != nil {
+			if errors.Is(err, gonetwork.ErrPaymentMismatch) {
+				log.Printf("[pontes] mismatch ref=%s: %v", event.Reference, err)
+				writeError(w, http.StatusUnprocessableEntity, "payment mismatch")
+				return
+			}
+			log.Printf("[pontes] ConfirmAndSettle failed ref=%s: %v", event.Reference, err)
+			writeError(w, http.StatusInternalServerError, "settlement failed")
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -1025,11 +1056,22 @@ func (s *Server) handleEURCWebhook(w http.ResponseWriter, r *http.Request) {
 	if envelope.NotificationType == "transfer.complete" &&
 		envelope.Transfer != nil &&
 		envelope.Transfer.ExternalRef != "" {
-		_ = s.bc.ConfirmAndSettle(
+		// HTTP 422 on mismatch tells Circle this callback is permanently rejected.
+		// HTTP 500 on other errors instructs Circle to retry.
+		if err := s.bc.ConfirmAndSettle(
 			envelope.Transfer.ExternalRef,
 			envelope.Transfer.Amount,
 			envelope.Transfer.Currency,
-		)
+		); err != nil {
+			if errors.Is(err, gonetwork.ErrPaymentMismatch) {
+				log.Printf("[eurc] mismatch ref=%s: %v", envelope.Transfer.ExternalRef, err)
+				writeError(w, http.StatusUnprocessableEntity, "payment mismatch")
+				return
+			}
+			log.Printf("[eurc] ConfirmAndSettle failed ref=%s: %v", envelope.Transfer.ExternalRef, err)
+			writeError(w, http.StatusInternalServerError, "settlement failed")
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -1595,6 +1637,57 @@ func (s *Server) handleListPaymentHistory(w http.ResponseWriter, r *http.Request
 		return out[i].ExecutedAt > out[j].ExecutedAt
 	})
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRegisterCeBMSettlement is an admin endpoint that triggers a
+// SettlementRegistrar.RegisterSettlement call for a pending instruction whose
+// automatic async registration failed (F-4). This allows operators to retry
+// Pontes CeBM registrations without re-sealing a block.
+//
+// POST /v1/payments/{tradeID}/register
+// Requires admin JWT.
+//
+// Responses:
+//
+//	200 — registration succeeded; body contains pontes_transaction_id.
+//	404 — no pending instruction for tradeID.
+//	409 — provider does not implement SettlementRegistrar.
+//	502 — provider returned an error.
+func (s *Server) handleRegisterCeBMSettlement(w http.ResponseWriter, r *http.Request) {
+	tradeID := r.PathValue("tradeID")
+
+	s.bc.Mu.Lock()
+	instr, ok := s.bc.PendingInstructions[tradeID]
+	s.bc.Mu.Unlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "trade not found")
+		return
+	}
+
+	provider := s.bc.ProviderForMethod(instr.Method)
+	registrar, ok := provider.(gonetwork.SettlementRegistrar)
+	if !ok {
+		writeError(w, http.StatusConflict, "provider does not support registration")
+		return
+	}
+
+	txID, err := registrar.RegisterSettlement(instr)
+	if err != nil {
+		log.Printf("[settlement] manual register failed trade=%s ref=%s: %v", tradeID, instr.Reference, err)
+		writeError(w, http.StatusBadGateway, "registration failed")
+		return
+	}
+
+	// Write back the transaction ID under lock, as with the async goroutine path.
+	s.bc.Mu.Lock()
+	if live, exists := s.bc.PendingInstructions[tradeID]; exists {
+		live.PontesTransactionID = txID
+		live.SettlementNetwork = "eurosystem-pontes"
+	}
+	s.bc.Mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"pontes_transaction_id": txID})
 }
 
 // ---------------------------------------------------------------------------

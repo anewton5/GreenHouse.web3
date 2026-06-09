@@ -13,13 +13,19 @@ package gonetwork
 // ---------------------------------------------------------------------------
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 )
 
 // tempDBPath returns a unique temp-file path for a bbolt database and
@@ -105,6 +111,28 @@ func TestPersistence_SaveAndLoad_MultipleBlocksPreservesOrder(t *testing.T) {
 
 	for i, b := range bc.Blocks {
 		assert.Equal(t, i, b.Index, "block order must be preserved")
+	}
+}
+
+func TestPersistence_SaveAndLoad_TenBlocksKeyOrder(t *testing.T) {
+	path := tempDBPath(t)
+	bs, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	for i := 9; i >= 0; i-- {
+		b := Block{Index: i, Nonce: i}
+		b.SetPayloadHash()
+		require.NoError(t, bs.SaveBlock(&b))
+	}
+
+	bc := newTestBlockchain(t)
+	bc.Blocks = nil
+	require.NoError(t, bs.LoadBlocks(bc))
+	require.Len(t, bc.Blocks, 10)
+
+	for i, b := range bc.Blocks {
+		assert.Equal(t, i, b.Index, "LoadBlocks must return strict chain order")
 	}
 }
 
@@ -264,6 +292,13 @@ func TestPersistence_SaveAndLoadState_RoundTrip(t *testing.T) {
 	bc.Assets["A1"] = &Asset{ID: "A1", Name: "Alpha", TotalSupply: 1000}
 	bc.Holdings["H1"] = &AssetHolding{AssetID: "A1", HolderID: "alice", Balance: 500}
 	bc.WalletSequences["alice"] = 7
+	bc.ConfirmedPayments["trade-7"] = &PaymentConfirmation{
+		InstructionID:   "trade-7",
+		Reference:       "REF-7",
+		ConfirmedAmount: 125.5,
+		Currency:        "EUR",
+		ConfirmedAt:     time.Now().UTC().Unix(),
+	}
 
 	require.NoError(t, bs.SaveState(bc, 3))
 
@@ -281,6 +316,9 @@ func TestPersistence_SaveAndLoadState_RoundTrip(t *testing.T) {
 	require.NotNil(t, bc2.Holdings["H1"])
 	assert.InDelta(t, float64(500), bc2.Holdings["H1"].Balance, 1e-9)
 	assert.Equal(t, int64(7), bc2.WalletSequences["alice"])
+	require.NotNil(t, bc2.ConfirmedPayments["trade-7"])
+	assert.Equal(t, "REF-7", bc2.ConfirmedPayments["trade-7"].Reference)
+	assert.Equal(t, "EUR", bc2.ConfirmedPayments["trade-7"].Currency)
 }
 
 func TestPersistence_LoadState_EmptyStore_ReturnsMinusOne(t *testing.T) {
@@ -338,4 +376,137 @@ func TestPersistence_SealBlock_PersistsState(t *testing.T) {
 	assert.GreaterOrEqual(t, lastApplied, 0, "snapshot should record a non-negative block index")
 	require.NotNil(t, bc2.Assets["Z"])
 	assert.Equal(t, "Zeta", bc2.Assets["Z"].Name)
+}
+
+func TestPersistence_Backup_RoundTripProducesReadableBolt(t *testing.T) {
+	path := tempDBPath(t)
+	bs, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	for i := 0; i < 3; i++ {
+		b := Block{Index: i, Nonce: i * 11}
+		b.SetPayloadHash()
+		require.NoError(t, bs.SaveBlock(&b))
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, bs.Backup(&buf))
+	require.Greater(t, buf.Len(), 0)
+
+	backupPath := filepath.Join(t.TempDir(), "snapshot.bak")
+	require.NoError(t, os.WriteFile(backupPath, buf.Bytes(), 0600))
+
+	restored, err := bolt.Open(backupPath, 0600, nil)
+	require.NoError(t, err)
+	defer restored.Close()
+
+	var indexes []int
+	err = restored.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		require.NotNil(t, b)
+		return b.ForEach(func(_, v []byte) error {
+			var blk Block
+			if err := json.Unmarshal(v, &blk); err != nil {
+				return err
+			}
+			indexes = append(indexes, blk.Index)
+			return nil
+		})
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []int{0, 1, 2}, indexes)
+}
+
+func TestPersistence_BackupLoop_ExitsOnContextCancel(t *testing.T) {
+	path := tempDBPath(t)
+	bs, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	bc := newTestBlockchain(t)
+	bc.BlockStore = bs
+
+	backupDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		bc.runBlockStoreBackup(ctx, backupDir, 20*time.Millisecond, 3)
+	}()
+
+	require.Eventually(t, func() bool {
+		entries, err := os.ReadDir(backupDir)
+		if err != nil {
+			return false
+		}
+		for _, e := range entries {
+			if filepath.Ext(e.Name()) == ".bak" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 20*time.Millisecond)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("backup goroutine did not exit after context cancellation")
+	}
+}
+
+func TestKeyForIndex_MatchesSaveBlockFormat(t *testing.T) {
+	assert.Equal(t, "0000000000", keyForIndex(0))
+	assert.Equal(t, "0000000009", keyForIndex(9))
+	assert.Equal(t, "0000000010", keyForIndex(10))
+	assert.Equal(t, fmt.Sprintf("%010d", 42), keyForIndex(42))
+}
+
+func TestResolveBackupInterval_UsesDefaultAndBounds(t *testing.T) {
+	assert.Equal(t, defaultBackupInterval, resolveBackupInterval(""))
+	assert.Equal(t, defaultBackupInterval, resolveBackupInterval("not-a-duration"))
+	assert.Equal(t, minBackupInterval, resolveBackupInterval("1s"))
+	assert.Equal(t, maxBackupInterval, resolveBackupInterval("9999h"))
+	assert.Equal(t, 2*time.Hour, resolveBackupInterval("2h"))
+}
+
+func TestResolveBackupRetention_UsesDefaultAndBounds(t *testing.T) {
+	assert.Equal(t, defaultBackupKeep, resolveBackupRetention(""))
+	assert.Equal(t, defaultBackupKeep, resolveBackupRetention("oops"))
+	assert.Equal(t, defaultBackupKeep, resolveBackupRetention("-3"))
+	assert.Equal(t, maxBackupKeep, resolveBackupRetention("999999"))
+	assert.Equal(t, 0, resolveBackupRetention("0"))
+	assert.Equal(t, 7, resolveBackupRetention("7"))
+}
+
+func TestPruneOldBackups_KeepsNewestN(t *testing.T) {
+	dir := t.TempDir()
+	files := []string{
+		"greenhouse-20260101T000000Z.bak",
+		"greenhouse-20260102T000000Z.bak",
+		"greenhouse-20260103T000000Z.bak",
+		"greenhouse-20260104T000000Z.bak",
+	}
+	for _, name := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600))
+	}
+	// Non-backup file should be ignored.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.txt"), []byte("x"), 0600))
+
+	require.NoError(t, pruneOldBackups(dir, 2))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var backups []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".bak") {
+			backups = append(backups, e.Name())
+		}
+	}
+	assert.Equal(t, []string{
+		"greenhouse-20260103T000000Z.bak",
+		"greenhouse-20260104T000000Z.bak",
+	}, backups)
 }

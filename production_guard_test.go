@@ -126,6 +126,57 @@ func TestProductionGuard_AllConfigured_ReturnsNil(t *testing.T) {
 	assert.NoError(t, productionReadinessError(bc))
 }
 
+// TestProductionGuard_MissingModulrWebhookSecret verifies that when the Modulr
+// rail (SettlementFasterPay) is registered, MODULR_WEBHOOK_SECRET must be set.
+func TestProductionGuard_MissingModulrWebhookSecret(t *testing.T) {
+	t.Setenv("ONFIDO_WEBHOOK_SECRET", "test-secret-value")
+	t.Setenv("MODULR_WEBHOOK_SECRET", "")
+
+	registryKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	t.Setenv("GREENHOUSE_REGISTRY_PUBKEY", hex.EncodeToString(registryKey.Public().Bytes()))
+
+	bc := newTestBlockchain(t)
+	bc.AMLScreener = nil
+	bc.PaymentProvider = nil
+	bc.IdentityRegistry = nil
+
+	privKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	bc.OperatorKeyProvider = NewLocalKeyProvider(privKey)
+
+	// Register Modulr rail — this should now require MODULR_WEBHOOK_SECRET.
+	bc.RegisterSettlementProvider(SettlementFasterPay, NewMockPaymentProvider())
+
+	err = productionReadinessError(bc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MODULR_WEBHOOK_SECRET")
+}
+
+// TestProductionGuard_ModulrRailWithSecret_ReturnsNil verifies that registering
+// the Modulr rail with MODULR_WEBHOOK_SECRET set passes all guards.
+func TestProductionGuard_ModulrRailWithSecret_ReturnsNil(t *testing.T) {
+	t.Setenv("ONFIDO_WEBHOOK_SECRET", "test-secret-value")
+	t.Setenv("MODULR_WEBHOOK_SECRET", "test-modulr-secret")
+
+	registryKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	t.Setenv("GREENHOUSE_REGISTRY_PUBKEY", hex.EncodeToString(registryKey.Public().Bytes()))
+
+	bc := newTestBlockchain(t)
+	bc.AMLScreener = nil
+	bc.PaymentProvider = nil
+	bc.IdentityRegistry = nil
+
+	privKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	bc.OperatorKeyProvider = NewLocalKeyProvider(privKey)
+
+	bc.RegisterSettlementProvider(SettlementFasterPay, NewMockPaymentProvider())
+
+	assert.NoError(t, productionReadinessError(bc))
+}
+
 // TestProductionGuard_NewBlockchain_DoesNotFatalWithoutProductionEnv verifies
 // that NewBlockchain with default mocks is safe when GH_ENV != "production".
 func TestProductionGuard_NewBlockchain_DoesNotFatalWithoutProductionEnv(t *testing.T) {

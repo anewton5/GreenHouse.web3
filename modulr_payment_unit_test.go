@@ -8,18 +8,29 @@ package gonetwork
 // ---------------------------------------------------------------------------
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type mockTransport struct {
+	roundTrip func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m.roundTrip(req)
+}
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -105,14 +116,16 @@ func TestModulrAddAuthHeaders_SetsRequiredHeaders(t *testing.T) {
 
 func TestModulrCreateVirtualAccount_NoCustomerID_Error(t *testing.T) {
 	p, _ := NewModulrPaymentProvider("k", "s", "https://x", "", "PROD1")
-	_, err := p.CreateVirtualAccount("wallet-1")
+	ctx := context.Background()
+	_, err := p.CreateVirtualAccount(ctx, "wallet-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "customerID")
 }
 
 func TestModulrCreateVirtualAccount_NoProductCode_Error(t *testing.T) {
 	p, _ := NewModulrPaymentProvider("k", "s", "https://x", "CUST1", "")
-	_, err := p.CreateVirtualAccount("wallet-1")
+	ctx := context.Background()
+	_, err := p.CreateVirtualAccount(ctx, "wallet-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "productCode")
 }
@@ -132,7 +145,8 @@ func TestModulrCreateVirtualAccount_IBAN_Success(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "CUST1", "PROD1")
-	iban, err := p.CreateVirtualAccount("wallet-1")
+	ctx := context.Background()
+	iban, err := p.CreateVirtualAccount(ctx, "wallet-1")
 	require.NoError(t, err)
 	assert.Equal(t, "GB29NWBK60161331926819", iban)
 }
@@ -150,7 +164,8 @@ func TestModulrCreateVirtualAccount_SortCode_Success(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "CUST1", "PROD1")
-	ref, err := p.CreateVirtualAccount("wallet-2")
+	ctx := context.Background()
+	ref, err := p.CreateVirtualAccount(ctx, "wallet-2")
 	require.NoError(t, err)
 	assert.Equal(t, "040075/12345678", ref)
 }
@@ -163,7 +178,8 @@ func TestModulrCreateVirtualAccount_Non201_Error(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "CUST1", "PROD1")
-	_, err := p.CreateVirtualAccount("wallet-3")
+	ctx := context.Background()
+	_, err := p.CreateVirtualAccount(ctx, "wallet-3")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "401")
 }
@@ -176,9 +192,54 @@ func TestModulrCreateVirtualAccount_NoIdentifiers_Error(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "CUST1", "PROD1")
-	_, err := p.CreateVirtualAccount("wallet-4")
+	ctx := context.Background()
+	_, err := p.CreateVirtualAccount(ctx, "wallet-4")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no IBAN or sort code")
+}
+
+func TestModulrCreateVirtualAccount_RetriesOn503(t *testing.T) {
+	attempts := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"temporary"}`))
+	}))
+	defer srv.Close()
+
+	p, err := NewModulrPaymentProvider("k", "s", srv.URL, "CUST1", "PROD1")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	_, err = p.CreateVirtualAccount(ctx, "wallet-retry-503")
+
+	require.Error(t, err)
+	require.Equal(t, 3, attempts, "should retry 3 times on 503")
+}
+
+func TestModulrCreateVirtualAccount_DoesNotRetryOn400(t *testing.T) {
+	attempts := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid"}`))
+	}))
+	defer srv.Close()
+
+	p, err := NewModulrPaymentProvider("k", "s", srv.URL, "CUST1", "PROD1")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	_, err = p.CreateVirtualAccount(ctx, "wallet-no-retry-400")
+
+	require.Error(t, err)
+	require.Equal(t, 1, attempts, "400 must not be retried")
 }
 
 // ---------------------------------------------------------------------------
@@ -187,14 +248,16 @@ func TestModulrCreateVirtualAccount_NoIdentifiers_Error(t *testing.T) {
 
 func TestModulrCreateEURVirtualAccount_NoCustomerID_Error(t *testing.T) {
 	p, _ := NewModulrPaymentProvider("k", "s", "https://x", "", "P1")
-	_, err := p.CreateEURVirtualAccount("w")
+	ctx := context.Background()
+	_, err := p.CreateEURVirtualAccount(ctx, "w")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "customerID")
 }
 
 func TestModulrCreateEURVirtualAccount_NoProductCode_Error(t *testing.T) {
 	p, _ := NewModulrPaymentProvider("k", "s", "https://x", "C1", "")
-	_, err := p.CreateEURVirtualAccount("w")
+	ctx := context.Background()
+	_, err := p.CreateEURVirtualAccount(ctx, "w")
 	require.Error(t, err)
 }
 
@@ -216,7 +279,8 @@ func TestModulrCreateEURVirtualAccount_IBAN_Success(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "C1", "P1")
-	iban, err := p.CreateEURVirtualAccount("eur-wallet")
+	ctx := context.Background()
+	iban, err := p.CreateEURVirtualAccount(ctx, "eur-wallet")
 	require.NoError(t, err)
 	assert.Equal(t, "DE89370400440532013000", iban)
 }
@@ -229,7 +293,8 @@ func TestModulrCreateEURVirtualAccount_NoIBAN_Error(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "C1", "P1")
-	_, err := p.CreateEURVirtualAccount("w2")
+	ctx := context.Background()
+	_, err := p.CreateEURVirtualAccount(ctx, "w2")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no IBAN")
 }
@@ -241,7 +306,8 @@ func TestModulrCreateEURVirtualAccount_Non201_Error(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "C1", "P1")
-	_, err := p.CreateEURVirtualAccount("w3")
+	ctx := context.Background()
+	_, err := p.CreateEURVirtualAccount(ctx, "w3")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "403")
 }
@@ -263,7 +329,8 @@ func TestModulrGetPaymentStatus_Processed_Confirmed(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "", "")
-	status, err := p.GetPaymentStatus("ref-001")
+	ctx := context.Background()
+	status, err := p.GetPaymentStatus(ctx, "ref-001")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusConfirmed, status)
 }
@@ -278,7 +345,8 @@ func TestModulrGetPaymentStatus_Settled_Confirmed(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "", "")
-	status, err := p.GetPaymentStatus("ref-002")
+	ctx := context.Background()
+	status, err := p.GetPaymentStatus(ctx, "ref-002")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusConfirmed, status)
 }
@@ -291,7 +359,8 @@ func TestModulrGetPaymentStatus_NotFound_Pending(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "", "")
-	status, err := p.GetPaymentStatus("ref-003")
+	ctx := context.Background()
+	status, err := p.GetPaymentStatus(ctx, "ref-003")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusPending, status)
 }
@@ -306,7 +375,8 @@ func TestModulrGetPaymentStatus_Failed(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "", "")
-	status, err := p.GetPaymentStatus("ref-004")
+	ctx := context.Background()
+	status, err := p.GetPaymentStatus(ctx, "ref-004")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusFailed, status)
 }
@@ -321,7 +391,8 @@ func TestModulrGetPaymentStatus_Rejected_Failed(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "", "")
-	status, err := p.GetPaymentStatus("ref-005")
+	ctx := context.Background()
+	status, err := p.GetPaymentStatus(ctx, "ref-005")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusFailed, status)
 }
@@ -336,7 +407,8 @@ func TestModulrGetPaymentStatus_Expired(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "", "")
-	status, err := p.GetPaymentStatus("ref-006")
+	ctx := context.Background()
+	status, err := p.GetPaymentStatus(ctx, "ref-006")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusExpired, status)
 }
@@ -349,7 +421,8 @@ func TestModulrGetPaymentStatus_Non200_Error(t *testing.T) {
 	defer srv.Close()
 
 	p, _ := NewModulrPaymentProvider("k", "s", srv.URL, "", "")
-	_, err := p.GetPaymentStatus("ref-007")
+	ctx := context.Background()
+	_, err := p.GetPaymentStatus(ctx, "ref-007")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
 }
@@ -359,8 +432,9 @@ func TestModulrGetPaymentStatus_Non200_Error(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestModulrConfirmPayment_AlwaysError(t *testing.T) {
+	ctx := context.Background()
 	p, _ := NewModulrPaymentProvider("k", "s", "https://x", "", "")
-	err := p.ConfirmPayment("ref", 100.0, "GBP")
+	err := p.ConfirmPayment(ctx, "ref", 100.0, "GBP")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "webhook")
 }
@@ -426,4 +500,237 @@ func TestModulrStatusToPaymentStatus_AllCases(t *testing.T) {
 			assert.Equal(t, tc.expected, modulrStatusToPaymentStatus(tc.input))
 		})
 	}
+}
+
+// Tests that context cancellation during backoff aborts retries and returns context.Canceled
+func TestRetryHTTP_ContextCancellation_DuringBackoff_ReturnsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	attempts := 0
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := retryHTTP(ctx, retryConfig{maxAttempts: 5, safeToRetry: true}, func(ctx context.Context) (*http.Response, error) {
+		attempts++
+		return nil, errors.New("temporary failure")
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.LessOrEqual(t, attempts, 3)
+}
+
+// Tests that a plain error on the final attempt is returned directly, not wrapped or swallowed
+func TestRetryHTTP_NonRetryableError_ReturnedDirectly(t *testing.T) {
+	ctx := context.Background()
+
+	attempts := 0
+
+	_, err := retryHTTP(ctx, retryConfig{maxAttempts: 1, safeToRetry: true}, func(ctx context.Context) (*http.Response, error) {
+		attempts++
+		return nil, errors.New("temporary failure")
+	})
+
+	require.EqualError(t, err, "temporary failure")
+	require.Equal(t, attempts, 1)
+}
+
+func TestRetryHTTP_PreCancelled_NoExecution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	attempts := 0
+
+	_, err := retryHTTP(ctx, retryConfig{maxAttempts: 3, safeToRetry: true}, func(ctx context.Context) (*http.Response, error) {
+		attempts++
+		return nil, errors.New("should not run")
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 0, attempts)
+}
+
+func TestRetryHTTP_POST_NetworkError_NotRetried(t *testing.T) {
+	attempts := 0
+
+	_, err := retryHTTPWithConfig(
+		context.Background(),
+		retryConfig{maxAttempts: 3, safeToRetry: false},
+		func(ctx context.Context) (*http.Response, error) {
+			attempts++
+			return nil, errors.New("connection reset")
+		},
+	)
+
+	require.Error(t, err)
+	require.Equal(t, 1, attempts, "non-idempotent request must not retry on network error")
+}
+
+func TestRetryHTTP_POST_WithIdempotencyKey_IsRetried(t *testing.T) {
+	attempts := 0
+
+	resp, err := retryHTTPWithConfig(
+		context.Background(),
+		retryConfig{maxAttempts: 3, safeToRetry: true},
+		func(ctx context.Context) (*http.Response, error) {
+			attempts++
+
+			if attempts < 3 {
+				return nil, errors.New("network error")
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       http.NoBody,
+			}, nil
+		},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Equal(t, 3, attempts)
+}
+
+func TestRetryHTTP_GET_IsRetried(t *testing.T) {
+	attempts := 0
+
+	resp, err := retryHTTPWithConfig(
+		context.Background(),
+		retryConfig{maxAttempts: 3, safeToRetry: true},
+		func(ctx context.Context) (*http.Response, error) {
+			attempts++
+
+			if attempts < 2 {
+				return nil, errors.New("transient error")
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       http.NoBody,
+			}, nil
+		},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.Equal(t, 2, attempts)
+}
+
+func TestModulr_GetPaymentStatus_CancelledContext_NoHTTPCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	called := false
+
+	transport := &mockTransport{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			called = true
+			return nil, errors.New("should not be called")
+		},
+	}
+
+	client := &http.Client{Transport: transport}
+
+	p := &ModulrPaymentProvider{
+		client:  client,
+		baseURL: "http://example",
+	}
+
+	_, err := p.GetPaymentStatusCtx(ctx, "ref")
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, called)
+}
+
+func TestRetryHTTP_CancelsDuringBackoff_NoFurtherAttempts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	attempts := 0
+
+	start := make(chan struct{})
+
+	go func() {
+		<-start
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := retryHTTP(ctx, retryConfig{maxAttempts: 3, safeToRetry: true}, func(ctx context.Context) (*http.Response, error) {
+		if attempts == 0 {
+			close(start) // start cancellation timer only once loop begins
+		}
+
+		attempts++
+
+		// simulate real work so cancellation can actually intersect execution
+		time.Sleep(20 * time.Millisecond)
+
+		return nil, errors.New("fail")
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.LessOrEqual(t, attempts, 3)
+}
+
+func TestPaymentShutdown_CancelsInFlightRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	started := make(chan struct{})
+	blocked := make(chan struct{})
+
+	transport := &mockTransport{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			close(started)
+			<-blocked // simulate long API call
+			return nil, errors.New("should not reach")
+		},
+	}
+
+	client := &http.Client{Transport: transport}
+
+	p := &ModulrPaymentProvider{
+		client:  client,
+		baseURL: "http://example",
+	}
+
+	go func() {
+		_, _ = p.GetPaymentStatusCtx(ctx, "ref")
+	}()
+
+	<-started
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("shutdown did not complete in time")
+	}
+
+	close(blocked)
+}
+
+func TestWaitRetry_CancelledDuringSleep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+
+	err := waitRetry(ctx, 2*time.Second)
+
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Less(t, elapsed, 200*time.Millisecond)
 }

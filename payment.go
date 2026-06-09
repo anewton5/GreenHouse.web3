@@ -1,5 +1,7 @@
 package gonetwork
 
+import "context"
+
 // ---------------------------------------------------------------------------
 // Payment status and settlement types
 // ---------------------------------------------------------------------------
@@ -8,6 +10,9 @@ package gonetwork
 type PaymentStatus string
 
 const (
+	// PaymentStatusUnknown indicates the provider call failed and no reliable
+	// business status could be determined from the response.
+	PaymentStatusUnknown   PaymentStatus = "unknown"
 	PaymentStatusPending   PaymentStatus = "pending"
 	PaymentStatusConfirmed PaymentStatus = "confirmed"
 	PaymentStatusFailed    PaymentStatus = "failed"
@@ -88,15 +93,30 @@ type PaymentConfirmation struct {
 type PaymentProvider interface {
 	// CreateVirtualAccount returns a virtual IBAN for a participant wallet.
 	// Called once per wallet during participant onboarding.
-	CreateVirtualAccount(walletID string) (iban string, err error)
+	CreateVirtualAccount(ctx context.Context, walletID string) (iban string, err error)
 
 	// GetPaymentStatus returns the current status of a payment by reference.
-	GetPaymentStatus(reference string) (PaymentStatus, error)
+	GetPaymentStatus(ctx context.Context, reference string) (PaymentStatus, error)
 
 	// ConfirmPayment records that a payment has been received.
 	// In production this is triggered by a webhook; the interface allows
 	// the mock to call it directly in tests.
-	ConfirmPayment(reference string, amount float64, currency string) error
+	ConfirmPayment(ctx context.Context, reference string, amount float64, currency string) error
+}
+
+// SettlementRegistrar is an optional extension of PaymentProvider for rails
+// that require an explicit registration step before a webhook callback can
+// arrive. PontesPaymentProvider implements this interface; Modulr and EURC do
+// not (their callbacks are triggered by the payer, not by a registration call).
+//
+// Providers that implement SettlementRegistrar are detected automatically by
+// applyBlockState via a type assertion, and RegisterSettlement is called
+// asynchronously for each matching PaymentInstruction (F-4).
+type SettlementRegistrar interface {
+	// RegisterSettlement submits the DLT delivery leg to the provider and
+	// returns the provider-assigned transactionID. Must be idempotent — the
+	// same instruction may be submitted more than once (retry path).
+	RegisterSettlement(instruction *PaymentInstruction) (transactionID string, err error)
 }
 
 // OracleService signs and verifies PaymentInstructions and PaymentConfirmations.

@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"encoding/json"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -181,9 +183,11 @@ func TestConfirmAndSettle_Idempotent(t *testing.T) {
 	bc.PaymentProvider = mock
 
 	instr := &PaymentInstruction{
-		Reference: "REF-IDEM-001",
-		Method:    SettlementSEPA,
-		ExpiresAt: time.Now().Add(1 * time.Hour).Unix(),
+		Reference:   "REF-IDEM-001",
+		Method:      SettlementSEPA,
+		TotalAmount: 1000,
+		Currency:    "EUR",
+		ExpiresAt:   time.Now().Add(1 * time.Hour).Unix(),
 	}
 	bc.PendingInstructions["trade-idem"] = instr
 
@@ -205,11 +209,14 @@ func TestExpireStaleInstructions_RemovesExpired(t *testing.T) {
 		ExpiresAt: time.Now().Add(-1 * time.Hour).Unix(), // 1h in the past
 	}
 	bc.PendingInstructions["expired-trade"] = instr
+	bc.PendingSettlements["expired-trade"] = &AssetTransaction{AssetID: "asset-1"}
 
 	bc.ExpireStaleInstructions()
 
 	assert.NotContains(t, bc.PendingInstructions, "expired-trade",
 		"expired instruction must be removed")
+	assert.NotContains(t, bc.PendingSettlements, "expired-trade",
+		"linked settlement must be removed when the instruction expires")
 }
 
 func TestExpireStaleInstructions_KeepsActiveInstructions(t *testing.T) {
@@ -241,6 +248,79 @@ func TestExpireStaleInstructions_SkipsAlreadyConfirmed(t *testing.T) {
 	// so the pending instruction is NOT deleted — ConfirmedPayments is authoritative.
 	assert.Contains(t, bc.PendingInstructions, "conf-trade",
 		"confirmed instruction must not be removed by the expiry sweep")
+}
+
+func TestExpireStaleInstructions_EventPayloadIncludesSettlementMetadata(t *testing.T) {
+	bc := newTestBlockchain(t)
+	instr := &PaymentInstruction{
+		Reference:           "EXP-002",
+		AssetID:             "asset-2",
+		Method:              SettlementCeBM,
+		PontesTransactionID: "pontes-tx-123",
+		ExpiresAt:           time.Now().Add(-1 * time.Hour).Unix(),
+	}
+	bc.PendingInstructions["expired-trade-2"] = instr
+	bc.PendingSettlements["expired-trade-2"] = &AssetTransaction{AssetID: "asset-2"}
+	select {
+	case <-bc.Events:
+	default:
+	}
+
+	bc.ExpireStaleInstructions()
+
+	select {
+	case evt := <-bc.Events:
+		assert.Equal(t, EventPaymentExpired, evt.Type)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+		assert.Equal(t, "expired-trade-2", payload["trade_id"])
+		assert.Equal(t, "pontes_cbm", payload["settlement_method"])
+		assert.Equal(t, "pontes-tx-123", payload["pontes_transaction_id"])
+		assert.Equal(t, "asset-2", payload["asset_id"])
+	default:
+		t.Fatal("expected EventPaymentExpired to be emitted")
+	}
+}
+
+func TestConfirmedPayments_RetentionPrune_UsesDurableLedger(t *testing.T) {
+	path := tempDBPath(t)
+	bs, err := OpenBlockStore(path)
+	require.NoError(t, err)
+	defer bs.Close()
+
+	bc := newTestBlockchain(t)
+	bc.BlockStore = bs
+	bc.ConfirmedPaymentRetention = time.Hour
+
+	tradeID := "retained-trade"
+	reference := "REF-RET-001"
+	oldConfirmation := &PaymentConfirmation{
+		InstructionID:   tradeID,
+		Reference:       reference,
+		ConfirmedAmount: 250,
+		Currency:        "EUR",
+		ConfirmedAt:     time.Now().Add(-2 * time.Hour).Unix(),
+	}
+	bc.ConfirmedPayments[tradeID] = oldConfirmation
+	require.NoError(t, bs.SaveConfirmedPayment(oldConfirmation))
+
+	bc.pruneConfirmedPaymentsLocked(time.Now())
+	assert.NotContains(t, bc.ConfirmedPayments, tradeID, "stale confirmation should be pruned from memory")
+
+	bc.PendingInstructions[tradeID] = &PaymentInstruction{
+		Reference:   reference,
+		AssetID:     "asset-retained",
+		TotalAmount: 250,
+		Currency:    "EUR",
+		Method:      SettlementSEPA,
+		ExpiresAt:   time.Now().Add(1 * time.Hour).Unix(),
+	}
+	bc.PendingSettlements[tradeID] = &AssetTransaction{AssetID: "asset-retained"}
+
+	require.NoError(t, bc.ConfirmAndSettle(reference, 250, "EUR"))
+	assert.Contains(t, bc.PendingInstructions, tradeID, "durable ledger should prevent re-settlement")
+	assert.Contains(t, bc.PendingSettlements, tradeID, "duplicate webhook must not consume the settlement")
+	assert.NotContains(t, bc.ConfirmedPayments, tradeID, "pruned confirmation should stay out of memory until re-used")
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +513,7 @@ func TestBlockchain_ConcurrentAddBlock_NoRace(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+
 	// Chain must have genesis + 10 blocks
 	assert.Equal(t, 11, len(bc.Blocks))
 }

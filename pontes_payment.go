@@ -2,17 +2,27 @@ package gonetwork
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
 )
+
+// PontesPaymentProvider implements PaymentProvider using the Eurosystem's Pontes
+// bridge — the ECB's DLT interoperability solution that links Market DLT platforms
+// to TARGET2 (T2) for settlement in tokenised Central Bank Money (CeBM).
+//
+// # Pontes Settlement Flow (DVP)
+//  1. A trade is matched and finalizeBlock calls DefaultSettlementMethod → SettlementCeBM.
 
 // PontesPaymentProvider implements PaymentProvider using the Eurosystem's Pontes
 // bridge — the ECB's DLT interoperability solution that links Market DLT platforms
@@ -42,15 +52,17 @@ import (
 //	PONTES_DLT_OPERATOR   — GreenHouse's Market DLT Operator identifier (assigned at registration)
 //	PONTES_HMAC_SECRET    — HMAC-SHA256 secret for callback signature verification
 type PontesPaymentProvider struct {
-	apiKey      string
-	baseURL     string
-	dltOperator string
-	hmacSecret  string
-	client      *http.Client
-
-	mu       sync.Mutex
-	pending  map[string]string        // reference → Pontes transactionId
-	payments map[string]PaymentStatus // reference → status
+	apiKey           string
+	baseURL          string
+	dltOperator      string
+	hmacSecret       string
+	client           *http.Client
+	store            PaymentStore
+	operationTimeout time.Duration
+	mu               sync.Mutex
+	pending          map[string]string        // reference → Pontes transactionId
+	payments         map[string]PaymentStatus // reference → status
+	log              *slog.Logger
 }
 
 const pontesPilotBaseURL = "https://pilot.pontes.ecb.europa.eu/v1"
@@ -71,25 +83,44 @@ func NewPontesPaymentProviderFromEnv() (*PontesPaymentProvider, error) {
 		return nil, fmt.Errorf("pontes: PONTES_DLT_OPERATOR environment variable is required")
 	}
 	hmacSecret := os.Getenv("PONTES_HMAC_SECRET")
-	return NewPontesPaymentProvider(apiKey, baseURL, dltOperator, hmacSecret)
+	if hmacSecret == "" {
+		return nil, fmt.Errorf("pontes: hmacSecret must not be empty; webhook signature verification is required for production")
+	}
+	store := NewMemoryPaymentStore() // Replace with actual store initialization
+	return NewPontesPaymentProvider(apiKey, baseURL, dltOperator, hmacSecret, store)
 }
 
 // NewPontesPaymentProvider creates a PontesPaymentProvider with explicit credentials.
-func NewPontesPaymentProvider(apiKey, baseURL, dltOperator, hmacSecret string) (*PontesPaymentProvider, error) {
+func NewPontesPaymentProvider(apiKey, baseURL, dltOperator, hmacSecret string, store PaymentStore) (*PontesPaymentProvider, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("pontes: apiKey must not be empty")
 	}
+	if baseURL == "" {
+		baseURL = pontesPilotBaseURL
+	}
+	// Validate it is a parseable URL
+	if _, err := url.ParseRequestURI(baseURL); err != nil {
+		return nil, fmt.Errorf("pontes: baseURL %q is not a valid URL: %w", baseURL, err)
+	}
 	if dltOperator == "" {
 		return nil, fmt.Errorf("pontes: dltOperator must not be empty")
+	}
+	if store == nil {
+		return nil, fmt.Errorf("pontes: store must not be nil")
+	}
+	if hmacSecret == "" {
+		return nil, fmt.Errorf("pontes: hmacSecret must not be empty; webhook signature verification is required for production")
 	}
 	return &PontesPaymentProvider{
 		apiKey:      apiKey,
 		baseURL:     baseURL,
 		dltOperator: dltOperator,
 		hmacSecret:  hmacSecret,
+		store:       store,
 		client:      &http.Client{Timeout: 30 * time.Second},
 		pending:     make(map[string]string),
 		payments:    make(map[string]PaymentStatus),
+		log:         slog.Default(),
 	}, nil
 }
 
@@ -110,64 +141,198 @@ type pontesRegisterResponse struct {
 	Status        string `json:"status"`
 }
 
+// WebhookVerifier is implemented by providers that sign their webhook callbacks.
+type WebhookVerifier interface {
+	VerifyWebhookSignature(payload []byte, signature string) bool
+}
+
+// HandleWebhook is the single entry point for all provider webhook callbacks.
+// It enforces signature verification before calling the action function,
+// making it impossible to confirm a payment without passing a valid signature.
+//
+// Usage in HTTP handlers:
+//
+//	err := HandleWebhook(provider, rawBody, r.Header.Get("X-Pontes-Signature"),
+//	    func() error {
+//	        return provider.ConfirmPayment(ctx, reference, amount, currency)
+//	    })
+func HandleWebhook(v WebhookVerifier, payload []byte, signature string, action func() error) error {
+	if !v.VerifyWebhookSignature(payload, signature) {
+		return fmt.Errorf("payment: webhook signature verification failed — request rejected")
+	}
+	return action()
+}
+
 // CreateVirtualAccount satisfies the PaymentProvider interface. Pontes
 // participants are identified by their BIC and are registered offline during
 // the Market DLT Operator onboarding process — no API call is required here.
 // Returns a "pontes-<walletID>" reference so the calling code can store it.
-func (p *PontesPaymentProvider) CreateVirtualAccount(walletID string) (string, error) {
+func (p *PontesPaymentProvider) CreateVirtualAccount(ctx context.Context, walletID string) (string, error) {
 	return "pontes-" + walletID, nil
 }
 
 // GetPaymentStatus returns the current T2 settlement status for a reference.
 // Checks the local cache first; if the reference is registered but not yet
 // confirmed, queries the Pontes API for the latest status.
-func (p *PontesPaymentProvider) GetPaymentStatus(reference string) (PaymentStatus, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if s, ok := p.payments[reference]; ok {
-		return s, nil
+func (p *PontesPaymentProvider) GetPaymentStatus(ctx context.Context, reference string) (PaymentStatus, error) {
+	if p.operationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.operationTimeout)
+		defer cancel()
+	}
+	// Source of truth: persisted status.
+	if status, found, err := p.store.GetStatus(ctx, reference); err != nil {
+		return PaymentStatusUnknown,
+			fmt.Errorf(
+				"pontes: store status lookup failed for reference %s: %w",
+				reference,
+				err,
+			)
+	} else if found {
+		return status, nil
 	}
 
-	transactionID, ok := p.pending[reference]
-	if !ok {
-		return PaymentStatusPending, nil
-	}
-
-	req, err := http.NewRequest(http.MethodGet, p.baseURL+"/settlements/"+transactionID, nil)
+	// Look up registered settlement.
+	transactionID, found, err := p.store.GetPending(ctx, reference)
 	if err != nil {
-		return PaymentStatusPending, fmt.Errorf("pontes: failed to build status request: %w", err)
+		return PaymentStatusUnknown,
+			fmt.Errorf(
+				"pontes: store pending lookup failed for reference %s: %w",
+				reference,
+				err,
+			)
 	}
-	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return PaymentStatusPending, fmt.Errorf("pontes: status request failed: %w", err)
+	// Preserve existing behaviour for unknown references.
+	if !found {
+		return PaymentStatusUnknown,
+			fmt.Errorf(
+				"pontes: unknown payment reference %s",
+				reference,
+			)
 	}
+
+	endpoint := p.baseURL + "/settlements/" + transactionID
+
+	resp, err := retryHTTP(ctx, retryConfig{maxAttempts: 3, safeToRetry: true}, func(ctx context.Context) (*http.Response, error) {
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, fmt.Errorf("pontes: failed to build status request: %w", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+
+		return p.client.Do(req)
+	})
+
+	if err != nil {
+		return PaymentStatusUnknown,
+			fmt.Errorf("pontes: status request failed: %w", err)
+	}
+
+	if resp == nil {
+		return PaymentStatusUnknown,
+			fmt.Errorf("pontes: status request returned nil response")
+	}
+
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return PaymentStatusFailed,
+			fmt.Errorf(
+				"pontes: transaction %s not found (404)",
+				transactionID,
+			)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return PaymentStatusUnknown,
+			fmt.Errorf(
+				"pontes: status check returned HTTP %d",
+				resp.StatusCode,
+			)
+	}
 
 	var result struct {
 		Status string `json:"status"`
 	}
+
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return PaymentStatusPending, nil
+		return PaymentStatusUnknown,
+			fmt.Errorf(
+				"pontes: failed to decode status response: %w",
+				err,
+			)
 	}
 
-	status := pontesStatusToPaymentStatus(result.Status)
-	if status == PaymentStatusConfirmed {
-		p.payments[reference] = status
+	apiStatus := pontesStatusToPaymentStatus(result.Status)
+
+	// ----------------------------------------------------
+	// Re-read durable status after network round-trip.
+	// A webhook may have confirmed while this request was in flight.
+	// ----------------------------------------------------
+	if storeStatus, found, err := p.store.GetStatus(ctx, reference); err == nil && found {
+		if storeStatus == PaymentStatusConfirmed ||
+			storeStatus == PaymentStatusFailed ||
+			storeStatus == PaymentStatusExpired {
+			return storeStatus, nil
+		}
 	}
-	return status, nil
+
+	// Persist terminal statuses learned from the API.
+	switch apiStatus {
+	case PaymentStatusConfirmed,
+		PaymentStatusFailed,
+		PaymentStatusExpired:
+
+		_ = p.store.SetStatus(ctx, reference, apiStatus)
+
+		p.mu.Lock()
+		p.payments[reference] = apiStatus
+		p.mu.Unlock()
+	}
+
+	return apiStatus, nil
 }
 
+const amountTolerancePct = 0.001 // 0.1% — accounts for float rounding at provider boundary
 // ConfirmPayment records a Pontes T2 settlement confirmation. In production
 // this is called exclusively by Blockchain.ConfirmAndSettle from the
 // POST /v1/webhooks/pontes handler when the bridge delivers a
 // settlement.confirmed event. Must not be called directly from finalizeBlock.
-func (p *PontesPaymentProvider) ConfirmPayment(reference string, amount float64, currency string) error {
+func (p *PontesPaymentProvider) ConfirmPayment(ctx context.Context, reference string, amount float64, currency string) error {
+	if p.operationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.operationTimeout)
+		defer cancel()
+	}
+	expectedAmount, expectedCurrency, found, err := p.store.GetExpected(ctx, reference)
+	if err != nil {
+		return fmt.Errorf("pontes: ConfirmPayment store lookup failed for reference %s: %w", reference, err)
+	}
+	if !found {
+		return fmt.Errorf("pontes: ConfirmPayment called for unknown reference %q; no pending registration found", reference)
+	}
+	if currency != expectedCurrency {
+		return fmt.Errorf("pontes: ConfirmPayment currency mismatch for reference %q: expected %s, got %s", reference, expectedCurrency, currency)
+	}
+	diff := amount - expectedAmount
+	if diff < 0 {
+		diff = -diff
+	}
+	if expectedAmount > 0 && diff/expectedAmount > amountTolerancePct {
+		return fmt.Errorf("pontes: ConfirmPayment amount mismatch for reference %q: expected %.4f %s, got %.4f %s",
+			reference, expectedAmount, expectedCurrency, amount, currency)
+	}
+
+	if err := p.store.SetStatus(ctx, reference, PaymentStatusConfirmed); err != nil {
+		return fmt.Errorf("pontes: ConfirmPayment failed to persist confirmed status for reference %s: %w", reference, err)
+	}
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.payments[reference] = PaymentStatusConfirmed
+	p.mu.Unlock()
 	return nil
 }
 
@@ -179,6 +344,60 @@ func (p *PontesPaymentProvider) ConfirmPayment(reference string, amount float64,
 // This is called from the API layer (or a background routine) immediately after
 // the PaymentInstruction is oracle-signed and stored in PendingInstructions.
 func (p *PontesPaymentProvider) RegisterSettlement(instruction *PaymentInstruction) (string, error) {
+	return p.RegisterSettlementCtx(context.Background(), instruction)
+}
+
+func (p *PontesPaymentProvider) RegisterSettlementCtx(
+	ctx context.Context,
+	instruction *PaymentInstruction,
+) (string, error) {
+
+	// ----------------------------------------------------
+	// 1. FAST VALIDATION (no timeout burn)
+	// ----------------------------------------------------
+	if err := validateTravelRule(instruction); err != nil {
+		return "", err
+	}
+
+	if p.store == nil {
+		return "", fmt.Errorf("pontes: store is not configured")
+	}
+
+	// ----------------------------------------------------
+	// 2. STORE LOOKUP (no global timeout yet)
+	//    ensures idempotency is not penalised
+	// ----------------------------------------------------
+	if existingTxnID, found, err := p.store.GetPending(ctx, instruction.Reference); err != nil {
+		return "", fmt.Errorf(
+			"pontes: store lookup failed for reference %s: %w",
+			instruction.Reference,
+			err,
+		)
+	} else if found {
+		instruction.PontesTransactionID = existingTxnID
+		instruction.SettlementNetwork = "eurosystem-pontes"
+		return existingTxnID, nil
+	}
+
+	// ----------------------------------------------------
+	// 3. APPLY OPERATION TIMEOUT ONLY FOR EXTERNAL WORK
+	// ----------------------------------------------------
+	if p.operationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.operationTimeout)
+		defer cancel()
+	}
+
+	// ----------------------------------------------------
+	// 4. BUSINESS RULES THAT SHOULD BE TIMED
+	// ----------------------------------------------------
+	if instruction.TotalAmount >= TravelRuleThresholdEUR && instruction.TravelRule == nil {
+		return "", fmt.Errorf(
+			"pontes: TravelRulePayload is required for amounts >= %.2f EUR (EU TFR Regulation 2023/1113)",
+			TravelRuleThresholdEUR,
+		)
+	}
+
 	body, err := json.Marshal(pontesRegisterRequest{
 		DLTOperator: p.dltOperator,
 		Reference:   instruction.Reference,
@@ -191,32 +410,95 @@ func (p *PontesPaymentProvider) RegisterSettlement(instruction *PaymentInstructi
 		return "", fmt.Errorf("pontes: failed to marshal settlement request: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, p.baseURL+"/settlements", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("pontes: failed to build settlement request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	idempotencyKey := "gh-settle-" + instruction.Reference
+	endpoint := p.baseURL + "/settlements"
 
-	resp, err := p.client.Do(req)
+	// ----------------------------------------------------
+	// 5. NETWORK CALL (retry-safe + idempotent)
+	// ----------------------------------------------------
+	resp, err := retryHTTPWithConfig(
+		ctx,
+		retryConfig{
+			maxAttempts: 3,
+			safeToRetry: true, // REQUIRED because Idempotency-Key is set
+		},
+		func(ctx context.Context) (*http.Response, error) {
+
+			req, err := http.NewRequestWithContext(
+				ctx,
+				http.MethodPost,
+				endpoint,
+				bytes.NewReader(body),
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"pontes: failed to build settlement request: %w",
+					err,
+				)
+			}
+
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+p.apiKey)
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+
+			return p.client.Do(req)
+		},
+	)
+
 	if err != nil {
-		return "", fmt.Errorf("pontes: settlement registration request failed: %w", err)
+		return "", fmt.Errorf(
+			"pontes: settlement registration request failed: %w",
+			err,
+		)
 	}
 	defer resp.Body.Close()
 
+	// ----------------------------------------------------
+	// 6. RESPONSE HANDLING
+	// ----------------------------------------------------
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("pontes: settlement registration returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf(
+			"pontes: settlement registration returned HTTP %d: %s",
+			resp.StatusCode,
+			string(b),
+		)
 	}
 
 	var result pontesRegisterResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("pontes: failed to decode settlement response: %w", err)
-	}
-	if result.TransactionID == "" {
-		return "", fmt.Errorf("pontes: settlement registration returned no transactionId")
+		return "", fmt.Errorf(
+			"pontes: failed to decode settlement response: %w",
+			err,
+		)
 	}
 
+	if result.TransactionID == "" {
+		return "", fmt.Errorf(
+			"pontes: settlement registration returned no transactionId",
+		)
+	}
+
+	// ----------------------------------------------------
+	// 7. PERSIST STATE (must be under same ctx budget)
+	// ----------------------------------------------------
+	if err := p.store.SetPending(
+		ctx,
+		instruction.Reference,
+		result.TransactionID,
+		instruction.TotalAmount,
+		instruction.Currency,
+	); err != nil {
+		return "", fmt.Errorf(
+			"pontes: failed to persist pending settlement for reference %s: %w",
+			instruction.Reference,
+			err,
+		)
+	}
+
+	// ----------------------------------------------------
+	// 8. IN-MEMORY CACHE UPDATE
+	// ----------------------------------------------------
 	instruction.PontesTransactionID = result.TransactionID
 	instruction.SettlementNetwork = "eurosystem-pontes"
 
@@ -232,8 +514,9 @@ func (p *PontesPaymentProvider) RegisterSettlement(instruction *PaymentInstructi
 // when the signatures match (constant-time comparison).
 func (p *PontesPaymentProvider) VerifyWebhookSignature(payload []byte, signature string) bool {
 	if p.hmacSecret == "" {
-		return false
+		panic("pontes: hmacSecret is empty — webhook verification is disabled; this indicates a broken initialization")
 	}
+
 	mac := hmac.New(sha256.New, []byte(p.hmacSecret))
 	mac.Write(payload)
 	expected := hex.EncodeToString(mac.Sum(nil))
@@ -252,5 +535,64 @@ func pontesStatusToPaymentStatus(s string) PaymentStatus {
 		return PaymentStatusExpired
 	default:
 		return PaymentStatusPending
+	}
+}
+
+func validateTravelRule(instruction *PaymentInstruction) error {
+	if instruction.TotalAmount < TravelRuleThresholdEUR {
+		return nil // below threshold — not required
+	}
+	if instruction.TravelRule == nil {
+		return fmt.Errorf("payment: TravelRulePayload is required for %s %.2f >= threshold %.2f EUR (EU TFR 2023/1113)",
+			instruction.Currency, instruction.TotalAmount, TravelRuleThresholdEUR)
+	}
+	tr := instruction.TravelRule
+	if tr.OriginatorName == "" {
+		return fmt.Errorf("payment: TravelRule.OriginatorName must not be empty")
+	}
+	if tr.OriginatorAccount == "" {
+		return fmt.Errorf("payment: TravelRule.OriginatorAccount must not be empty")
+	}
+	if tr.BeneficiaryName == "" {
+		return fmt.Errorf("payment: TravelRule.BeneficiaryName must not be empty")
+	}
+	return nil
+}
+
+func (p *PontesPaymentProvider) StartReconciliation(ctx context.Context, interval, staleness time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p.reconcileOnce(ctx, staleness)
+			}
+		}
+	}()
+}
+
+func (p *PontesPaymentProvider) reconcileOnce(ctx context.Context, staleness time.Duration) {
+	cutoff := time.Now().Add(-staleness)
+	pending, err := p.store.PendingOlderThan(ctx, cutoff)
+	if err != nil {
+		p.log.ErrorContext(ctx, "pontes: reconciliation store query failed", slog.String("error", err.Error()))
+		return
+	}
+	for _, s := range pending {
+		status, err := p.GetPaymentStatus(ctx, s.Reference)
+		if err != nil {
+			p.log.WarnContext(ctx, "pontes: reconciliation status poll failed",
+				slog.String("reference", s.Reference),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		p.log.InfoContext(ctx, "pontes: reconciliation updated status",
+			slog.String("reference", s.Reference),
+			slog.String("status", string(status)),
+		)
 	}
 }

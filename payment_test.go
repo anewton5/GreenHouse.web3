@@ -1,6 +1,7 @@
 package gonetwork
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func makeConfirmation(tradeID, reference string) *PaymentConfirmation {
 
 func TestMockPaymentProvider_CreateVirtualAccount(t *testing.T) {
 	p := NewMockPaymentProvider()
-	iban, err := p.CreateVirtualAccount("wallet-alice")
+	iban, err := p.CreateVirtualAccount(context.Background(), "wallet-alice")
 	require.NoError(t, err)
 	assert.NotEmpty(t, iban)
 	assert.Contains(t, iban, "GB")
@@ -61,9 +62,9 @@ func TestMockPaymentProvider_CreateVirtualAccount(t *testing.T) {
 
 func TestMockPaymentProvider_CreateVirtualAccount_Idempotent(t *testing.T) {
 	p := NewMockPaymentProvider()
-	iban1, err := p.CreateVirtualAccount("wallet-alice")
+	iban1, err := p.CreateVirtualAccount(context.Background(), "wallet-alice")
 	require.NoError(t, err)
-	iban2, err := p.CreateVirtualAccount("wallet-alice")
+	iban2, err := p.CreateVirtualAccount(context.Background(), "wallet-alice")
 	require.NoError(t, err)
 	// Same wallet always gets same IBAN.
 	assert.Equal(t, iban1, iban2)
@@ -71,46 +72,46 @@ func TestMockPaymentProvider_CreateVirtualAccount_Idempotent(t *testing.T) {
 
 func TestMockPaymentProvider_CreateVirtualAccount_DifferentWallets(t *testing.T) {
 	p := NewMockPaymentProvider()
-	iban1, err := p.CreateVirtualAccount("wallet-alice")
+	iban1, err := p.CreateVirtualAccount(context.Background(), "wallet-alice")
 	require.NoError(t, err)
-	iban2, err := p.CreateVirtualAccount("wallet-bob")
+	iban2, err := p.CreateVirtualAccount(context.Background(), "wallet-bob")
 	require.NoError(t, err)
 	assert.NotEqual(t, iban1, iban2)
 }
 
 func TestMockPaymentProvider_CreateVirtualAccount_EmptyWallet(t *testing.T) {
 	p := NewMockPaymentProvider()
-	_, err := p.CreateVirtualAccount("")
+	_, err := p.CreateVirtualAccount(context.Background(), "")
 	require.Error(t, err)
 }
 
 func TestMockPaymentProvider_GetPaymentStatus_Unknown(t *testing.T) {
 	p := NewMockPaymentProvider()
-	status, err := p.GetPaymentStatus("ref-unknown")
+	status, err := p.GetPaymentStatus(context.Background(), "ref-unknown")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusPending, status)
 }
 
 func TestMockPaymentProvider_ConfirmPayment(t *testing.T) {
 	p := NewMockPaymentProvider()
-	err := p.ConfirmPayment("ref-001", 1050.00, "GBP")
+	err := p.ConfirmPayment(context.Background(), "ref-001", 1050.00, "GBP")
 	require.NoError(t, err)
 
-	status, err := p.GetPaymentStatus("ref-001")
+	status, err := p.GetPaymentStatus(context.Background(), "ref-001")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusConfirmed, status)
 }
 
 func TestMockPaymentProvider_ConfirmPayment_ZeroAmount(t *testing.T) {
 	p := NewMockPaymentProvider()
-	err := p.ConfirmPayment("ref-001", 0, "GBP")
+	err := p.ConfirmPayment(context.Background(), "ref-001", 0, "GBP")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "amount")
 }
 
 func TestMockPaymentProvider_ConfirmPayment_EmptyReference(t *testing.T) {
 	p := NewMockPaymentProvider()
-	err := p.ConfirmPayment("", 100, "GBP")
+	err := p.ConfirmPayment(context.Background(), "", 100, "GBP")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reference")
 }
@@ -234,7 +235,7 @@ func TestPaymentFlow_InstructionToConfirmation(t *testing.T) {
 
 	// Onboard buyer — create virtual account.
 	buyerID := "buyer-wallet-key"
-	iban, err := provider.CreateVirtualAccount(buyerID)
+	iban, err := provider.CreateVirtualAccount(context.Background(), buyerID)
 	require.NoError(t, err)
 	assert.NotEmpty(t, iban)
 
@@ -260,10 +261,10 @@ func TestPaymentFlow_InstructionToConfirmation(t *testing.T) {
 	assert.True(t, oracle.VerifyInstruction(signed))
 
 	// Simulate buyer payment.
-	err = provider.ConfirmPayment(signed.Reference, signed.TotalAmount, signed.Currency)
+	err = provider.ConfirmPayment(context.Background(), signed.Reference, signed.TotalAmount, signed.Currency)
 	require.NoError(t, err)
 
-	status, err := provider.GetPaymentStatus(signed.Reference)
+	status, err := provider.GetPaymentStatus(context.Background(), signed.Reference)
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusConfirmed, status)
 

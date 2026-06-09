@@ -2,6 +2,7 @@ package gonetwork
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
@@ -31,12 +32,13 @@ import (
 //
 // API documentation: https://modulr.readme.io/docs
 type ModulrPaymentProvider struct {
-	apiKey      string
-	apiSecret   string
-	baseURL     string
-	customerID  string // required for CreateVirtualAccount
-	productCode string // required for CreateVirtualAccount
-	client      *http.Client
+	apiKey           string
+	apiSecret        string
+	baseURL          string
+	customerID       string
+	productCode      string
+	client           *http.Client
+	operationTimeout time.Duration
 }
 
 // modulrSandboxBaseURL is the default when MODULR_BASE_URL is not set.
@@ -166,49 +168,91 @@ type modulrPaymentsResponse struct {
 // participant wallet. Returns the account identifier — IBAN for accounts that
 // have one, or "{sortCode}/{accountNumber}" for UK BACS accounts.
 // customerID and productCode must be set on the provider.
-func (m *ModulrPaymentProvider) CreateVirtualAccount(walletID string) (string, error) {
+func (m *ModulrPaymentProvider) CreateVirtualAccount(ctx context.Context, walletID string) (string, error) {
+
+	// ----------------------------------------------------
+	// 1. VALIDATION (no timeout burn)
+	// ----------------------------------------------------
 	if m.customerID == "" {
-		return "", fmt.Errorf("modulr: customerID must be set to create virtual accounts; set MODULR_CUSTOMER_ID")
+		return "", fmt.Errorf("modulr: customerID must be set")
 	}
 	if m.productCode == "" {
-		return "", fmt.Errorf("modulr: productCode must be set to create virtual accounts; set MODULR_PRODUCT_CODE (find it via GET /customers/%s/accounts)", m.customerID)
+		return "", fmt.Errorf("modulr: productCode must be set")
 	}
+
+	// ----------------------------------------------------
+	// 2. BUILD REQUEST
+	// ----------------------------------------------------
 	payload := modulrAccountRequest{
 		Name:              walletID,
 		Currency:          "GBP",
 		ExternalReference: walletID,
 		ProductCode:       m.productCode,
 	}
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("modulr: failed to marshal account request: %w", err)
 	}
 
 	endpoint := m.baseURL + "/customers/" + m.customerID + "/accounts"
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("modulr: failed to build request: %w", err)
-	}
-	if err := m.addAuthHeaders(req); err != nil {
-		return "", err
+	idempotencyKey := "gh-gbp-" + walletID
+
+	// ----------------------------------------------------
+	// 3. APPLY OPERATION TIMEOUT (H-1)
+	// ----------------------------------------------------
+	if m.operationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.operationTimeout)
+		defer cancel()
 	}
 
-	resp, err := m.client.Do(req)
+	// ----------------------------------------------------
+	// 4. HTTP CALL (retry-safe)
+	// ----------------------------------------------------
+	resp, err := retryHTTPWithConfig(
+		ctx,
+		retryConfig{maxAttempts: 3, safeToRetry: true},
+		func(ctx context.Context) (*http.Response, error) {
+
+			req, err := http.NewRequestWithContext(
+				ctx,
+				http.MethodPost,
+				endpoint,
+				bytes.NewReader(body),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("modulr: failed to build request: %w", err)
+			}
+
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+
+			if err := m.addAuthHeaders(req); err != nil {
+				return nil, err
+			}
+
+			return m.client.Do(req)
+		},
+	)
+
 	if err != nil {
-		return "", fmt.Errorf("modulr: CreateVirtualAccount request failed: %w", err)
+		return "", fmt.Errorf("modulr: CreateVirtualAccount failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// ----------------------------------------------------
+	// 5. RESPONSE HANDLING
+	// ----------------------------------------------------
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("modulr: CreateVirtualAccount returned %d: %s", resp.StatusCode, string(b))
+		return "", fmt.Errorf("modulr: CreateVirtualAccount HTTP %d: %s", resp.StatusCode, string(b))
 	}
 
 	var result modulrAccountResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("modulr: failed to decode account response: %w", err)
+		return "", fmt.Errorf("modulr: decode account response failed: %w", err)
 	}
-	// Prefer IBAN; fall back to sort code / account number for UK GBP accounts.
+
 	for _, id := range result.Identifiers {
 		if id.IBAN != "" {
 			return id.IBAN, nil
@@ -219,7 +263,8 @@ func (m *ModulrPaymentProvider) CreateVirtualAccount(walletID string) (string, e
 			return id.SortCode + "/" + id.AccountNumber, nil
 		}
 	}
-	return "", fmt.Errorf("modulr: account created (id: %s) but no IBAN or sort code returned", result.ID)
+
+	return "", fmt.Errorf("modulr: account created but no IBAN or sort code returned")
 }
 
 // CreateEURVirtualAccount creates a named EUR virtual account in Modulr for a
@@ -227,101 +272,176 @@ func (m *ModulrPaymentProvider) CreateVirtualAccount(walletID string) (string, e
 // requests EUR currency, which creates a SEPA-enabled IBAN. This method exists
 // alongside CreateVirtualAccount (GBP) to preserve backward compatibility.
 // customerID and productCode must be set on the provider.
-func (m *ModulrPaymentProvider) CreateEURVirtualAccount(walletID string) (string, error) {
+func (m *ModulrPaymentProvider) CreateEURVirtualAccount(ctx context.Context, walletID string) (string, error) {
+
 	if m.customerID == "" {
-		return "", fmt.Errorf("modulr: customerID must be set to create virtual accounts; set MODULR_CUSTOMER_ID")
+		return "", fmt.Errorf("modulr: customerID must be set")
 	}
 	if m.productCode == "" {
-		return "", fmt.Errorf("modulr: productCode must be set to create virtual accounts; set MODULR_PRODUCT_CODE (find it via GET /customers/%s/accounts)", m.customerID)
+		return "", fmt.Errorf("modulr: productCode must be set")
 	}
+
 	payload := modulrAccountRequest{
 		Name:              walletID + "-EUR",
 		Currency:          "EUR",
 		ExternalReference: walletID + "-EUR",
 		ProductCode:       m.productCode,
 	}
+
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("modulr: failed to marshal EUR account request: %w", err)
+		return "", fmt.Errorf("modulr: failed to marshal EUR request: %w", err)
 	}
 
 	endpoint := m.baseURL + "/customers/" + m.customerID + "/accounts"
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("modulr: failed to build EUR account request: %w", err)
-	}
-	if err := m.addAuthHeaders(req); err != nil {
-		return "", err
+	idempotencyKey := "gh-eur-" + walletID
+
+	if m.operationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.operationTimeout)
+		defer cancel()
 	}
 
-	resp, err := m.client.Do(req)
+	resp, err := retryHTTPWithConfig(
+		ctx,
+		retryConfig{maxAttempts: 3, safeToRetry: true},
+		func(ctx context.Context) (*http.Response, error) {
+
+			req, err := http.NewRequestWithContext(
+				ctx,
+				http.MethodPost,
+				endpoint,
+				bytes.NewReader(body),
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+
+			if err := m.addAuthHeaders(req); err != nil {
+				return nil, err
+			}
+
+			return m.client.Do(req)
+		},
+	)
+
 	if err != nil {
-		return "", fmt.Errorf("modulr: CreateEURVirtualAccount request failed: %w", err)
+		return "", fmt.Errorf("modulr: CreateEURVirtualAccount failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("modulr: CreateEURVirtualAccount returned %d: %s", resp.StatusCode, string(b))
+		return "", fmt.Errorf("modulr: EUR account HTTP %d: %s", resp.StatusCode, string(b))
 	}
 
 	var result modulrAccountResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("modulr: failed to decode EUR account response: %w", err)
+		return "", fmt.Errorf("modulr: decode EUR response failed: %w", err)
 	}
+
 	for _, id := range result.Identifiers {
 		if id.IBAN != "" {
 			return id.IBAN, nil
 		}
 	}
-	return "", fmt.Errorf("modulr: EUR account created (id: %s) but no IBAN returned", result.ID)
+	for _, id := range result.Identifiers {
+		if id.SortCode != "" && id.AccountNumber != "" {
+			return id.SortCode + "/" + id.AccountNumber, nil
+		}
+	}
+
+	return "", fmt.Errorf("modulr: EUR account created but no IBAN returned")
 }
 
 // GetPaymentStatus looks up an inbound payment by its external reference and
 // maps the Modulr status string to our internal PaymentStatus type. Returns
 // PaymentStatusPending (not an error) when no matching payment is found.
-func (m *ModulrPaymentProvider) GetPaymentStatus(reference string) (PaymentStatus, error) {
+func (m *ModulrPaymentProvider) GetPaymentStatus(ctx context.Context, reference string) (PaymentStatus, error) {
+
+	// ----------------------------------------------------
+	// 1. VALIDATION / QUERY BUILD (no timeout burn)
+	// ----------------------------------------------------
 	params := url.Values{}
 	params.Set("externalReference", reference)
 	params.Set("type", "PAYIN")
-	// fromCreatedDate is mandatory per the Modulr API when not filtering by id.
-	// The API accepts offset format (+0000) and limits the range to 180 days back.
-	params.Set("fromCreatedDate", time.Now().AddDate(0, 0, -90).UTC().Format("2006-01-02T15:04:05-0700"))
+	params.Set("fromCreatedDate",
+		time.Now().AddDate(0, 0, -90).UTC().Format("2006-01-02T15:04:05-0700"),
+	)
 
-	req, err := http.NewRequest(http.MethodGet, m.baseURL+"/payments?"+params.Encode(), nil)
-	if err != nil {
-		return PaymentStatusPending, fmt.Errorf("modulr: failed to build request: %w", err)
-	}
-	if err := m.addAuthHeaders(req); err != nil {
-		return PaymentStatusPending, err
+	endpoint := m.baseURL + "/payments?" + params.Encode()
+	idempotencyKey := "gh-payin-" + reference
+
+	// ----------------------------------------------------
+	// 2. APPLY OPERATION TIMEOUT ONLY FOR NETWORK
+	// ----------------------------------------------------
+	if m.operationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.operationTimeout)
+		defer cancel()
 	}
 
-	resp, err := m.client.Do(req)
+	resp, err := retryHTTPWithConfig(
+		ctx,
+		retryConfig{maxAttempts: 3, safeToRetry: true},
+		func(ctx context.Context) (*http.Response, error) {
+
+			req, err := http.NewRequestWithContext(
+				ctx,
+				http.MethodGet,
+				endpoint,
+				nil,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+
+			if err := m.addAuthHeaders(req); err != nil {
+				return nil, err
+			}
+
+			return m.client.Do(req)
+		},
+	)
+
 	if err != nil {
-		return PaymentStatusPending, fmt.Errorf("modulr: GetPaymentStatus request failed: %w", err)
+		return PaymentStatusPending, fmt.Errorf("modulr: GetPaymentStatus failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return PaymentStatusPending, fmt.Errorf("modulr: GetPaymentStatus returned %d: %s", resp.StatusCode, string(b))
+		return PaymentStatusPending, fmt.Errorf("modulr: HTTP %d: %s", resp.StatusCode, string(b))
 	}
 
 	var result modulrPaymentsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return PaymentStatusPending, fmt.Errorf("modulr: failed to decode payments response: %w", err)
+		return PaymentStatusPending, fmt.Errorf("modulr: decode failed: %w", err)
 	}
+
 	if len(result.Content) == 0 {
 		return PaymentStatusPending, nil
 	}
+
 	return modulrStatusToPaymentStatus(result.Content[0].Status), nil
+}
+
+func (m *ModulrPaymentProvider) GetPaymentStatusCtx(
+	ctx context.Context,
+	reference string,
+) (PaymentStatus, error) {
+	return m.GetPaymentStatus(ctx, reference)
 }
 
 // ConfirmPayment is not called directly on ModulrPaymentProvider.
 // In production, payment confirmations arrive via the Modulr webhook
 // (POST /v1/webhooks/payment) and are handled by the API layer.
 // This method exists only to satisfy the PaymentProvider interface.
-func (m *ModulrPaymentProvider) ConfirmPayment(_ string, _ float64, _ string) error {
+func (m *ModulrPaymentProvider) ConfirmPayment(_ context.Context, _ string, _ float64, _ string) error {
 	return fmt.Errorf("modulr: ConfirmPayment must not be called directly; confirmations arrive via the Modulr webhook handler")
 }
 
@@ -333,6 +453,9 @@ func (m *ModulrPaymentProvider) ConfirmPayment(_ string, _ float64, _ string) er
 // payload. Modulr sends the hex-encoded signature in the X-Mod-Nonce header.
 // This must be called before processing any webhook payload.
 func (m *ModulrPaymentProvider) VerifyWebhookSignature(payload []byte, signature string) bool {
+	if m.apiSecret == "" {
+		panic("modulr: apiSecret is empty — webhook verification is disabled; this indicates a broken initialization")
+	}
 	mac := hmac.New(sha256.New, []byte(m.apiSecret))
 	mac.Write(payload)
 	expected := hex.EncodeToString(mac.Sum(nil))

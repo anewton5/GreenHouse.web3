@@ -1022,7 +1022,10 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 			}
 			n.Blockchain.Mu.Lock()
 			if n.Blockchain.OracleService.VerifyConfirmation(&pc) {
-				n.Blockchain.ConfirmedPayments[pc.InstructionID] = &pc
+				n.Blockchain.cacheConfirmedPaymentLocked(&pc)
+				if err := n.Blockchain.persistConfirmedPaymentLocked(&pc); err != nil {
+					log.Printf("Failed to persist payment confirmation %s: %v", pc.InstructionID, err)
+				}
 			}
 			n.Blockchain.Mu.Unlock()
 
@@ -1219,9 +1222,6 @@ func (n *P2PNode) Shutdown(ctx context.Context) error {
 
 	log.Println("Shutting down P2PNode...")
 	atomic.StoreInt32(&n.closed, 1)
-	// Establish the wait boundary after closing the registration gate.
-	n.bgMu.Lock()
-	n.bgMu.Unlock()
 
 	// Cancel the background DHT discovery goroutine first so it stops
 	// polling and making network calls before we tear down the host.

@@ -148,6 +148,12 @@ func (s *Server) Start() error {
 		case *gonetwork.MockIdentityRegistry:
 			panic("production: MockIdentityRegistry is active — configure OnfidoIdentityRegistry (H-1)")
 		}
+		// F-2: Modulr rail must have a provider wired so webhook signatures are verified.
+		_, fasterPayActive := s.bc.SettlementRouter[gonetwork.SettlementFasterPay]
+		_, sepaActive := s.bc.SettlementRouter[gonetwork.SettlementSEPA]
+		if (fasterPayActive || sepaActive) && s.ModulrProvider == nil {
+			panic("production: Modulr rail is active but ModulrProvider is nil — webhook signatures cannot be verified (F-2)")
+		}
 	}
 	go s.startEventFan()
 	go s.startPing()
@@ -244,6 +250,7 @@ func (s *Server) Routes() http.Handler {
 	// Settlement / payment instruction endpoints
 	mux.Handle("GET /v1/payments/pending", s.jwt(http.HandlerFunc(s.handleListPendingPayments)))
 	mux.Handle("GET /v1/payments/history", s.jwt(http.HandlerFunc(s.handleListPaymentHistory)))
+	mux.Handle("POST /v1/payments/{tradeID}/register", s.jwtAdmin(http.HandlerFunc(s.handleRegisterCeBMSettlement)))
 
 	// Payment webhook — no JWT; authenticated via HMAC signature from Modulr
 	mux.HandleFunc("POST /v1/webhooks/payment", s.handlePaymentWebhook)

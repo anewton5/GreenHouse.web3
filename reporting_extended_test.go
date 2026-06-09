@@ -450,16 +450,20 @@ func TestPontesRegisterSettlement_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := NewPontesPaymentProvider("apikey", srv.URL, "DLT-OP-1", "hmac-secret")
+	p, err := NewPontesPaymentProvider("apikey", srv.URL, "DLT-OP-1", "hmac-secret", NewMemoryPaymentStore())
 	require.NoError(t, err)
 
 	instr := &PaymentInstruction{
 		TradeID:       "trade-A",
 		Reference:     "ref-A",
-		TotalAmount:   5000.0,
+		TotalAmount:   500.0,
 		Currency:      "EUR",
 		PayerWalletID: "buyer-pub",
 		PayeeWalletID: "seller-pub",
+		TravelRule: &TravelRulePayload{
+			OriginatorName:  "Test User",
+			BeneficiaryName: "Test Merchant",
+		},
 	}
 
 	txID, err := p.RegisterSettlement(instr)
@@ -476,7 +480,7 @@ func TestPontesRegisterSettlement_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, _ := NewPontesPaymentProvider("k", srv.URL, "op", "hmac")
+	p, _ := NewPontesPaymentProvider("k", srv.URL, "op", "hmac", NewMemoryPaymentStore())
 	instr := &PaymentInstruction{Reference: "ref-B", TotalAmount: 100, Currency: "EUR"}
 	_, err := p.RegisterSettlement(instr)
 	require.Error(t, err)
@@ -490,7 +494,7 @@ func TestPontesRegisterSettlement_EmptyTransactionID_Error(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, _ := NewPontesPaymentProvider("k", srv.URL, "op", "hmac")
+	p, _ := NewPontesPaymentProvider("k", srv.URL, "op", "hmac", NewMemoryPaymentStore())
 	instr := &PaymentInstruction{Reference: "ref-C", TotalAmount: 100, Currency: "EUR"}
 	_, err := p.RegisterSettlement(instr)
 	require.Error(t, err)

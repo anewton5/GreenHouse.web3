@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // newTestBlockchain returns a fully-initialised Blockchain suitable for unit
@@ -64,4 +66,24 @@ func validRegistrationRecord(walletKey string) *RegistrationRecord {
 		Jurisdiction: "GB",
 		ValidForDays: 365,
 	}
+}
+
+func newTestPontesProvider(
+	t *testing.T,
+	store PaymentStore,
+) *PontesPaymentProvider {
+
+	t.Helper()
+
+	p, err := NewPontesPaymentProvider(
+		"test-api-key",
+		"http://pontes.test",
+		"GH-DLT",
+		"test-secret",
+		store,
+	)
+
+	require.NoError(t, err)
+
+	return p
 }

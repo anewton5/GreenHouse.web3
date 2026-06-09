@@ -12,6 +12,7 @@ package gonetwork
 //   - Deal / DealAnchor / DealCommitment  (nil-input and wrong-status error paths)
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/hex"
@@ -93,7 +94,7 @@ func TestOperatorRegistry_RegistryPublicKey_ReturnsNonNil(t *testing.T) {
 
 func newEURCProvider(t *testing.T, serverURL string) *EURCPaymentProvider {
 	t.Helper()
-	p, err := NewEURCPaymentProvider("api-key-test", serverURL, "ws-set-001", "hmac-secret")
+	p, err := NewEURCPaymentProvider("api-key-test", serverURL, "ws-set-001", "hmac-secret", NewMemoryPaymentStore())
 	require.NoError(t, err)
 	return p
 }
@@ -116,7 +117,7 @@ func TestEURCCreateVirtualAccount_HTTPSuccess(t *testing.T) {
 	defer srv.Close()
 
 	p := newEURCProvider(t, srv.URL)
-	addr, err := p.CreateVirtualAccount("investor-wallet-001")
+	addr, err := p.CreateVirtualAccount(context.Background(), "investor-wallet-001")
 	require.NoError(t, err)
 	assert.Equal(t, "0xDeAdBeEf1234567890AbCdEf1234567890AbCdEf", addr)
 }
@@ -138,9 +139,9 @@ func TestEURCCreateVirtualAccount_Idempotent_SecondCallCached(t *testing.T) {
 	defer srv.Close()
 
 	p := newEURCProvider(t, srv.URL)
-	addr1, err := p.CreateVirtualAccount("cached-wallet")
+	addr1, err := p.CreateVirtualAccount(context.Background(), "cached-wallet")
 	require.NoError(t, err)
-	addr2, err := p.CreateVirtualAccount("cached-wallet")
+	addr2, err := p.CreateVirtualAccount(context.Background(), "cached-wallet")
 	require.NoError(t, err)
 	assert.Equal(t, addr1, addr2)
 	assert.Equal(t, 1, callCount, "second call should use cache and not hit the server")
@@ -153,7 +154,7 @@ func TestEURCCreateVirtualAccount_ServerError(t *testing.T) {
 	defer srv.Close()
 
 	p := newEURCProvider(t, srv.URL)
-	_, err := p.CreateVirtualAccount("wallet-err")
+	_, err := p.CreateVirtualAccount(context.Background(), "wallet-err")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
 }
@@ -173,7 +174,7 @@ func TestEURCCreateVirtualAccount_EmptyAddressInResponse(t *testing.T) {
 	defer srv.Close()
 
 	p := newEURCProvider(t, srv.URL)
-	_, err := p.CreateVirtualAccount("wallet-noaddr")
+	_, err := p.CreateVirtualAccount(context.Background(), "wallet-noaddr")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no address")
 }
@@ -198,7 +199,7 @@ func TestEURCCreateVirtualAccount_LongWalletID_TruncatesIdempotencyKey(t *testin
 
 	p := newEURCProvider(t, srv.URL)
 	longID := "this-is-a-very-long-wallet-id-that-exceeds-36-characters"
-	_, err := p.CreateVirtualAccount(longID)
+	_, err := p.CreateVirtualAccount(context.Background(), longID)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(capturedKey), 36, "idempotency key must not exceed 36 chars")
 }
@@ -211,7 +212,7 @@ func TestEURCCreateVirtualAccount_LongWalletID_TruncatesIdempotencyKey(t *testin
 // test server URL, and also returns a *PaymentInstruction ready to register.
 func newPontesWithServer(t *testing.T, serverURL string) *PontesPaymentProvider {
 	t.Helper()
-	p, err := NewPontesPaymentProvider("pontes-key", serverURL, "DLT-OP-1", "hmac-s")
+	p, err := NewPontesPaymentProvider("pontes-key", serverURL, "DLT-OP-1", "hmac-s", NewMemoryPaymentStore())
 	require.NoError(t, err)
 	return p
 }
@@ -240,11 +241,16 @@ func TestPontesGetPaymentStatus_PendingRef_APIReturnsSettled(t *testing.T) {
 		PayeeWalletID: "BICPAYEE",
 		TotalAmount:   5000.0,
 		Currency:      "EUR",
+		TravelRule: &TravelRulePayload{
+			OriginatorName:    "Test User",
+			OriginatorAccount: "DE89370400440532013000",
+			BeneficiaryName:   "Test Merchant",
+		},
 	}
 	_, err := p.RegisterSettlement(instr)
 	require.NoError(t, err)
 
-	status, err := p.GetPaymentStatus("ref-settled")
+	status, err := p.GetPaymentStatus(context.Background(), "ref-settled")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusConfirmed, status)
 }
@@ -271,17 +277,23 @@ func TestPontesGetPaymentStatus_PendingRef_APIReturnsPending(t *testing.T) {
 		PayeeWalletID: "BICPAYEE",
 		TotalAmount:   2500.0,
 		Currency:      "EUR",
+		TravelRule: &TravelRulePayload{
+			// minimal valid fields (adjust to your struct)
+			OriginatorName:    "Test User",
+			OriginatorAccount: "NL91ABNA0417164300",
+			BeneficiaryName:   "Test Merchant",
+		},
 	}
 	_, err := p.RegisterSettlement(instr)
 	require.NoError(t, err)
 
-	status, err := p.GetPaymentStatus("ref-still-pending")
+	status, err := p.GetPaymentStatus(context.Background(), "ref-still-pending")
 	require.NoError(t, err)
 	assert.Equal(t, PaymentStatusPending, status)
 }
 
-func TestPontesGetPaymentStatus_PendingRef_APIFails_ReturnsPending(t *testing.T) {
-	// POST /settlements succeeds; GET fails with 500 → provider returns Pending
+func TestPontesGetPaymentStatus_PendingRef_APIFails_ReturnsUnknown(t *testing.T) {
+	// POST /settlements succeeds; GET fails with 500 → provider returns Unknown
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			w.Header().Set("Content-Type", "application/json")
@@ -302,16 +314,21 @@ func TestPontesGetPaymentStatus_PendingRef_APIFails_ReturnsPending(t *testing.T)
 		PayeeWalletID: "BICPAYEE",
 		TotalAmount:   100.0,
 		Currency:      "EUR",
+		TravelRule: &TravelRulePayload{
+			OriginatorName:  "Test User",
+			BeneficiaryName: "Test Merchant",
+		},
 	}
 	_, err := p.RegisterSettlement(instr)
 	require.NoError(t, err)
 
-	// GetPaymentStatus hits the API which returns 504; should return Pending with error
-	status, _ := p.GetPaymentStatus("ref-api-fail")
-	assert.Equal(t, PaymentStatusPending, status)
+	// GetPaymentStatus hits the API which returns 504; should return Unknown with error
+	status, err := p.GetPaymentStatus(context.Background(), "ref-api-fail")
+	require.Error(t, err)
+	assert.Equal(t, PaymentStatusUnknown, status)
 }
 
-func TestPontesGetPaymentStatus_PendingRef_BadJSONResponse(t *testing.T) {
+func TestPontesGetPaymentStatus_PendingRef_BadJSONResponse_ReturnsUnknown(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			w.Header().Set("Content-Type", "application/json")
@@ -333,13 +350,18 @@ func TestPontesGetPaymentStatus_PendingRef_BadJSONResponse(t *testing.T) {
 		PayeeWalletID: "BICPAYEE",
 		TotalAmount:   100.0,
 		Currency:      "EUR",
+		TravelRule: &TravelRulePayload{
+			OriginatorName:  "Test User",
+			BeneficiaryName: "Test Merchant",
+		},
 	}
 	_, err := p.RegisterSettlement(instr)
 	require.NoError(t, err)
 
-	// Bad JSON → returns Pending without error (non-fatal)
-	status, _ := p.GetPaymentStatus("ref-badjson")
-	assert.Equal(t, PaymentStatusPending, status)
+	// Bad JSON response must return Unknown with an explicit decode error.
+	status, err := p.GetPaymentStatus(context.Background(), "ref-badjson")
+	require.Error(t, err)
+	assert.Equal(t, PaymentStatusUnknown, status)
 }
 
 // ---------------------------------------------------------------------------

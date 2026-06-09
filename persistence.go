@@ -26,16 +26,18 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 
 	bolt "go.etcd.io/bbolt"
 )
 
 const (
-	blocksBucket          = "blocks"
-	stateBucket           = "state"
-	delegatesBucket       = "delegates"
-	reportingOutboxBucket = "reporting_outbox"
+	blocksBucket            = "blocks"
+	stateBucket             = "state"
+	confirmedPaymentsBucket = "confirmed_payments"
+	delegatesBucket         = "delegates"
+	reportingOutboxBucket   = "reporting_outbox"
 )
 
 // BlockStore wraps a bbolt database for block persistence.
@@ -55,6 +57,9 @@ func OpenBlockStore(path string) (*BlockStore, error) {
 			return err
 		}
 		if _, err := tx.CreateBucketIfNotExists([]byte(stateBucket)); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(confirmedPaymentsBucket)); err != nil {
 			return err
 		}
 		if _, err := tx.CreateBucketIfNotExists([]byte(delegatesBucket)); err != nil {
@@ -80,6 +85,48 @@ func (bs *BlockStore) SaveToReportingOutbox(report *RegulatoryReport) error {
 	return bs.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(reportingOutboxBucket)).Put([]byte(report.ID), data)
 	})
+}
+
+// SaveConfirmedPayment serialises a payment confirmation and stores it in the
+// durable confirmation ledger. The ledger keeps historical confirmations even
+// after the in-memory cache prunes old entries for retention.
+func (bs *BlockStore) SaveConfirmedPayment(conf *PaymentConfirmation) error {
+	if conf == nil {
+		return fmt.Errorf("BlockStore.SaveConfirmedPayment: confirmation is nil")
+	}
+	data, err := json.Marshal(conf)
+	if err != nil {
+		return fmt.Errorf("BlockStore.SaveConfirmedPayment: marshal: %w", err)
+	}
+	return bs.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(confirmedPaymentsBucket)).Put([]byte(conf.InstructionID), data)
+	})
+}
+
+// LoadConfirmedPayment retrieves a single confirmation from the durable
+// confirmation ledger. It returns (nil, false, nil) when no entry exists.
+func (bs *BlockStore) LoadConfirmedPayment(instructionID string) (*PaymentConfirmation, bool, error) {
+	var conf PaymentConfirmation
+	found := false
+	err := bs.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(confirmedPaymentsBucket))
+		if b == nil {
+			return nil
+		}
+		data := b.Get([]byte(instructionID))
+		if data == nil {
+			return nil
+		}
+		if err := json.Unmarshal(data, &conf); err != nil {
+			return fmt.Errorf("BlockStore.LoadConfirmedPayment: unmarshal: %w", err)
+		}
+		found = true
+		return nil
+	})
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return &conf, true, nil
 }
 
 // LoadReportingOutbox reads all pending reports from the outbox bucket.
@@ -127,9 +174,22 @@ func (bs *BlockStore) SaveBlock(b *Block) error {
 	if err != nil {
 		return fmt.Errorf("BlockStore.SaveBlock: marshal: %w", err)
 	}
-	key := []byte(fmt.Sprintf("%010d", b.Index))
+	key := []byte(keyForIndex(b.Index))
 	return bs.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(blocksBucket)).Put(key, data)
+	})
+}
+
+// Backup writes a consistent BBolt snapshot to w.
+// Safe to call concurrently with SaveBlock because it uses a read-only
+// transaction pinned to a consistent view of the database.
+func (bs *BlockStore) Backup(w io.Writer) error {
+	if bs == nil || bs.db == nil {
+		return fmt.Errorf("BlockStore.Backup: store is not initialised")
+	}
+	return bs.db.View(func(tx *bolt.Tx) error {
+		_, err := tx.WriteTo(w)
+		return err
 	})
 }
 
@@ -178,11 +238,12 @@ func keyForIndex(index int) string {
 // LastAppliedBlock records the highest block index whose state changes are
 // reflected in this snapshot, enabling catch-up replay on startup.
 type stateSnapshot struct {
-	Assets           map[string]*Asset                 `json:"assets"`
-	Holdings         map[string]*AssetHolding          `json:"holdings"`
-	Credentials      map[string]*CredentialAttestation `json:"credentials"`
-	WalletSequences  map[string]int64                  `json:"wallet_sequences"`
-	LastAppliedBlock int                               `json:"last_applied_block"`
+	Assets            map[string]*Asset                 `json:"assets"`
+	Holdings          map[string]*AssetHolding          `json:"holdings"`
+	Credentials       map[string]*CredentialAttestation `json:"credentials"`
+	WalletSequences   map[string]int64                  `json:"wallet_sequences"`
+	ConfirmedPayments map[string]*PaymentConfirmation   `json:"confirmed_payments,omitempty"`
+	LastAppliedBlock  int                               `json:"last_applied_block"`
 }
 
 // SaveState persists the blockchain's key in-memory maps to the "state" bucket.
@@ -191,11 +252,12 @@ type stateSnapshot struct {
 // applyBlockState has just completed.
 func (bs *BlockStore) SaveState(bc *Blockchain, lastBlockIndex int) error {
 	snap := stateSnapshot{
-		Assets:           bc.Assets,
-		Holdings:         bc.Holdings,
-		Credentials:      bc.Credentials,
-		WalletSequences:  bc.WalletSequences,
-		LastAppliedBlock: lastBlockIndex,
+		Assets:            bc.Assets,
+		Holdings:          bc.Holdings,
+		Credentials:       bc.Credentials,
+		WalletSequences:   bc.WalletSequences,
+		ConfirmedPayments: bc.ConfirmedPayments,
+		LastAppliedBlock:  lastBlockIndex,
 	}
 	data, err := json.Marshal(snap)
 	if err != nil {
@@ -237,6 +299,9 @@ func (bs *BlockStore) LoadState(bc *Blockchain) (int, error) {
 		}
 		if snap.WalletSequences != nil {
 			bc.WalletSequences = snap.WalletSequences
+		}
+		if snap.ConfirmedPayments != nil {
+			bc.ConfirmedPayments = snap.ConfirmedPayments
 		}
 		lastApplied = snap.LastAppliedBlock
 		return nil

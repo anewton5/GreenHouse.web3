@@ -1,6 +1,7 @@
 package gonetwork
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync/atomic"
@@ -32,7 +33,7 @@ func NewMockPaymentProvider() *MockPaymentProvider {
 
 // CreateVirtualAccount generates and stores a deterministic mock IBAN for walletID.
 // Format: GB<counter>MOCK<hash(walletID)[0:8]>
-func (m *MockPaymentProvider) CreateVirtualAccount(walletID string) (string, error) {
+func (m *MockPaymentProvider) CreateVirtualAccount(ctx context.Context, walletID string) (string, error) {
 	if walletID == "" {
 		return "", fmt.Errorf("walletID must not be empty")
 	}
@@ -48,7 +49,7 @@ func (m *MockPaymentProvider) CreateVirtualAccount(walletID string) (string, err
 
 // GetPaymentStatus returns the current status of a payment reference.
 // Returns PaymentStatusPending if the reference is unknown.
-func (m *MockPaymentProvider) GetPaymentStatus(reference string) (PaymentStatus, error) {
+func (m *MockPaymentProvider) GetPaymentStatus(ctx context.Context, reference string) (PaymentStatus, error) {
 	if status, ok := m.Payments[reference]; ok {
 		return status, nil
 	}
@@ -57,7 +58,7 @@ func (m *MockPaymentProvider) GetPaymentStatus(reference string) (PaymentStatus,
 
 // ConfirmPayment records a payment reference as confirmed.
 // In simulation this is called immediately after a PaymentInstruction is issued.
-func (m *MockPaymentProvider) ConfirmPayment(reference string, amount float64, currency string) error {
+func (m *MockPaymentProvider) ConfirmPayment(ctx context.Context, reference string, amount float64, currency string) error {
 	if reference == "" {
 		return fmt.Errorf("reference must not be empty")
 	}

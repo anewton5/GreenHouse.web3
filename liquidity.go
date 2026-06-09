@@ -1,6 +1,7 @@
 package gonetwork
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -280,11 +281,12 @@ func (wm *WindowManager) applyDVP(bc *Blockchain, trade Trade, atx *AssetTransac
 	bc.PendingInstructions[trade.ID] = instruction
 
 	_ = bc.PaymentProvider.ConfirmPayment(
+		context.Background(),
 		instruction.Reference,
 		instruction.TotalAmount,
 		instruction.Currency,
 	)
-	status, _ := bc.PaymentProvider.GetPaymentStatus(instruction.Reference)
+	status, _ := bc.PaymentProvider.GetPaymentStatus(context.Background(), instruction.Reference)
 	if status != PaymentStatusConfirmed {
 		return
 	}
@@ -297,7 +299,10 @@ func (wm *WindowManager) applyDVP(bc *Blockchain, trade Trade, atx *AssetTransac
 		ConfirmedAt:     time.Now().UTC().Unix(),
 	}
 	confirmation, _ = bc.OracleService.SignConfirmation(confirmation)
-	bc.ConfirmedPayments[trade.ID] = confirmation
+	bc.cacheConfirmedPaymentLocked(confirmation)
+	if err := bc.persistConfirmedPaymentLocked(confirmation); err != nil {
+		fmt.Printf("DVP confirmation persistence failed for window trade %s: %v\n", trade.ID, err)
+	}
 
 	if err := ApplyAssetTransaction(atx, bc.Assets, bc.Holdings); err != nil {
 		fmt.Printf("DVP apply failed for window trade %s: %v\n", trade.ID, err)
