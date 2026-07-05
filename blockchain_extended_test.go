@@ -145,6 +145,40 @@ func TestBuildTravelRule_WithRegistry_PopulatesNames(t *testing.T) {
 	assert.Equal(t, "GB", p.OriginatorCountryCode)
 }
 
+func TestAutoTravelRule_BelowThreshold_ReturnsNil(t *testing.T) {
+	bc := newTestBlockchain(t)
+	p, err := bc.AutoTravelRule("payer-key", "payee-key", "REF-LOW", 999.99, "EUR")
+	require.NoError(t, err)
+	assert.Nil(t, p)
+}
+
+func TestAutoTravelRule_NonEUR_UsesFXRate(t *testing.T) {
+	bc := newTestBlockchain(t)
+	rr := NewRegistrationRegistry()
+	bc.RegistrationRegistry = rr
+	rr.Upsert(validRegistrationRecord("payer-key"))
+	rr.Upsert(validRegistrationRecord("payee-key"))
+
+	oracle := NewMockValuationOracle()
+	oracle.SetCurrencyRate("GBP", "EUR", 1.2)
+	bc.ValuationOracle = oracle
+
+	p, err := bc.AutoTravelRule("payer-key", "payee-key", "REF-FX", 900, "GBP")
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	assert.Equal(t, "REF-FX", p.TransferRef)
+}
+
+func TestAutoTravelRule_AboveThreshold_MissingRegistrationData_ReturnsError(t *testing.T) {
+	bc := newTestBlockchain(t)
+	bc.RegistrationRegistry = NewRegistrationRegistry()
+
+	p, err := bc.AutoTravelRule("payer-key", "payee-key", "REF-MISS", 1500, "EUR")
+	require.Error(t, err)
+	assert.Nil(t, p)
+	assert.Contains(t, err.Error(), "unable to derive Travel Rule payload")
+}
+
 // ---------------------------------------------------------------------------
 // ConfirmAndSettle
 // ---------------------------------------------------------------------------

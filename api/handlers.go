@@ -557,17 +557,52 @@ func (s *Server) handleAttachAnchor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "deal not found")
 		return
 	}
-	var anchor gonetwork.DealAnchor
-	if err := json.NewDecoder(r.Body).Decode(&anchor); err != nil {
+	var req struct {
+		DealID                string                           `json:"deal_id,omitempty"`
+		AnchorWalletKey       string                           `json:"anchor_wallet_key"`
+		CommitmentAmount      float64                          `json:"commitment_amount"`
+		Currency              string                           `json:"currency"`
+		CommittedAt           int64                            `json:"committed_at,omitempty"`
+		AnchorSignature       string                           `json:"anchor_signature"`
+		CredentialAttestation *gonetwork.CredentialAttestation `json:"credential_attestation,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid anchor payload")
 		return
+	}
+	if req.AnchorWalletKey == "" || req.CommitmentAmount <= 0 || req.AnchorSignature == "" {
+		writeError(w, http.StatusBadRequest, "anchor_wallet_key, commitment_amount and anchor_signature are required")
+		return
+	}
+	if req.DealID != "" && req.DealID != dealID {
+		writeError(w, http.StatusBadRequest, "deal_id must match path parameter")
+		return
+	}
+
+	anchorSig, err := base64.StdEncoding.DecodeString(req.AnchorSignature)
+	if err != nil {
+		anchorSig, err = base64.RawURLEncoding.DecodeString(req.AnchorSignature)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid anchor_signature encoding")
+			return
+		}
+	}
+
+	anchor := &gonetwork.DealAnchor{
+		DealID:                dealID,
+		AnchorWalletKey:       req.AnchorWalletKey,
+		CommitmentAmount:      req.CommitmentAmount,
+		Currency:              req.Currency,
+		CommittedAt:           req.CommittedAt,
+		CredentialAttestation: req.CredentialAttestation,
+		AnchorSignature:       anchorSig,
 	}
 	pub, err := gonetwork.PublicKeyFromString(anchor.AnchorWalletKey)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid anchor wallet key")
 		return
 	}
-	if err := d.AttachAnchor(&anchor, pub, nil); err != nil {
+	if err := d.AttachAnchor(anchor, pub, nil); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -966,10 +1001,6 @@ func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "missing X-Mod-Nonce header")
 			return
 		}
-		if !s.ModulrProvider.VerifyWebhookSignature(body, sig) {
-			writeError(w, http.StatusUnauthorized, "invalid webhook signature")
-			return
-		}
 	}
 
 	var event struct {
@@ -984,11 +1015,27 @@ func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if event.Type == "PAYMENT_RECEIVED" && event.Reference != "" {
-		// ConfirmAndSettle confirms the payment and applies the DVP asset transfer.
-		// HTTP 422 on mismatch tells Modulr this callback is permanently rejected.
-		// HTTP 500 on other errors instructs Modulr to retry until the issue resolves.
-		// HTTP 200 on nil error (unknown reference) prevents unnecessary retries.
-		if err := s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency); err != nil {
+		if s.ModulrProvider != nil {
+			err = gonetwork.HandleWebhook(
+				s.ModulrProvider,
+				body,
+				r.Header.Get("X-Mod-Nonce"),
+				func() error {
+					// ConfirmAndSettle confirms the payment and applies the DVP asset transfer.
+					// HTTP 422 on mismatch tells Modulr this callback is permanently rejected.
+					// HTTP 500 on other errors instructs Modulr to retry until the issue resolves.
+					// HTTP 200 on nil error (unknown reference) prevents unnecessary retries.
+					return s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency)
+				},
+			)
+		} else {
+			err = s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency)
+		}
+		if err != nil {
+			if errors.Is(err, gonetwork.ErrInvalidWebhookSignature) {
+				writeError(w, http.StatusUnauthorized, "invalid webhook signature")
+				return
+			}
 			if errors.Is(err, gonetwork.ErrPaymentMismatch) {
 				log.Printf("[payment] mismatch ref=%s: %v", event.Reference, err)
 				writeError(w, http.StatusUnprocessableEntity, "payment mismatch")
@@ -1026,10 +1073,6 @@ func (s *Server) handlePontesWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "missing X-Pontes-Signature header")
 		return
 	}
-	if !s.PontesProvider.VerifyWebhookSignature(body, sig) {
-		writeError(w, http.StatusUnauthorized, "invalid Pontes webhook signature")
-		return
-	}
 
 	var event struct {
 		Type      string  `json:"type"`
@@ -1043,9 +1086,21 @@ func (s *Server) handlePontesWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if event.Type == "settlement.confirmed" && event.Reference != "" {
-		// HTTP 422 on mismatch tells the Pontes bridge this callback is permanently rejected.
-		// HTTP 500 on other errors instructs the Pontes bridge to retry.
-		if err := s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency); err != nil {
+		err = gonetwork.HandleWebhook(
+			s.PontesProvider,
+			body,
+			sig,
+			func() error {
+				// HTTP 422 on mismatch tells the Pontes bridge this callback is permanently rejected.
+				// HTTP 500 on other errors instructs the Pontes bridge to retry.
+				return s.bc.ConfirmAndSettle(event.Reference, event.Amount, event.Currency)
+			},
+		)
+		if err != nil {
+			if errors.Is(err, gonetwork.ErrInvalidWebhookSignature) {
+				writeError(w, http.StatusUnauthorized, "invalid Pontes webhook signature")
+				return
+			}
 			if errors.Is(err, gonetwork.ErrPaymentMismatch) {
 				log.Printf("[pontes] mismatch ref=%s: %v", event.Reference, err)
 				writeError(w, http.StatusUnprocessableEntity, "payment mismatch")
@@ -1082,10 +1137,6 @@ func (s *Server) handleEURCWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "missing Circle-Signature header")
 		return
 	}
-	if !s.EURCProvider.VerifyWebhookSignature(body, sig) {
-		writeError(w, http.StatusUnauthorized, "invalid EURC webhook signature")
-		return
-	}
 
 	// Circle uses a notifications envelope; extract the transfer event.
 	var envelope struct {
@@ -1104,13 +1155,25 @@ func (s *Server) handleEURCWebhook(w http.ResponseWriter, r *http.Request) {
 	if envelope.NotificationType == "transfer.complete" &&
 		envelope.Transfer != nil &&
 		envelope.Transfer.ExternalRef != "" {
-		// HTTP 422 on mismatch tells Circle this callback is permanently rejected.
-		// HTTP 500 on other errors instructs Circle to retry.
-		if err := s.bc.ConfirmAndSettle(
-			envelope.Transfer.ExternalRef,
-			envelope.Transfer.Amount,
-			envelope.Transfer.Currency,
-		); err != nil {
+		err = gonetwork.HandleWebhook(
+			s.EURCProvider,
+			body,
+			sig,
+			func() error {
+				// HTTP 422 on mismatch tells Circle this callback is permanently rejected.
+				// HTTP 500 on other errors instructs Circle to retry.
+				return s.bc.ConfirmAndSettle(
+					envelope.Transfer.ExternalRef,
+					envelope.Transfer.Amount,
+					envelope.Transfer.Currency,
+				)
+			},
+		)
+		if err != nil {
+			if errors.Is(err, gonetwork.ErrInvalidWebhookSignature) {
+				writeError(w, http.StatusUnauthorized, "invalid EURC webhook signature")
+				return
+			}
 			if errors.Is(err, gonetwork.ErrPaymentMismatch) {
 				log.Printf("[eurc] mismatch ref=%s: %v", envelope.Transfer.ExternalRef, err)
 				writeError(w, http.StatusUnprocessableEntity, "payment mismatch")
@@ -2131,27 +2194,15 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// G-09: FATF Travel Rule — transfers ≥ EUR 1,000 equivalent must carry
-	// originator/beneficiary information. Parse an optional request body so
-	// callers can supply travel_rule_data when required.
-	var fillReq struct {
-		TravelRuleData *gonetwork.TravelRulePayload `json:"travel_rule_data,omitempty"`
-	}
-	// Attempt to decode; ignore errors (body is optional for small transfers).
-	_ = json.NewDecoder(r.Body).Decode(&fillReq)
-
-	tradeValueEUR := fillQty * found.Price
-	if tradeValueEUR >= 1000.0 {
-		if fillReq.TravelRuleData == nil {
-			writeError(w, http.StatusUnprocessableEntity,
-				"FATF Travel Rule: travel_rule_data is required for transfers ≥ EUR 1,000")
-			return
-		}
-		if err := fillReq.TravelRuleData.Validate(); err != nil {
-			writeError(w, http.StatusUnprocessableEntity,
-				"travel_rule_data invalid: "+err.Error())
-			return
-		}
+	// G-09: FATF Travel Rule — derive originator/beneficiary information from
+	// registration records when EUR-equivalent value is >= TravelRuleThresholdEUR.
+	// This keeps the issuer fill API stateless and avoids trusting caller-supplied
+	// PII payloads for regulatory controls.
+	tradeID := fmt.Sprintf("trade-%s", orderID[:8])
+	tradeValue := fillQty * found.Price
+	if _, err := s.bc.AutoTravelRule(found.PlacedBy, issuerKey, tradeID, tradeValue, asset.Currency); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "FATF Travel Rule: "+err.Error())
+		return
 	}
 
 	// G-09: AML screening via the configured screener.
@@ -2220,7 +2271,6 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 	asset.CirculatingSupply += fillQty
 
 	// Record the trade.
-	tradeID := fmt.Sprintf("trade-%s", orderID[:8])
 	s.bc.Trades = append(s.bc.Trades, gonetwork.Trade{
 		ID:         tradeID,
 		AssetID:    found.AssetID,
@@ -2441,31 +2491,46 @@ func (s *Server) handleListCorporateActions(w http.ResponseWriter, r *http.Reque
 
 // handleProposeCorporateAction creates a new pending corporate action.
 // POST /v1/corporate-actions
-// Body: {"asset_id":"...","action_type":"dividend","record_date":unix,"parameters":{}}
+// Body: {"asset_id":"...","action_type":"dividend","record_date":unix,"price_per_unit":1.23,"total_units":1000,"required_threshold":0.5}
 func (s *Server) handleProposeCorporateAction(w http.ResponseWriter, r *http.Request) {
 	walletKey := walletFromCtx(r)
 	var req struct {
-		AssetID    string                        `json:"asset_id"`
-		ActionType gonetwork.CorporateActionType `json:"action_type"`
-		RecordDate int64                         `json:"record_date"`
-		Parameters map[string]interface{}        `json:"parameters"`
+		AssetID           string                        `json:"asset_id"`
+		ActionType        gonetwork.CorporateActionType `json:"action_type"`
+		RecordDate        int64                         `json:"record_date"`
+		PricePerUnit      float64                       `json:"price_per_unit"`
+		TotalUnits        float64                       `json:"total_units"`
+		RequiredThreshold float64                       `json:"required_threshold"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.AssetID == "" || req.ActionType == "" {
-		writeError(w, http.StatusBadRequest, "asset_id and action_type are required")
+	if req.AssetID == "" || req.ActionType == "" || req.RecordDate <= 0 {
+		writeError(w, http.StatusBadRequest, "asset_id, action_type and record_date are required")
 		return
 	}
+	if req.RequiredThreshold == 0 {
+		req.RequiredThreshold = 0.5
+	}
+	if req.RequiredThreshold <= 0 || req.RequiredThreshold > 1 {
+		writeError(w, http.StatusBadRequest, "required_threshold must be in (0,1]")
+		return
+	}
+	now := time.Now().Unix()
 	id := base64.RawURLEncoding.EncodeToString([]byte(req.AssetID + string(req.ActionType) + strconv.FormatInt(time.Now().UnixNano(), 10)))
 	ca := &gonetwork.CorporateAction{
-		ID:          id,
-		AssetID:     req.AssetID,
-		Type:        req.ActionType,
-		Status:      gonetwork.CorporateActionPending,
-		ProposerKey: walletKey,
-		DeadlineAt:  req.RecordDate,
+		ID:                id,
+		AssetID:           req.AssetID,
+		Type:              req.ActionType,
+		Status:            gonetwork.CorporateActionPending,
+		ProposerKey:       walletKey,
+		CreatedAt:         now,
+		PricePerUnit:      req.PricePerUnit,
+		TotalUnits:        req.TotalUnits,
+		DeadlineAt:        req.RecordDate,
+		RequiredThreshold: req.RequiredThreshold,
+		Responses:         make(map[string]bool),
 	}
 	s.bc.PendingCorporateActions[id] = ca
 	writeJSON(w, http.StatusCreated, ca)

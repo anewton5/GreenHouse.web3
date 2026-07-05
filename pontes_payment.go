@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -146,6 +147,10 @@ type WebhookVerifier interface {
 	VerifyWebhookSignature(payload []byte, signature string) bool
 }
 
+// ErrInvalidWebhookSignature is returned by HandleWebhook when the callback
+// signature cannot be verified for the provider/key pair.
+var ErrInvalidWebhookSignature = errors.New("payment: invalid webhook signature")
+
 // HandleWebhook is the single entry point for all provider webhook callbacks.
 // It enforces signature verification before calling the action function,
 // making it impossible to confirm a payment without passing a valid signature.
@@ -158,7 +163,7 @@ type WebhookVerifier interface {
 //	    })
 func HandleWebhook(v WebhookVerifier, payload []byte, signature string, action func() error) error {
 	if !v.VerifyWebhookSignature(payload, signature) {
-		return fmt.Errorf("payment: webhook signature verification failed — request rejected")
+		return fmt.Errorf("%w: webhook signature verification failed — request rejected", ErrInvalidWebhookSignature)
 	}
 	return action()
 }

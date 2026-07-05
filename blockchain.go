@@ -500,6 +500,35 @@ func (bc *Blockchain) buildTravelRule(payerKey, payeeKey, transferRef string) *T
 	return p
 }
 
+// AutoTravelRule derives and validates a TravelRulePayload when the transfer
+// value is above the FATF / EU TFR threshold. For lower values it returns nil.
+//
+// totalAmount/currency represent the transfer value in the trade currency.
+// The amount is converted to EUR via ValuationOracle when needed. If no oracle
+// is configured, the amount is treated as EUR-equivalent (1:1 fallback).
+func (bc *Blockchain) AutoTravelRule(
+	payerKey, payeeKey, transferRef string,
+	totalAmount float64,
+	currency string,
+) (*TravelRulePayload, error) {
+	eurAmount := totalAmount
+	if currency != "EUR" && bc.ValuationOracle != nil {
+		rate, err := bc.ValuationOracle.GetCurrencyRate(currency, "EUR")
+		if err == nil && rate > 0 {
+			eurAmount = totalAmount * rate
+		}
+	}
+	if eurAmount < TravelRuleThresholdEUR {
+		return nil, nil
+	}
+
+	p := bc.buildTravelRule(payerKey, payeeKey, transferRef)
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("unable to derive Travel Rule payload from registration data: %w", err)
+	}
+	return p, nil
+}
+
 // ---------------------------------------------------------------------------
 // Settlement router helpers
 // ---------------------------------------------------------------------------

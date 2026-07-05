@@ -20,6 +20,66 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestWebhookHandler_Pontes_InvalidSignature_Returns401 verifies invalid
+// Pontes callback signatures are rejected with HTTP 401.
+func TestWebhookHandler_Pontes_InvalidSignature_Returns401(t *testing.T) {
+	t.Setenv("GONETWORK_NO_P2P", "1")
+	t.Setenv("GREENHOUSE_CONSENSUS_MODE", "http")
+
+	bc := gonetwork.NewBlockchain(context.Background(), "f13-pontes-sig-test")
+	server := NewServer(bc, ":0")
+
+	provider, err := gonetwork.NewPontesPaymentProvider(
+		"pontes-key",
+		"https://example.com",
+		"DLT-OP",
+		"pontes-webhook-secret",
+		gonetwork.NewMemoryPaymentStore(),
+	)
+	require.NoError(t, err)
+	server.PontesProvider = provider
+
+	body := `{"type":"settlement.confirmed","externalReference":"ref-pontes-401","amount":1000,"currency":"EUR"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/pontes", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Pontes-Signature", "definitely-invalid-signature")
+	rec := httptest.NewRecorder()
+
+	server.handlePontesWebhook(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestWebhookHandler_EURC_InvalidSignature_Returns401 verifies invalid
+// Circle EURC callback signatures are rejected with HTTP 401.
+func TestWebhookHandler_EURC_InvalidSignature_Returns401(t *testing.T) {
+	t.Setenv("GONETWORK_NO_P2P", "1")
+	t.Setenv("GREENHOUSE_CONSENSUS_MODE", "http")
+
+	bc := gonetwork.NewBlockchain(context.Background(), "f13-eurc-sig-test")
+	server := NewServer(bc, ":0")
+
+	provider, err := gonetwork.NewEURCPaymentProvider(
+		"circle-key",
+		"https://api.circle.com/v1",
+		"wallet-set-id",
+		"circle-webhook-secret",
+		gonetwork.NewMemoryPaymentStore(),
+	)
+	require.NoError(t, err)
+	server.EURCProvider = provider
+
+	body := `{"notificationType":"transfer.complete","transfer":{"externalRef":"ref-eurc-401","amount":"1000","currency":"EUR"}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/eurc", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Circle-Signature", "invalid-circle-signature")
+	rec := httptest.NewRecorder()
+
+	server.handleEURCWebhook(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
 // TestWebhookHandler_ModulrNilProvider_ProductionMode_Returns401 verifies
 // that when ModulrProvider is nil and GH_ENV=production, any request to
 // POST /v1/webhooks/payment is rejected with 401 — no signature key is

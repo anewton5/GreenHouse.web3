@@ -57,6 +57,7 @@ type CorporateAction struct {
 	Type              CorporateActionType   `json:"action_type"`
 	Status            CorporateActionStatus `json:"status"`
 	ProposerKey       string                `json:"proposer_key"` // base64 Ed25519 public key of the wallet initiating
+	CreatedAt         int64                 `json:"created_at"`
 	TargetTransfer    *AssetTransaction     `json:"target_transfer,omitempty"`
 	PricePerUnit      float64               `json:"price_per_unit,omitempty"`
 	TotalUnits        float64               `json:"total_units,omitempty"`
@@ -126,6 +127,7 @@ func NewCorporateAction(
 		Type:              actionType,
 		Status:            CorporateActionPending,
 		ProposerKey:       proposerPubStr,
+		CreatedAt:         now,
 		TargetTransfer:    targetTransfer,
 		PricePerUnit:      pricePerUnit,
 		TotalUnits:        totalUnits,
