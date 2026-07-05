@@ -125,24 +125,32 @@ type Block struct {
 	AssetTransactions      []AssetTransaction      `json:"AssetTransactions,omitempty"`
 	OrderTransactions      []OrderTransaction      `json:"OrderTransactions,omitempty"`
 	CredentialTransactions []CredentialTransaction `json:"CredentialTransactions,omitempty"`
-	PrevHash               string
-	Nonce                  int
-	Signatures             [][]byte
+	// ClaimTransactions and ClaimIssuerTransactions carry the Phase 2
+	// claim-topic architecture (claims.go). Committed via the dedicated
+	// SealClaimBlock rather than SealBlock, so introducing them required no
+	// change to SealBlock's signature or its existing call sites.
+	ClaimTransactions       []ClaimTransaction       `json:"ClaimTransactions,omitempty"`
+	ClaimIssuerTransactions []ClaimIssuerTransaction `json:"ClaimIssuerTransactions,omitempty"`
+	PrevHash                string
+	Nonce                   int
+	Signatures              [][]byte
 }
 
 // blockHashInput is the deterministic pre-signature representation of a block
 // used as the payload that delegates sign. It excludes Signatures so the hash
 // is stable regardless of how many signatures are collected.
 type blockHashInput struct {
-	Index                  int                     `json:"index"`
-	SealedAt               int64                   `json:"sealed_at"`
-	KeyVersion             string                  `json:"key_version,omitempty"`
-	Transactions           []Transaction           `json:"transactions"`
-	AssetTransactions      []AssetTransaction      `json:"asset_transactions,omitempty"`
-	OrderTransactions      []OrderTransaction      `json:"order_transactions,omitempty"`
-	CredentialTransactions []CredentialTransaction `json:"credential_transactions,omitempty"`
-	PrevHash               string                  `json:"prev_hash"`
-	Nonce                  int                     `json:"nonce"`
+	Index                   int                      `json:"index"`
+	SealedAt                int64                    `json:"sealed_at"`
+	KeyVersion              string                   `json:"key_version,omitempty"`
+	Transactions            []Transaction            `json:"transactions"`
+	AssetTransactions       []AssetTransaction       `json:"asset_transactions,omitempty"`
+	OrderTransactions       []OrderTransaction       `json:"order_transactions,omitempty"`
+	CredentialTransactions  []CredentialTransaction  `json:"credential_transactions,omitempty"`
+	ClaimTransactions       []ClaimTransaction       `json:"claim_transactions,omitempty"`
+	ClaimIssuerTransactions []ClaimIssuerTransaction `json:"claim_issuer_transactions,omitempty"`
+	PrevHash                string                   `json:"prev_hash"`
+	Nonce                   int                      `json:"nonce"`
 }
 
 // SetPayloadHash computes and stores the pre-signature block hash. Must be
@@ -151,15 +159,17 @@ type blockHashInput struct {
 // and is used for chain-linking (PrevHash references).
 func (b *Block) SetPayloadHash() {
 	input := blockHashInput{
-		Index:                  b.Index,
-		SealedAt:               b.SealedAt,
-		KeyVersion:             b.KeyVersion,
-		Transactions:           b.Transactions,
-		AssetTransactions:      b.AssetTransactions,
-		OrderTransactions:      b.OrderTransactions,
-		CredentialTransactions: b.CredentialTransactions,
-		PrevHash:               b.PrevHash,
-		Nonce:                  b.Nonce,
+		Index:                   b.Index,
+		SealedAt:                b.SealedAt,
+		KeyVersion:              b.KeyVersion,
+		Transactions:            b.Transactions,
+		AssetTransactions:       b.AssetTransactions,
+		OrderTransactions:       b.OrderTransactions,
+		CredentialTransactions:  b.CredentialTransactions,
+		ClaimTransactions:       b.ClaimTransactions,
+		ClaimIssuerTransactions: b.ClaimIssuerTransactions,
+		PrevHash:                b.PrevHash,
+		Nonce:                   b.Nonce,
 	}
 	data, _ := json.Marshal(input)
 	hash := sha3.Sum256(data)
@@ -216,6 +226,17 @@ type Blockchain struct {
 	// Identity layer
 	Credentials map[string]*CredentialAttestation // walletKey → attestation
 
+	// Phase 2 (VELA claims architecture): ERC-3643/ONCHAINID-style claim-topic
+	// registry. Claims maps subject wallet key -> topic-scoped eligibility
+	// attestations, each independently issued/expired/revoked by whichever
+	// issuer TrustedIssuers authorises for that topic. Additive alongside the
+	// legacy Credentials map above — see SynthesizeClaimsFromAttestation and
+	// EvaluateComplianceRequirements (claims.go) for the backward-compatible
+	// adapter that lets existing credential holders satisfy claim-topic checks
+	// without re-onboarding.
+	Claims         map[string][]*Claim
+	TrustedIssuers *TrustedIssuersRegistry
+
 	// Payment layer
 	PendingInstructions      map[string]*PaymentInstruction  // tradeID → instruction
 	ConfirmedPayments        map[string]*PaymentConfirmation // tradeID → confirmation
@@ -226,6 +247,9 @@ type Blockchain struct {
 	PaymentProvider  PaymentProvider  `json:"-"`
 	IdentityRegistry IdentityRegistry `json:"-"`
 	OracleService    OracleService    `json:"-"`
+	// Phase 5: optional ZK claim verifier hook. Nil by default so existing
+	// behavior is unchanged unless a verifier is explicitly configured.
+	ZKVerifier ZKClaimVerifier `json:"-"`
 
 	// SettlementRouter dispatches PaymentInstructions to per-method providers.
 	// Register providers via RegisterSettlementProvider. Falls back to
@@ -428,6 +452,12 @@ const (
 	// The instruction remains in PendingInstructions and can be retried via
 	// POST /v1/payments/{tradeID}/register (F-4).
 	EventPaymentRegistrationFailed = "payment_registration_failed"
+	// EventClaimIssued is emitted when a ClaimTransaction is applied, adding a
+	// topic-scoped Claim to bc.Claims (Phase 2 claims architecture).
+	EventClaimIssued = "claim_issued"
+	// EventClaimIssuerUpdated is emitted when a ClaimIssuerTransaction adds or
+	// removes a trusted issuer for a claim topic.
+	EventClaimIssuerUpdated = "claim_issuer_updated"
 )
 
 // EmitEvent is the exported entry point for emitEvent, allowing external
@@ -775,6 +805,33 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 		})
 	}
 
+	// 3b. Apply claim-issuer governance transactions (trusted-issuer add/remove).
+	for _, cit := range block.ClaimIssuerTransactions {
+		switch cit.Action {
+		case ClaimIssuerActionAdd:
+			bc.TrustedIssuers.AddIssuer(cit.Topic, cit.IssuerKey)
+		case ClaimIssuerActionRemove:
+			bc.TrustedIssuers.RemoveIssuer(cit.Topic, cit.IssuerKey)
+		}
+		bc.emitEvent(EventClaimIssuerUpdated, map[string]any{
+			"topic":      cit.Topic,
+			"issuer_key": cit.IssuerKey,
+			"action":     cit.Action,
+		})
+	}
+
+	// 3c. Apply claim transactions (topic-scoped eligibility attestations).
+	for _, ctx := range block.ClaimTransactions {
+		c := ctx.Claim
+		bc.Claims[c.Subject] = append(bc.Claims[c.Subject], &c)
+		bc.emitEvent(EventClaimIssued, map[string]any{
+			"subject":    c.Subject,
+			"topic":      c.Topic,
+			"issuer":     c.Issuer,
+			"expires_at": c.ExpiresAt,
+		})
+	}
+
 	// 4. Apply order transactions (add new orders / process cancellations).
 	for _, ot := range block.OrderTransactions {
 		if ot.IsCancellation {
@@ -1067,6 +1124,80 @@ func (bc *Blockchain) SealBlock(assetTxs []AssetTransaction, orderTxs []OrderTra
 	}
 }
 
+// SealClaimBlock commits ClaimTransactions (topic-scoped eligibility claims,
+// Phase 2) and ClaimIssuerTransactions (trusted-issuer governance changes)
+// in a dedicated block. Kept separate from SealBlock so introducing the
+// claims model required zero changes to SealBlock's signature or its many
+// existing call sites. Reuses applyBlockState (the same shared state-transition
+// engine SealBlock and finalizeBlock use) so claim application logic lives in
+// exactly one place.
+//
+// SealClaimBlock acquires bc.Mu for its entire duration. Callers must not
+// hold bc.Mu. Broadcast happens after the lock releases, matching SealBlock.
+func (bc *Blockchain) SealClaimBlock(claimTxs []ClaimTransaction, issuerTxs []ClaimIssuerTransaction) {
+	if bc.ConsensusMode == ConsensusModeDBFT {
+		bc.recordConsensusModeReject("SealClaimBlock", ConsensusModeHTTP)
+		log.Printf("SealClaimBlock: disabled in %q consensus mode", ConsensusModeDBFT)
+		return
+	}
+
+	var sealedBlock Block
+
+	func() {
+		bc.Mu.Lock()
+		defer bc.Mu.Unlock()
+
+		block := Block{
+			ClaimTransactions:       claimTxs,
+			ClaimIssuerTransactions: issuerTxs,
+		}
+		bc.AddBlock(block)
+		idx := len(bc.Blocks) - 1
+
+		// C-2: operator signs PayloadHash, matching SealBlock.
+		if bc.OperatorKeyProvider != nil {
+			payloadBytes, err := hex.DecodeString(bc.Blocks[idx].PayloadHash)
+			if err == nil {
+				sig, err := bc.OperatorKeyProvider.Sign(payloadBytes)
+				if err == nil {
+					bc.Blocks[idx].Signatures = append(bc.Blocks[idx].Signatures, sig)
+				} else {
+					log.Printf("SealClaimBlock: operator signing failed: %v", err)
+				}
+			}
+		}
+
+		if bc.BlockStore != nil {
+			if err := bc.BlockStore.SaveBlock(&bc.Blocks[idx]); err != nil {
+				log.Printf("SealClaimBlock: persistence write failed: %v", err)
+			}
+		}
+
+		bc.applyBlockState(&bc.Blocks[idx])
+
+		if bc.BlockStore != nil {
+			if err := bc.BlockStore.SaveState(bc, idx); err != nil {
+				log.Printf("SealClaimBlock: state snapshot failed: %v", err)
+			}
+		}
+
+		sealedBlock = bc.Blocks[idx]
+
+		bc.emitEvent(EventBlockFinalised, map[string]any{
+			"block_index":           idx,
+			"hash":                  sealedBlock.CalculateHash(),
+			"claim_tx_count":        len(claimTxs),
+			"claim_issuer_tx_count": len(issuerTxs),
+		})
+	}()
+
+	if bc.P2PNode != nil {
+		if err := bc.P2PNode.BroadcastBlock(sealedBlock); err != nil {
+			log.Printf("SealClaimBlock: broadcast failed: %v", err)
+		}
+	}
+}
+
 // assertCirculatingSupplyConsistency verifies that each asset's CirculatingSupply
 // equals the arithmetic sum of all holdings for that asset. Called from SealBlock
 // after every block is finalised.
@@ -1345,7 +1476,7 @@ func typedTransactionHashKey(prefix string, tx any) string {
 }
 
 func blockTransactionHashKeys(block *Block) []string {
-	count := len(block.Transactions) + len(block.AssetTransactions) + len(block.OrderTransactions) + len(block.CredentialTransactions)
+	count := len(block.Transactions) + len(block.AssetTransactions) + len(block.OrderTransactions) + len(block.CredentialTransactions) + len(block.ClaimTransactions) + len(block.ClaimIssuerTransactions)
 	keys := make([]string, 0, count)
 
 	for _, tx := range block.Transactions {
@@ -1359,6 +1490,12 @@ func blockTransactionHashKeys(block *Block) []string {
 	}
 	for _, tx := range block.CredentialTransactions {
 		keys = append(keys, typedTransactionHashKey("credential", tx))
+	}
+	for _, tx := range block.ClaimTransactions {
+		keys = append(keys, typedTransactionHashKey("claim", tx))
+	}
+	for _, tx := range block.ClaimIssuerTransactions {
+		keys = append(keys, typedTransactionHashKey("claim_issuer", tx))
 	}
 
 	return keys
@@ -1549,6 +1686,42 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			sig := &Signature{value: a.RegistrySignature}
 			if !sig.Verify(regPub, credHashBytes) {
 				fmt.Printf("Invalid block: CredentialTransaction for wallet %s has invalid registry signature\n", a.WalletPublicKey)
+				return false
+			}
+		}
+	}
+
+	// Phase 2: verify ClaimTransaction issuer signatures. Trust is additionally
+	// enforced once at least one issuer has been registered in
+	// bc.TrustedIssuers; an empty registry means no trust policy has been
+	// configured yet (dev/test posture), matching how CredentialTransaction
+	// verification is skipped when bc.IdentityRegistry is nil.
+	for _, ctx := range block.ClaimTransactions {
+		c := ctx.Claim
+		issuerPub, err := PublicKeyFromString(c.Issuer)
+		if err != nil {
+			fmt.Printf("Invalid block: Claim for subject %s has invalid issuer key: %v\n", c.Subject, err)
+			return false
+		}
+		if !c.VerifySignature(issuerPub) {
+			fmt.Printf("Invalid block: Claim for subject %s has invalid issuer signature\n", c.Subject)
+			return false
+		}
+		if bc.TrustedIssuers != nil && len(bc.TrustedIssuers.Issuers) > 0 {
+			if !bc.TrustedIssuers.IsTrusted(c.Topic, c.Issuer) {
+				fmt.Printf("Invalid block: Claim issuer %s is not trusted for topic %q\n", c.Issuer, c.Topic)
+				return false
+			}
+		}
+	}
+
+	// Phase 2: verify ClaimIssuerTransaction is signed by the node operator key
+	// (single-authority governance at this stage — see VELA roadmap Section 6.4).
+	// Skipped when bc.OperatorKeyProvider is nil (dev/test without operator key).
+	if bc.OperatorKeyProvider != nil {
+		for _, cit := range block.ClaimIssuerTransactions {
+			if !bc.OperatorKeyProvider.Verify(cit.SigningHash(), cit.AdminSignature) {
+				fmt.Printf("Invalid block: ClaimIssuerTransaction for topic %q has invalid admin signature\n", cit.Topic)
 				return false
 			}
 		}
@@ -1783,6 +1956,18 @@ func (bc *Blockchain) catchUpBlock(block *Block) {
 	for _, ct := range block.CredentialTransactions {
 		bc.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
 	}
+	for _, ctx := range block.ClaimTransactions {
+		c := ctx.Claim
+		bc.Claims[c.Subject] = append(bc.Claims[c.Subject], &c)
+	}
+	for _, cit := range block.ClaimIssuerTransactions {
+		switch cit.Action {
+		case ClaimIssuerActionAdd:
+			bc.TrustedIssuers.AddIssuer(cit.Topic, cit.IssuerKey)
+		case ClaimIssuerActionRemove:
+			bc.TrustedIssuers.RemoveIssuer(cit.Topic, cit.IssuerKey)
+		}
+	}
 	for _, tx := range block.Transactions {
 		if tx.Nonce > bc.WalletSequences[tx.Sender] {
 			bc.WalletSequences[tx.Sender] = tx.Nonce
@@ -1925,6 +2110,12 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	bc.ConfirmedPayments = make(map[string]*PaymentConfirmation)
 	bc.PendingSettlements = make(map[string]*AssetTransaction)
 	bc.PendingAssetTransactions = []AssetTransaction{}
+
+	// Phase 2 (VELA claims architecture): claim-topic registry and trusted
+	// issuers, initially empty (no issuer trusted for any topic until an admin
+	// grants it via ClaimIssuerTransaction / POST /v1/admin/claim-issuers).
+	bc.Claims = make(map[string][]*Claim)
+	bc.TrustedIssuers = NewTrustedIssuersRegistry()
 
 	// Phase 2: Liquidity Windows
 	bc.WindowManager = NewWindowManager()

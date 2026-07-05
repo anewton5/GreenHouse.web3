@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -259,7 +260,8 @@ func ApplyJurisdictionRule(
 
 	// Retail-holder cap for jurisdiction: block a new retail buyer if the cap
 	// has already been reached. currentRetailCount must be the live count of
-	// retail credential-holders for this jurisdiction at the time of the call.
+	// retail credential-holders for this jurisdiction at the time of the call
+	// (see CountJurisdictionRetailHolders for the canonical way to compute it).
 	if rule.MaxRetailHolders > 0 {
 		receiverClass := InvestorClassRetail
 		if receiverCredential != nil {
@@ -274,6 +276,42 @@ func ApplyJurisdictionRule(
 	}
 
 	return nil
+}
+
+// CountJurisdictionRetailHolders returns the number of distinct wallets that
+// currently hold a positive balance of assetID, have a retail InvestorClass
+// credential, and are resident in jurisdiction. This is the canonical, live
+// count used to enforce JurisdictionRule.MaxRetailHolders via
+// ApplyJurisdictionRule, so callers never need to maintain their own counter.
+//
+// Before this helper existed, two call sites computed this independently and
+// disagreed: AssetTransaction.Validate correctly scoped the count to
+// (assetID, jurisdiction), while the HTTP fill-order handler counted ALL
+// retail credential holders platform-wide regardless of asset or
+// jurisdiction — which could incorrectly block a buyer once any single
+// jurisdiction's cap was reached anywhere on the platform. Both call sites
+// now share this single implementation.
+func CountJurisdictionRetailHolders(
+	assetID string,
+	jurisdiction string,
+	holdings map[string]*AssetHolding,
+	credentials map[string]*CredentialAttestation,
+) int {
+	count := 0
+	suffix := ":" + assetID
+	for key, h := range holdings {
+		if !strings.HasSuffix(key, suffix) || h.Balance <= 0 {
+			continue
+		}
+		cred, exists := credentials[h.HolderID]
+		if !exists {
+			continue
+		}
+		if cred.InvestorClass == InvestorClassRetail && cred.Jurisdiction == jurisdiction {
+			count++
+		}
+	}
+	return count
 }
 
 // ---------------------------------------------------------------------------

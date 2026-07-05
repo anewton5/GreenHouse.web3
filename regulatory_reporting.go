@@ -37,6 +37,7 @@ type RegulatoryReport struct {
 	TradeID    string     `json:"trade_id"`
 	AssetID    string     `json:"asset_id"`
 	ISIN       string     `json:"isin,omitempty"`
+	DTI        string     `json:"dti,omitempty"`
 	BuyerID    string     `json:"buyer_id"`
 	SellerID   string     `json:"seller_id"`
 	Quantity   float64    `json:"quantity"`
@@ -48,6 +49,12 @@ type RegulatoryReport struct {
 	// Fields filled by the RegulatoryReportingService
 	Venue          string `json:"venue,omitempty"`           // trading venue (e.g. "GreenHouse-MTF")
 	InstrumentType string `json:"instrument_type,omitempty"` // MiFIR instrument category
+	// BuyerLEI / SellerLEI (Phase 3) carry the counterparty's Legal Entity
+	// Identifier when their wallet holds a ClaimTopicInstitutionalRole claim,
+	// satisfying MiFIR RTS 22 field 7/16 (counterparty LEI). Empty when the
+	// counterparty has no institutional role claim (e.g. a retail investor).
+	BuyerLEI  string `json:"buyer_lei,omitempty"`
+	SellerLEI string `json:"seller_lei,omitempty"`
 }
 
 // ReportingService is the interface for regulatory reporting back-ends.
@@ -81,9 +88,13 @@ func (svc *DefaultReportingService) GenerateReport(
 	}
 
 	isin := ""
+	dti := ""
 	instrumentType := string(asset.AssetType)
 	if asset.Metadata.ISIN != "" {
 		isin = asset.Metadata.ISIN
+	}
+	if asset.Metadata.DTI != "" {
+		dti = asset.Metadata.DTI
 	}
 
 	id := fmt.Sprintf("%s-%s-%d", string(reportType), trade.ID, time.Now().UnixNano())
@@ -94,6 +105,7 @@ func (svc *DefaultReportingService) GenerateReport(
 		TradeID:        trade.ID,
 		AssetID:        asset.ID,
 		ISIN:           isin,
+		DTI:            dti,
 		BuyerID:        trade.BuyerID,
 		SellerID:       trade.SellerID,
 		Quantity:       trade.Quantity,
@@ -149,6 +161,8 @@ func GenerateMiFIRReport(
 	if err != nil {
 		return
 	}
+	report.BuyerLEI = lookupCounterpartyLEI(bc, trade.BuyerID)
+	report.SellerLEI = lookupCounterpartyLEI(bc, trade.SellerID)
 	bc.RegulatoryReports = append(bc.RegulatoryReports, report)
 
 	bc.emitEvent(EventRegulatoryReport, map[string]any{
@@ -183,6 +197,8 @@ func GenerateAIFMDReport(
 	if err != nil {
 		return
 	}
+	report.BuyerLEI = lookupCounterpartyLEI(bc, trade.BuyerID)
+	report.SellerLEI = lookupCounterpartyLEI(bc, trade.SellerID)
 	bc.RegulatoryReports = append(bc.RegulatoryReports, report)
 
 	bc.emitEvent(EventRegulatoryReport, map[string]any{
@@ -192,6 +208,19 @@ func GenerateAIFMDReport(
 		"asset_id":    report.AssetID,
 		"block_index": blockIndex,
 	})
+}
+
+// lookupCounterpartyLEI returns the LEI carried by any valid
+// ClaimTopicInstitutionalRole claim held by walletKey, or "" if none exists
+// (e.g. a retail investor with no institutional role). When a wallet holds
+// role claims for more than one entity, the first match is used.
+func lookupCounterpartyLEI(bc *Blockchain, walletKey string) string {
+	for _, c := range EffectiveClaims(bc, walletKey) {
+		if lei, _, err := ParseEntityRoleClaim(c); err == nil {
+			return lei
+		}
+	}
+	return ""
 }
 
 // MarshalRegulatoryReport returns the report as canonical JSON for archive submission.

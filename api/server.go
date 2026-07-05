@@ -48,6 +48,11 @@ type Server struct {
 	// Always non-nil; initialised in NewServer.
 	RegRegistry *gonetwork.RegistrationRegistry
 
+	// EntityRegistry holds registered legal-entity identities (Phase 3:
+	// institutional/vLEI-ready identity). Always non-nil; initialised in
+	// NewServer.
+	EntityRegistry *gonetwork.EntityRegistry
+
 	// Optional: set to enable Modulr webhook signature verification.
 	// When nil, POST /v1/webhooks/payment accepts without verifying the HMAC.
 	ModulrProvider *gonetwork.ModulrPaymentProvider
@@ -63,6 +68,8 @@ type Server struct {
 
 	// adminWalletKeys is the set of wallet public keys permitted to call /admin/* routes.
 	adminWalletKeys map[string]bool
+
+	allowedOrigins map[string]struct{}
 }
 
 type challengeRecord struct {
@@ -122,6 +129,7 @@ func NewServer(bc *gonetwork.Blockchain, listenAddr string) *Server {
 		challenges:      make(map[string]challengeRecord),
 		refreshTokens:   make(map[string]refreshTokenRecord),
 		RegRegistry:     gonetwork.NewRegistrationRegistry(),
+		EntityRegistry:  gonetwork.NewEntityRegistry(),
 		adminWalletKeys: adminKeys,
 		wsHub:           newHub(),
 	}
@@ -194,6 +202,16 @@ func (s *Server) Routes() http.Handler {
 
 	// KYC: participant submits a request; operator approves it
 	mux.Handle("GET /v1/kyc/status", s.jwt(http.HandlerFunc(s.handleKYCStatus)))
+
+	// Phase 2: claim-topic endpoints
+	mux.Handle("GET /v1/claims/{walletKey}", s.jwt(http.HandlerFunc(s.handleListClaims)))
+	mux.Handle("POST /v1/admin/claim-issuers", s.jwtAdmin(http.HandlerFunc(s.handleUpsertClaimIssuer)))
+
+	// Phase 3: institutional/vLEI legal-entity identity endpoints
+	mux.Handle("POST /v1/admin/entities", s.jwtAdmin(http.HandlerFunc(s.handleRegisterEntity)))
+	mux.Handle("GET /v1/entities", s.jwt(http.HandlerFunc(s.handleListEntities)))
+	mux.Handle("GET /v1/entities/{lei}", s.jwt(http.HandlerFunc(s.handleGetEntity)))
+	mux.Handle("POST /v1/admin/entities/{lei}/role-claims", s.jwtAdmin(http.HandlerFunc(s.handleIssueEntityRoleClaim)))
 	mux.Handle("POST /v1/kyc/request", s.jwt(http.HandlerFunc(s.handleKYCRequest)))
 	mux.Handle("GET /v1/admin/kyc/pending", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCList)))
 	mux.Handle("POST /v1/admin/kyc/approve", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCApprove)))
@@ -269,6 +287,7 @@ func (s *Server) Routes() http.Handler {
 
 	// G-09: SAR (Suspicious Activity Report) management — admin only
 	mux.Handle("GET /v1/compliance/sar", s.jwtAdmin(http.HandlerFunc(s.handleListSARs)))
+	mux.Handle("GET /v1/compliance/sar/closed", s.jwtAdmin(http.HandlerFunc(s.handleListClosedSARs)))
 	mux.Handle("POST /v1/compliance/sar/{id}/resolve", s.jwtAdmin(http.HandlerFunc(s.handleResolveSAR)))
 
 	// G-10: Regulatory report log — admin read; admin write for jurisdiction rules
@@ -283,6 +302,7 @@ func (s *Server) Routes() http.Handler {
 
 	// MAR Art 16: STOR (Suspicious Transaction and Order Reports) management
 	mux.Handle("GET /v1/compliance/stor", s.jwtAdmin(http.HandlerFunc(s.handleListSTORs)))
+	mux.Handle("GET /v1/compliance/stor/closed", s.jwtAdmin(http.HandlerFunc(s.handleListClosedSTORs)))
 	mux.Handle("POST /v1/compliance/stor/{id}/resolve", s.jwtAdmin(http.HandlerFunc(s.handleResolveSTOR)))
 
 	// H-6: delegate vote registration — authenticated investors may assign their

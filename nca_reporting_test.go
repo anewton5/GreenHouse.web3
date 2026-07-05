@@ -45,6 +45,7 @@ func makeMiFIRAsset(id string) *Asset {
 		Metadata: AssetMetadata{
 			CompanyName: "Test Corp",
 			ISIN:        "GB00B1YW4409",
+			DTI:         "AB12CD34E",
 		},
 	}
 }
@@ -116,6 +117,7 @@ func TestNCAGenerateReport_WithEndpoint_SubmitsReport(t *testing.T) {
 		var report RegulatoryReport
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&report))
 		assert.Equal(t, "equity-A", report.AssetID)
+		assert.Equal(t, "AB12CD34E", report.DTI)
 
 		submitted = true
 		w.WriteHeader(http.StatusOK)

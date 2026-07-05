@@ -112,6 +112,12 @@ func (o *OnfidoIdentityRegistry) RegistryPublicKey() *PublicKey {
 	return o.registryPub
 }
 
+// IssueClaim creates and signs a topic-scoped Claim for walletKey, using the
+// same registry key that signs CredentialAttestations via IssueCredential.
+func (o *OnfidoIdentityRegistry) IssueClaim(walletKey string, topic ClaimTopic, data string, validForDays int) (*Claim, error) {
+	return NewClaim(topic, "", walletKey, data, validForDays, o.registryKey)
+}
+
 // ---------------------------------------------------------------------------
 // Onfido API integration
 // ---------------------------------------------------------------------------

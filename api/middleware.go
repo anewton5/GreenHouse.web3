@@ -27,7 +27,7 @@ import (
 func allowedOrigins() map[string]struct{} {
 	raw := os.Getenv("GREENHOUSE_ALLOWED_ORIGINS")
 	if raw == "" {
-		raw = "http://localhost:3000,http://localhost:3001"
+		raw = "http://localhost:3000,http://localhost:3001,http://localhost:3002"
 	}
 	set := make(map[string]struct{})
 	for _, o := range strings.Split(raw, ",") {
@@ -51,25 +51,36 @@ var corsOrigins = allowedOrigins()
 // every response regardless of origin.
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Security headers — applied unconditionally to every response.
+		// Security headers
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'")
 
-		// CORS — only allow explicitly listed origins.
+		// HSTS only on HTTPS
+		if r.TLS != nil {
+			w.Header().Set(
+				"Strict-Transport-Security",
+				"max-age=31536000; includeSubDomains",
+			)
+		}
+
+		// CORS
 		origin := r.Header.Get("Origin")
+
 		if _, ok := corsOrigins[origin]; ok {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Max-Age", "600")
 			w.Header().Set("Vary", "Origin")
 		}
+
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+
 		next.ServeHTTP(w, r)
 	})
 }

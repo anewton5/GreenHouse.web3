@@ -2,6 +2,7 @@ package gonetwork
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -142,7 +143,10 @@ type complyAdvantageSearchResponse struct {
 	} `json:"content"`
 }
 
-// callAPI performs a real HTTP call to the ComplyAdvantage Search API.
+// callAPI performs a real HTTP call to the ComplyAdvantage Search API,
+// retrying transient failures (network errors, 5xx responses) with bounded
+// exponential backoff via the shared retryHTTP helper (up to 3 attempts,
+// ~30s overall cap).
 func (s *ComplyAdvantageScreener) callAPI(walletKey string) (*AMLAlert, error) {
 	reqBody := complyAdvantageSearchRequest{
 		SearchTerm: walletKey,
@@ -157,14 +161,18 @@ func (s *ComplyAdvantageScreener) callAPI(walletKey string) (*AMLAlert, error) {
 	}
 
 	url := s.baseURL + "/v2/searches"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to build ComplyAdvantage request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Token "+s.apiKey)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	resp, err := s.client.Do(req)
+	resp, err := retryHTTP(ctx, retryConfig{maxAttempts: 3, safeToRetry: true}, func(ctx context.Context) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Token "+s.apiKey)
+		return s.client.Do(req)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("ComplyAdvantage API request failed: %w", err)
 	}

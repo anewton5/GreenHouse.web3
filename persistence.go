@@ -38,6 +38,9 @@ const (
 	confirmedPaymentsBucket = "confirmed_payments"
 	delegatesBucket         = "delegates"
 	reportingOutboxBucket   = "reporting_outbox"
+	amlScreeningLogBucket   = "aml_screening_log"
+	closedSARBucket         = "closed_sars"
+	closedSTORBucket        = "closed_stors"
 )
 
 // BlockStore wraps a bbolt database for block persistence.
@@ -65,7 +68,16 @@ func OpenBlockStore(path string) (*BlockStore, error) {
 		if _, err := tx.CreateBucketIfNotExists([]byte(delegatesBucket)); err != nil {
 			return err
 		}
-		_, err := tx.CreateBucketIfNotExists([]byte(reportingOutboxBucket))
+		if _, err := tx.CreateBucketIfNotExists([]byte(reportingOutboxBucket)); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(amlScreeningLogBucket)); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(closedSARBucket)); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists([]byte(closedSTORBucket))
 		return err
 	}); err != nil {
 		db.Close()
@@ -162,6 +174,109 @@ func (bs *BlockStore) DeleteFromReportingOutbox(reportID string) error {
 	})
 }
 
+// SaveAMLScreeningLog persists a durable AML screening decision record for
+// compliance audit trails (Phase 1.6). Append-only: entries are never
+// overwritten or deleted, keyed by entry.ID.
+func (bs *BlockStore) SaveAMLScreeningLog(entry *AMLScreeningLogEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("BlockStore.SaveAMLScreeningLog: marshal: %w", err)
+	}
+	return bs.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(amlScreeningLogBucket)).Put([]byte(entry.ID), data)
+	})
+}
+
+// LoadAMLScreeningLog returns all persisted AML screening log entries, for
+// compliance review or regulator requests.
+func (bs *BlockStore) LoadAMLScreeningLog() ([]*AMLScreeningLogEntry, error) {
+	var entries []*AMLScreeningLogEntry
+	err := bs.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(amlScreeningLogBucket))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			var e AMLScreeningLogEntry
+			if err := json.Unmarshal(v, &e); err != nil {
+				log.Printf("BlockStore.LoadAMLScreeningLog: skipping malformed entry key=%s: %v", k, err)
+				return nil
+			}
+			entries = append(entries, &e)
+			return nil
+		})
+	})
+	return entries, err
+}
+
+// SaveClosedSAR archives a resolved SARDraft to the durable "closed_sars"
+// bucket (MAR/JMLSG retention requirements). Called when a SAR transitions
+// out of PendingSARs via resolution so the record survives restarts even
+// after it is removed from the live pending map.
+func (bs *BlockStore) SaveClosedSAR(sar *SARDraft) error {
+	data, err := json.Marshal(sar)
+	if err != nil {
+		return fmt.Errorf("BlockStore.SaveClosedSAR: marshal: %w", err)
+	}
+	return bs.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(closedSARBucket)).Put([]byte(sar.ID), data)
+	})
+}
+
+// LoadClosedSARs returns all archived (resolved) SAR drafts.
+func (bs *BlockStore) LoadClosedSARs() ([]*SARDraft, error) {
+	var out []*SARDraft
+	err := bs.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(closedSARBucket))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			var sar SARDraft
+			if err := json.Unmarshal(v, &sar); err != nil {
+				log.Printf("BlockStore.LoadClosedSARs: skipping malformed entry key=%s: %v", k, err)
+				return nil
+			}
+			out = append(out, &sar)
+			return nil
+		})
+	})
+	return out, err
+}
+
+// SaveClosedSTOR archives a resolved STORDraft to the durable "closed_stors"
+// bucket (MAR Article 16 retention requirements).
+func (bs *BlockStore) SaveClosedSTOR(stor *STORDraft) error {
+	data, err := json.Marshal(stor)
+	if err != nil {
+		return fmt.Errorf("BlockStore.SaveClosedSTOR: marshal: %w", err)
+	}
+	return bs.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(closedSTORBucket)).Put([]byte(stor.ID), data)
+	})
+}
+
+// LoadClosedSTORs returns all archived (resolved) STOR drafts.
+func (bs *BlockStore) LoadClosedSTORs() ([]*STORDraft, error) {
+	var out []*STORDraft
+	err := bs.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(closedSTORBucket))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			var stor STORDraft
+			if err := json.Unmarshal(v, &stor); err != nil {
+				log.Printf("BlockStore.LoadClosedSTORs: skipping malformed entry key=%s: %v", k, err)
+				return nil
+			}
+			out = append(out, &stor)
+			return nil
+		})
+	})
+	return out, err
+}
+
 // Close cleanly shuts down the bbolt database.
 func (bs *BlockStore) Close() error {
 	return bs.db.Close()
@@ -238,12 +353,22 @@ func keyForIndex(index int) string {
 // LastAppliedBlock records the highest block index whose state changes are
 // reflected in this snapshot, enabling catch-up replay on startup.
 type stateSnapshot struct {
-	Assets            map[string]*Asset                 `json:"assets"`
-	Holdings          map[string]*AssetHolding          `json:"holdings"`
-	Credentials       map[string]*CredentialAttestation `json:"credentials"`
-	WalletSequences   map[string]int64                  `json:"wallet_sequences"`
-	ConfirmedPayments map[string]*PaymentConfirmation   `json:"confirmed_payments,omitempty"`
-	LastAppliedBlock  int                               `json:"last_applied_block"`
+	Assets                 map[string]*Asset                 `json:"assets"`
+	Holdings               map[string]*AssetHolding          `json:"holdings"`
+	Credentials            map[string]*CredentialAttestation `json:"credentials"`
+	WalletSequences        map[string]int64                  `json:"wallet_sequences"`
+	ConfirmedPayments      map[string]*PaymentConfirmation   `json:"confirmed_payments,omitempty"`
+	PendingSARs            map[string]*SARDraft              `json:"pending_sars,omitempty"`
+	PendingSTORs           map[string]*STORDraft             `json:"pending_stors,omitempty"`
+	InsiderLists           map[string]*InsiderList           `json:"insider_lists,omitempty"`
+	RegulatoryReports      []*RegulatoryReport               `json:"regulatory_reports,omitempty"`
+	ProspectusExemptions   map[string]*ProspectusExemption   `json:"prospectus_exemptions,omitempty"`
+	SuitabilityAssessments map[string]*SuitabilityAssessment `json:"suitability_assessments,omitempty"`
+	JurisdictionRules      map[string]*JurisdictionRule      `json:"jurisdiction_rules,omitempty"`
+	LegalDocAmendments     map[string][]*LegalDocAmendment   `json:"legal_doc_amendments,omitempty"`
+	Claims                 map[string][]*Claim               `json:"claims,omitempty"`
+	TrustedIssuers         *TrustedIssuersRegistry           `json:"trusted_issuers,omitempty"`
+	LastAppliedBlock       int                               `json:"last_applied_block"`
 }
 
 // SaveState persists the blockchain's key in-memory maps to the "state" bucket.
@@ -252,12 +377,22 @@ type stateSnapshot struct {
 // applyBlockState has just completed.
 func (bs *BlockStore) SaveState(bc *Blockchain, lastBlockIndex int) error {
 	snap := stateSnapshot{
-		Assets:            bc.Assets,
-		Holdings:          bc.Holdings,
-		Credentials:       bc.Credentials,
-		WalletSequences:   bc.WalletSequences,
-		ConfirmedPayments: bc.ConfirmedPayments,
-		LastAppliedBlock:  lastBlockIndex,
+		Assets:                 bc.Assets,
+		Holdings:               bc.Holdings,
+		Credentials:            bc.Credentials,
+		WalletSequences:        bc.WalletSequences,
+		ConfirmedPayments:      bc.ConfirmedPayments,
+		PendingSARs:            bc.PendingSARs,
+		PendingSTORs:           bc.PendingSTORs,
+		InsiderLists:           bc.InsiderLists,
+		RegulatoryReports:      bc.RegulatoryReports,
+		ProspectusExemptions:   bc.ProspectusExemptions,
+		SuitabilityAssessments: bc.SuitabilityAssessments,
+		JurisdictionRules:      bc.JurisdictionRules,
+		LegalDocAmendments:     bc.LegalDocAmendments,
+		Claims:                 bc.Claims,
+		TrustedIssuers:         bc.TrustedIssuers,
+		LastAppliedBlock:       lastBlockIndex,
 	}
 	data, err := json.Marshal(snap)
 	if err != nil {
@@ -302,6 +437,36 @@ func (bs *BlockStore) LoadState(bc *Blockchain) (int, error) {
 		}
 		if snap.ConfirmedPayments != nil {
 			bc.ConfirmedPayments = snap.ConfirmedPayments
+		}
+		if snap.PendingSARs != nil {
+			bc.PendingSARs = snap.PendingSARs
+		}
+		if snap.PendingSTORs != nil {
+			bc.PendingSTORs = snap.PendingSTORs
+		}
+		if snap.InsiderLists != nil {
+			bc.InsiderLists = snap.InsiderLists
+		}
+		if snap.RegulatoryReports != nil {
+			bc.RegulatoryReports = snap.RegulatoryReports
+		}
+		if snap.ProspectusExemptions != nil {
+			bc.ProspectusExemptions = snap.ProspectusExemptions
+		}
+		if snap.SuitabilityAssessments != nil {
+			bc.SuitabilityAssessments = snap.SuitabilityAssessments
+		}
+		if snap.JurisdictionRules != nil {
+			bc.JurisdictionRules = snap.JurisdictionRules
+		}
+		if snap.LegalDocAmendments != nil {
+			bc.LegalDocAmendments = snap.LegalDocAmendments
+		}
+		if snap.Claims != nil {
+			bc.Claims = snap.Claims
+		}
+		if snap.TrustedIssuers != nil {
+			bc.TrustedIssuers = snap.TrustedIssuers
 		}
 		lastApplied = snap.LastAppliedBlock
 		return nil

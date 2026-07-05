@@ -42,7 +42,7 @@ func testEquityAsset(id string) *Asset {
 		AssetType: AssetTypeEquity,
 		Currency:  "EUR",
 		Issuer:    "issuer-wallet",
-		Metadata:  AssetMetadata{ISIN: "GB0001234567"},
+		Metadata:  AssetMetadata{ISIN: "GB0001234567", DTI: "AB12CD34E"},
 	}
 }
 
@@ -63,6 +63,7 @@ func TestGenerateReport_MiFIR_FieldsSetCorrectly(t *testing.T) {
 	assert.Equal(t, "trade-001", report.TradeID)
 	assert.Equal(t, "equity-001", report.AssetID)
 	assert.Equal(t, "GB0001234567", report.ISIN)
+	assert.Equal(t, "AB12CD34E", report.DTI)
 	assert.Equal(t, "buyer-wallet", report.BuyerID)
 	assert.Equal(t, "seller-wallet", report.SellerID)
 	assert.InDelta(t, 100.0, report.Quantity, 0.01)
@@ -98,6 +99,7 @@ func TestGenerateReport_NoISIN_EmptyISINField(t *testing.T) {
 	report, err := svc.GenerateReport(ReportTypeMiFIR, testTrade("no-isin"), asset, 0)
 	require.NoError(t, err)
 	assert.Equal(t, "", report.ISIN)
+	assert.Equal(t, "", report.DTI)
 }
 
 // ---------------------------------------------------------------------------

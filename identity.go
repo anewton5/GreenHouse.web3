@@ -91,11 +91,36 @@ type IdentityRegistry interface {
 
 	// RegistryPublicKey returns the registry's public key for signature verification.
 	RegistryPublicKey() *PublicKey
+
+	// IssueClaim issues and signs a topic-scoped Claim for walletKey, using the
+	// same registry key that signs CredentialAttestations via IssueCredential.
+	// Part of the Phase 2 claim-topic architecture (see claims.go).
+	IssueClaim(walletKey string, topic ClaimTopic, data string, validForDays int) (*Claim, error)
 }
 
 // ---------------------------------------------------------------------------
 // IdentityCredential functions
 // ---------------------------------------------------------------------------
+
+// NormalizeInvestorClass maps MiFID II classification vocabulary used by
+// RegistrationRecord.Classification.Class ("elective_professional",
+// "eligible_counterparty") to the canonical on-chain InvestorClass constants
+// used by CredentialAttestation and every eligibility check in this codebase.
+// Called from NewIdentityCredential — the single choke point through which all
+// three IdentityRegistry implementations (Mock, Operator, Onfido) issue
+// credentials — so every CredentialAttestation carries a canonical class value
+// regardless of which vocabulary the caller used. Unrecognised values pass
+// through unchanged.
+func NormalizeInvestorClass(class InvestorClass) InvestorClass {
+	switch class {
+	case "elective_professional":
+		return InvestorClassProfessional
+	case "eligible_counterparty":
+		return InvestorClassEligibleCP
+	default:
+		return class
+	}
+}
 
 // NewIdentityCredential creates and signs a new identity credential.
 // The credential is signed by the registry key; any mutation is detectable.
@@ -118,6 +143,7 @@ func NewIdentityCredential(
 	if validForDays <= 0 {
 		return nil, fmt.Errorf("validForDays must be greater than zero")
 	}
+	class = NormalizeInvestorClass(class)
 
 	now := time.Now().Unix()
 	registryID := base64.StdEncoding.EncodeToString(registryKey.Public().Bytes())
@@ -255,4 +281,9 @@ func (r *MockIdentityRegistry) VerifyCredential(walletKey string) (*CredentialAt
 // RegistryPublicKey returns the registry's public key for signature verification.
 func (r *MockIdentityRegistry) RegistryPublicKey() *PublicKey {
 	return r.registryPub
+}
+
+// IssueClaim creates and signs a topic-scoped Claim for walletKey.
+func (r *MockIdentityRegistry) IssueClaim(walletKey string, topic ClaimTopic, data string, validForDays int) (*Claim, error) {
+	return NewClaim(topic, "", walletKey, data, validForDays, r.registryKey)
 }

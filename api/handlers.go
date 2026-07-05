@@ -200,6 +200,8 @@ func (s *Server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
 	meta := gonetwork.AssetMetadata{}
 	if req.Metadata != nil {
 		meta.ISIN = req.Metadata["isin"]
+		meta.DTI = req.Metadata["dti"]
+		meta.DLI = req.Metadata["dli"]
 		meta.Jurisdiction = req.Metadata["jurisdiction"]
 		meta.CompanyName = req.Metadata["company_name"]
 		meta.DividendTerms = req.Metadata["dividend_terms"]
@@ -208,6 +210,15 @@ func (s *Server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
 	// ISO 6166 structural validation — rejects malformed ISINs at creation time.
 	if err := gonetwork.ValidateISIN(meta.ISIN); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// ISO 24165 structural validation for optional DTI/DLI metadata.
+	if err := gonetwork.ValidateDTI(meta.DTI); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := gonetwork.ValidateDTI(meta.DLI); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid DLI: "+err.Error())
 		return
 	}
 
@@ -845,34 +856,27 @@ func (s *Server) handleAdminKYCApprove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	// Propagate the credential to the blockchain's credential store so it
-	// is immediately usable for transfer eligibility checks.
-	s.bc.Credentials[req.WalletKey] = att
+	s.commitIssuedCredential(att)
 
-	// G-07: for professional and eligible-counterparty investors, auto-derive a
-	// positive suitability assessment for all existing complex instruments so they
-	// are not blocked at the transfer gate.  Do not overwrite an existing assessment.
-	if att.InvestorClass == gonetwork.InvestorClassProfessional ||
-		att.InvestorClass == gonetwork.InvestorClassEligibleCP {
-		for assetID, asset := range s.bc.Assets {
-			if asset.AssetType == gonetwork.AssetTypeWarrant ||
-				asset.AssetType == gonetwork.AssetTypeConvertible {
-				key := gonetwork.SuitabilityKey(req.WalletKey, assetID)
-				if _, exists := s.bc.SuitabilityAssessments[key]; !exists {
-					s.bc.SuitabilityAssessments[key] = &gonetwork.SuitabilityAssessment{
-						WalletPublicKey:         req.WalletKey,
-						AssetID:                 assetID,
-						InstrumentClass:         asset.AssetType,
-						HasSufficientKnowledge:  true,
-						HasSufficientExperience: true,
-						CanAbsorbLoss:           true,
-						Suitable:                true,
-						AssessedAt:              time.Now().Unix(),
-					}
-				}
-			}
-		}
-	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"wallet_key":     att.WalletPublicKey,
+		"investor_class": att.InvestorClass,
+		"kyc_status":     att.KYCStatus,
+		"expires_at":     att.ExpiresAt,
+	})
+}
+
+// commitIssuedCredential propagates a freshly issued CredentialAttestation to
+// the blockchain's credential store, auto-derives MiFID II suitability for
+// professional / eligible-counterparty investors on existing complex
+// instruments (G-07), emits EventCredentialIssued, and commits the credential
+// on-chain via SealBlock. Every credential-issuing endpoint (KYC approval,
+// registration review, future automated KYC) must call this so every
+// CredentialAttestation carries a valid CredentialHash + RegistrySignature and
+// is auditable as a CredentialTransaction, instead of only some paths doing so.
+func (s *Server) commitIssuedCredential(att *gonetwork.CredentialAttestation) {
+	s.bc.Credentials[att.WalletPublicKey] = att
+	s.autoGrantSuitability(att)
 
 	s.bc.EmitEvent(gonetwork.EventCredentialIssued, map[string]any{
 		"wallet_key":     att.WalletPublicKey,
@@ -883,12 +887,56 @@ func (s *Server) handleAdminKYCApprove(w http.ResponseWriter, r *http.Request) {
 	})
 	s.bc.SealBlock(nil, nil, []gonetwork.CredentialTransaction{{Attestation: *att}})
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"wallet_key":     att.WalletPublicKey,
-		"investor_class": att.InvestorClass,
-		"kyc_status":     att.KYCStatus,
-		"expires_at":     att.ExpiresAt,
-	})
+	// Phase 2: also emit a topic-scoped KYC claim via the same identity
+	// registry, so this wallet is represented in the new claims model
+	// immediately rather than only via the SynthesizeClaimsFromAttestation
+	// adapter. Non-fatal on failure — the legacy attestation above is already
+	// committed and remains fully sufficient for existing eligibility checks.
+	if s.bc.IdentityRegistry != nil {
+		validDays := int((att.ExpiresAt - time.Now().Unix()) / 86400)
+		if validDays <= 0 {
+			validDays = 1
+		}
+		claim, err := s.bc.IdentityRegistry.IssueClaim(
+			att.WalletPublicKey, gonetwork.ClaimTopicKYC, string(att.InvestorClass), validDays,
+		)
+		if err != nil {
+			log.Printf("commitIssuedCredential: failed to issue KYC claim for %s: %v", att.WalletPublicKey, err)
+		} else {
+			s.bc.SealClaimBlock([]gonetwork.ClaimTransaction{{Claim: *claim}}, nil)
+		}
+	}
+}
+
+// autoGrantSuitability implements G-07: for professional and
+// eligible-counterparty investors, auto-derive a positive MiFID II
+// suitability assessment for all existing complex instruments (warrants,
+// convertibles) so they are not blocked at the transfer gate. Existing
+// assessments are never overwritten.
+func (s *Server) autoGrantSuitability(att *gonetwork.CredentialAttestation) {
+	if att.InvestorClass != gonetwork.InvestorClassProfessional &&
+		att.InvestorClass != gonetwork.InvestorClassEligibleCP {
+		return
+	}
+	for assetID, asset := range s.bc.Assets {
+		if asset.AssetType != gonetwork.AssetTypeWarrant && asset.AssetType != gonetwork.AssetTypeConvertible {
+			continue
+		}
+		key := gonetwork.SuitabilityKey(att.WalletPublicKey, assetID)
+		if _, exists := s.bc.SuitabilityAssessments[key]; exists {
+			continue
+		}
+		s.bc.SuitabilityAssessments[key] = &gonetwork.SuitabilityAssessment{
+			WalletPublicKey:         att.WalletPublicKey,
+			AssetID:                 assetID,
+			InstrumentClass:         asset.AssetType,
+			HasSufficientKnowledge:  true,
+			HasSufficientExperience: true,
+			CanAbsorbLoss:           true,
+			Suitable:                true,
+			AssessedAt:              time.Now().Unix(),
+		}
+	}
 }
 
 // handlePaymentWebhook receives Modulr payment-received notifications.
@@ -1446,66 +1494,42 @@ func (s *Server) handleAdminRegistrationReview(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// Issue the on-chain KYC credential.
+		// Issue the on-chain KYC credential through the canonical signing path
+		// (NewIdentityCredential -> ToAttestation), never by constructing a
+		// CredentialAttestation literal directly — a hand-built attestation has
+		// no CredentialHash/RegistrySignature and would fail ValidateBlock's
+		// registry-signature check if ever gossiped or replayed.
+		validDays := rec.ValidForDays
+		if validDays <= 0 {
+			validDays = 365
+		}
 		var att *gonetwork.CredentialAttestation
-		if s.OperatorRegistry != nil {
-			var credErr error
+		var credErr error
+		switch {
+		case s.OperatorRegistry != nil:
+			// Prefer ApproveKYC so any queued /v1/kyc/request entry is cleared
+			// from the admin pending-review queue. Fall back to direct issuance
+			// if no matching pending request exists (e.g. the registration was
+			// submitted before OperatorRegistry was configured on this node).
 			att, credErr = s.OperatorRegistry.ApproveKYC(targetKey)
 			if credErr != nil {
-				// Non-fatal: registration is approved even if credential issuance fails transiently.
-				// Retry via /v1/admin/kyc/approve.
-				writeJSON(w, http.StatusOK, map[string]string{
-					"status":  "approved",
-					"warning": "registration approved but credential issuance failed: " + credErr.Error(),
-				})
-				return
+				att, credErr = s.OperatorRegistry.IssueCredential(targetKey, rec.Classification.Class, rec.Jurisdiction, validDays)
 			}
-		} else {
-			// No OperatorRegistry configured: build the attestation directly from the
-			// approved registration record so transfer eligibility checks pass immediately.
-			validDays := rec.ValidForDays
-			if validDays <= 0 {
-				validDays = 365
-			}
-			att = &gonetwork.CredentialAttestation{
-				WalletPublicKey: targetKey,
-				InvestorClass:   gonetwork.InvestorClass(rec.Classification.Class),
-				KYCStatus:       gonetwork.KYCStatusVerified,
-				Jurisdiction:    rec.Jurisdiction,
-				ExpiresAt:       time.Now().Unix() + int64(validDays)*86400,
-			}
+		case s.bc.IdentityRegistry != nil:
+			att, credErr = s.bc.IdentityRegistry.IssueCredential(targetKey, rec.Classification.Class, rec.Jurisdiction, validDays)
+		default:
+			credErr = fmt.Errorf("no identity registry configured on this node")
 		}
-		// Propagate credential to the blockchain so transfer eligibility checks pass.
-		s.bc.Credentials[targetKey] = att
-		// G-07: auto-derive suitability for complex instruments for pro/eligible-CP investors.
-		if att.InvestorClass == gonetwork.InvestorClassProfessional ||
-			att.InvestorClass == gonetwork.InvestorClassEligibleCP {
-			for assetID, asset := range s.bc.Assets {
-				if asset.AssetType == gonetwork.AssetTypeWarrant ||
-					asset.AssetType == gonetwork.AssetTypeConvertible {
-					key := gonetwork.SuitabilityKey(targetKey, assetID)
-					if _, exists := s.bc.SuitabilityAssessments[key]; !exists {
-						s.bc.SuitabilityAssessments[key] = &gonetwork.SuitabilityAssessment{
-							WalletPublicKey:         targetKey,
-							AssetID:                 assetID,
-							InstrumentClass:         asset.AssetType,
-							HasSufficientKnowledge:  true,
-							HasSufficientExperience: true,
-							CanAbsorbLoss:           true,
-							Suitable:                true,
-							AssessedAt:              time.Now().Unix(),
-						}
-					}
-				}
-			}
+		if credErr != nil {
+			// Non-fatal: registration is approved even if credential issuance fails.
+			// Retry via /v1/admin/kyc/approve once an identity registry is available.
+			writeJSON(w, http.StatusOK, map[string]string{
+				"status":  "approved",
+				"warning": "registration approved but credential issuance failed: " + credErr.Error(),
+			})
+			return
 		}
-		s.bc.EmitEvent(gonetwork.EventCredentialIssued, map[string]any{
-			"wallet_key":     att.WalletPublicKey,
-			"investor_class": att.InvestorClass,
-			"kyc_status":     att.KYCStatus,
-			"jurisdiction":   att.Jurisdiction,
-			"expires_at":     att.ExpiresAt,
-		})
+		s.commitIssuedCredential(att)
 		auditLog(AuditEntry{
 			Action:     AuditRegistrationApproved,
 			ActorKey:   auditKeyFingerprint(adminKey),
@@ -1714,6 +1738,189 @@ func (s *Server) handleKYCStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 2 — Claim-topic endpoints
+// ---------------------------------------------------------------------------
+
+// handleListClaims returns the effective set of claim-topic attestations for
+// a wallet — both real on-chain Claims and claims synthesized from the
+// legacy CredentialAttestation (the Phase 2 backward-compatible adapter).
+// GET /v1/claims/{walletKey}
+func (s *Server) handleListClaims(w http.ResponseWriter, r *http.Request) {
+	walletKey := r.PathValue("walletKey")
+	claims := gonetwork.EffectiveClaims(s.bc, walletKey)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"wallet_key": walletKey,
+		"count":      len(claims),
+		"claims":     claims,
+	})
+}
+
+// handleUpsertClaimIssuer adds or removes a trusted issuer for a claim topic.
+// Signed by the node operator key (single-authority governance at this stage
+// — see VELA roadmap Section 6.4) and committed on-chain via SealClaimBlock
+// for auditability.
+// POST /v1/admin/claim-issuers
+// Body: {"topic":"kyc","issuer_key":"<base64>","action":"add"|"remove"}
+func (s *Server) handleUpsertClaimIssuer(w http.ResponseWriter, r *http.Request) {
+	if s.bc.OperatorKeyProvider == nil {
+		writeError(w, http.StatusNotImplemented, "operator key provider not configured on this node")
+		return
+	}
+	var req struct {
+		Topic     string `json:"topic"`
+		IssuerKey string `json:"issuer_key"`
+		Action    string `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Topic == "" || req.IssuerKey == "" {
+		writeError(w, http.StatusBadRequest, "topic and issuer_key are required")
+		return
+	}
+	action := gonetwork.ClaimIssuerAction(req.Action)
+	if action != gonetwork.ClaimIssuerActionAdd && action != gonetwork.ClaimIssuerActionRemove {
+		writeError(w, http.StatusBadRequest, `action must be "add" or "remove"`)
+		return
+	}
+	if _, err := gonetwork.PublicKeyFromString(req.IssuerKey); err != nil {
+		writeError(w, http.StatusBadRequest, "issuer_key is not a valid Ed25519 public key: "+err.Error())
+		return
+	}
+
+	cit := gonetwork.ClaimIssuerTransaction{
+		Topic:      gonetwork.ClaimTopic(req.Topic),
+		IssuerKey:  req.IssuerKey,
+		Action:     action,
+		RecordedAt: time.Now().Unix(),
+	}
+	sig, err := s.bc.OperatorKeyProvider.Sign(cit.SigningHash())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to sign claim-issuer transaction")
+		return
+	}
+	cit.AdminSignature = sig
+
+	s.bc.SealClaimBlock(nil, []gonetwork.ClaimIssuerTransaction{cit})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"topic":      cit.Topic,
+		"issuer_key": cit.IssuerKey,
+		"action":     cit.Action,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Institutional / vLEI legal-entity identity endpoints
+// ---------------------------------------------------------------------------
+
+// handleRegisterEntity registers a new legal entity (LEI + legal name +
+// jurisdiction) for institutional onboarding. The entity starts in "pending"
+// status.
+// POST /v1/admin/entities
+// Body: {"lei":"...", "legal_name":"...", "jurisdiction":"GB", "did_webs":"...", "registered_address_hash":"..."}
+func (s *Server) handleRegisterEntity(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LEI                   string `json:"lei"`
+		LegalName             string `json:"legal_name"`
+		Jurisdiction          string `json:"jurisdiction"`
+		DIDWebs               string `json:"did_webs"`
+		RegisteredAddressHash string `json:"registered_address_hash"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	entity := &gonetwork.LegalEntityIdentity{
+		LEI:                   req.LEI,
+		LegalName:             req.LegalName,
+		Jurisdiction:          req.Jurisdiction,
+		DIDWebs:               req.DIDWebs,
+		RegisteredAddressHash: req.RegisteredAddressHash,
+		RegisteredBy:          walletFromCtx(r),
+	}
+	if err := s.EntityRegistry.RegisterEntity(entity); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, entity)
+}
+
+// handleGetEntity returns a single registered legal entity by LEI.
+// GET /v1/entities/{lei}
+func (s *Server) handleGetEntity(w http.ResponseWriter, r *http.Request) {
+	entity, err := s.EntityRegistry.GetEntity(r.PathValue("lei"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, entity)
+}
+
+// handleListEntities returns all registered legal entities.
+// GET /v1/entities
+func (s *Server) handleListEntities(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entities": s.EntityRegistry.ListEntities(),
+	})
+}
+
+// handleIssueEntityRoleClaim issues a ClaimTopicInstitutionalRole claim
+// binding a wallet to a role (authorised_signatory, ubo, director, spv_admin)
+// within a registered legal entity, reusing the Phase 2 claim-issuance
+// machinery (IdentityRegistry.IssueClaim + SealClaimBlock) exactly as
+// commitIssuedCredential does for KYC claims.
+// POST /v1/admin/entities/{lei}/role-claims
+// Body: {"wallet_key":"...", "role":"spv_admin", "valid_for_days":365}
+func (s *Server) handleIssueEntityRoleClaim(w http.ResponseWriter, r *http.Request) {
+	lei := r.PathValue("lei")
+	if _, err := s.EntityRegistry.GetEntity(lei); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if s.bc.IdentityRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "identity registry not configured on this node")
+		return
+	}
+	var req struct {
+		WalletKey    string `json:"wallet_key"`
+		Role         string `json:"role"`
+		ValidForDays int    `json:"valid_for_days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.WalletKey == "" {
+		writeError(w, http.StatusBadRequest, "wallet_key is required")
+		return
+	}
+	role := gonetwork.EntityRole(req.Role)
+	switch role {
+	case gonetwork.EntityRoleAuthorisedSignatory, gonetwork.EntityRoleUBO, gonetwork.EntityRoleDirector, gonetwork.EntityRoleSPVAdmin:
+	default:
+		writeError(w, http.StatusBadRequest, "role must be one of authorised_signatory, ubo, director, spv_admin")
+		return
+	}
+	validDays := req.ValidForDays
+	if validDays <= 0 {
+		validDays = 365
+	}
+
+	claim, err := s.bc.IdentityRegistry.IssueClaim(
+		req.WalletKey, gonetwork.ClaimTopicInstitutionalRole, gonetwork.EntityRoleClaimData(lei, role), validDays,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to issue role claim: "+err.Error())
+		return
+	}
+	s.bc.SealClaimBlock([]gonetwork.ClaimTransaction{{Claim: *claim}}, nil)
+
+	writeJSON(w, http.StatusOK, claim)
+}
+
+// ---------------------------------------------------------------------------
 // Open orders by wallet
 // ---------------------------------------------------------------------------
 
@@ -1912,12 +2119,11 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 	// G-11: jurisdiction-specific rules.
 	if buyerCred != nil {
 		if rule, hasRule := s.bc.JurisdictionRules[buyerCred.Jurisdiction]; hasRule {
-			currentRetailCount := 0
-			for _, cred := range s.bc.Credentials {
-				if cred.InvestorClass == gonetwork.InvestorClassRetail {
-					currentRetailCount++
-				}
-			}
+			// Live count scoped to this asset + jurisdiction (previously this
+			// counted ALL retail credential holders platform-wide, which could
+			// incorrectly block a buyer once any single jurisdiction's cap was
+			// reached anywhere on the platform).
+			currentRetailCount := gonetwork.CountJurisdictionRetailHolders(found.AssetID, buyerCred.Jurisdiction, s.bc.Holdings, s.bc.Credentials)
 			if err := gonetwork.ApplyJurisdictionRule(rule, nil, buyerCred, asset, 0, currentRetailCount); err != nil {
 				writeError(w, http.StatusForbidden, err.Error())
 				return
@@ -2878,32 +3084,44 @@ func (s *Server) handleCounterSignAsset(w http.ResponseWriter, r *http.Request) 
 // Only compliance officers (jwtAdmin) may access this list.
 // GET /v1/compliance/sar
 func (s *Server) handleListSARs(w http.ResponseWriter, _ *http.Request) {
+	s.bc.Mu.RLock()
 	out := make([]*gonetwork.SARDraft, 0, len(s.bc.PendingSARs))
 	for _, sar := range s.bc.PendingSARs {
 		out = append(out, sar)
 	}
+	s.bc.Mu.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"count": len(out),
 		"sars":  out,
 	})
 }
 
+// handleListClosedSARs returns resolved (filed or dismissed) SAR drafts from
+// the durable archive bucket. Returns an empty list when no BlockStore is
+// configured (dev/test nodes) rather than erroring.
+// GET /v1/compliance/sar/closed
+func (s *Server) handleListClosedSARs(w http.ResponseWriter, _ *http.Request) {
+	if s.bc.BlockStore == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"count": 0, "sars": []any{}})
+		return
+	}
+	closed, err := s.bc.BlockStore.LoadClosedSARs()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load closed SAR archive")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"count": len(closed), "sars": closed})
+}
+
 // handleResolveSAR allows a compliance officer to file or dismiss a SAR draft.
+// Resolved drafts are archived to the durable "closed_sars" bucket (when a
+// BlockStore is configured) and removed from the live PendingSARs map, so SAR
+// retention no longer depends on the process staying alive.
 // POST /v1/compliance/sar/{id}/resolve
 // Body: {"action":"file"|"dismiss","notes":"optional explanation"}
 func (s *Server) handleResolveSAR(w http.ResponseWriter, r *http.Request) {
 	sarID := r.PathValue("id")
 	resolverKey := walletFromCtx(r)
-
-	sar, ok := s.bc.PendingSARs[sarID]
-	if !ok {
-		writeError(w, http.StatusNotFound, "SAR not found")
-		return
-	}
-	if sar.Status != gonetwork.SARStatusPending {
-		writeError(w, http.StatusConflict, fmt.Sprintf("SAR is already %s", sar.Status))
-		return
-	}
 
 	var req struct {
 		Action string `json:"action"` // "file" or "dismiss"
@@ -2913,20 +3131,52 @@ func (s *Server) handleResolveSAR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	switch req.Action {
-	case "file":
-		sar.Status = gonetwork.SARStatusFiled
-	case "dismiss":
-		sar.Status = gonetwork.SARStatusDismissed
-	default:
+	if req.Action != "file" && req.Action != "dismiss" {
 		writeError(w, http.StatusBadRequest, `action must be "file" or "dismiss"`)
 		return
+	}
+
+	// Mutates bc.PendingSARs, which is also read/written by detectSTORs inside
+	// applyBlockState — bc.Mu must be held for the whole read-modify-write.
+	s.bc.Mu.Lock()
+	sar, ok := s.bc.PendingSARs[sarID]
+	if !ok {
+		s.bc.Mu.Unlock()
+		writeError(w, http.StatusNotFound, "SAR not found")
+		return
+	}
+	if sar.Status != gonetwork.SARStatusPending {
+		status := sar.Status
+		s.bc.Mu.Unlock()
+		writeError(w, http.StatusConflict, fmt.Sprintf("SAR is already %s", status))
+		return
+	}
+	if req.Action == "file" {
+		sar.Status = gonetwork.SARStatusFiled
+	} else {
+		sar.Status = gonetwork.SARStatusDismissed
 	}
 	sar.ResolvedAt = time.Now().Unix()
 	sar.ResolvedBy = resolverKey
 	sar.Notes = req.Notes
+	sarCopy := *sar
+	// Only remove from the live map once we know the resolved record has
+	// somewhere durable to go; otherwise leave it in PendingSARs (with its
+	// updated Status) so the record isn't lost entirely on a dev/test node
+	// with no BlockStore configured.
+	archiving := s.bc.BlockStore != nil
+	if archiving {
+		delete(s.bc.PendingSARs, sarID)
+	}
+	s.bc.Mu.Unlock()
 
-	writeJSON(w, http.StatusOK, sar)
+	if archiving {
+		if err := s.bc.BlockStore.SaveClosedSAR(&sarCopy); err != nil {
+			log.Printf("handleResolveSAR: failed to archive resolved SAR %s: %v", sarID, err)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, &sarCopy)
 }
 
 // ---------------------------------------------------------------------------
@@ -2996,16 +3246,22 @@ func (s *Server) handleUpsertJurisdictionRule(w http.ResponseWriter, r *http.Req
 // GET /v1/assets/{id}/insiders
 func (s *Server) handleListInsiders(w http.ResponseWriter, r *http.Request) {
 	assetID := r.PathValue("id")
-	if _, ok := s.bc.Assets[assetID]; !ok {
+	s.bc.Mu.RLock()
+	_, assetExists := s.bc.Assets[assetID]
+	list := s.bc.InsiderLists[assetID]
+	var active []*gonetwork.InsiderRecord
+	if list != nil {
+		active = list.Active()
+	}
+	s.bc.Mu.RUnlock()
+	if !assetExists {
 		writeError(w, http.StatusNotFound, "asset not found")
 		return
 	}
-	list := s.bc.InsiderLists[assetID]
 	if list == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"asset_id": assetID, "count": 0, "records": []any{}})
 		return
 	}
-	active := list.Active()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"asset_id": assetID,
 		"count":    len(active),
@@ -3021,7 +3277,10 @@ func (s *Server) handleAddInsider(w http.ResponseWriter, r *http.Request) {
 	assetID := r.PathValue("id")
 	addedBy := walletFromCtx(r)
 
-	if _, ok := s.bc.Assets[assetID]; !ok {
+	s.bc.Mu.RLock()
+	_, assetExists := s.bc.Assets[assetID]
+	s.bc.Mu.RUnlock()
+	if !assetExists {
 		writeError(w, http.StatusNotFound, "asset not found")
 		return
 	}
@@ -3057,12 +3316,17 @@ func (s *Server) handleAddInsider(w http.ResponseWriter, r *http.Request) {
 		AddedByWallet: addedBy,
 	}
 
+	// Mutates bc.InsiderLists under bc.Mu — this map is also read by
+	// handleListInsiders and (in a future block-sealing check) applyBlockState
+	// under the same lock.
+	s.bc.Mu.Lock()
 	list := s.bc.InsiderLists[assetID]
 	if list == nil {
 		list = &gonetwork.InsiderList{AssetID: assetID}
 		s.bc.InsiderLists[assetID] = list
 	}
 	list.Add(record)
+	s.bc.Mu.Unlock()
 
 	writeJSON(w, http.StatusCreated, record)
 }
@@ -3074,12 +3338,16 @@ func (s *Server) handleRemoveInsider(w http.ResponseWriter, r *http.Request) {
 	assetID := r.PathValue("id")
 	recordID := r.PathValue("recordID")
 
+	s.bc.Mu.Lock()
 	list := s.bc.InsiderLists[assetID]
 	if list == nil {
+		s.bc.Mu.Unlock()
 		writeError(w, http.StatusNotFound, "insider list not found for asset")
 		return
 	}
-	if !list.Remove(recordID, time.Now().Unix()) {
+	removed := list.Remove(recordID, time.Now().Unix())
+	s.bc.Mu.Unlock()
+	if !removed {
 		writeError(w, http.StatusNotFound, "insider record not found or already removed")
 		return
 	}
@@ -3094,33 +3362,43 @@ func (s *Server) handleRemoveInsider(w http.ResponseWriter, r *http.Request) {
 // Only compliance officers (jwtAdmin) may access this list.
 // GET /v1/compliance/stor?resolution=pending_review
 func (s *Server) handleListSTORs(w http.ResponseWriter, _ *http.Request) {
+	s.bc.Mu.RLock()
 	out := make([]*gonetwork.STORDraft, 0, len(s.bc.PendingSTORs))
 	for _, stor := range s.bc.PendingSTORs {
 		out = append(out, stor)
 	}
+	s.bc.Mu.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"count": len(out),
 		"stors": out,
 	})
 }
 
+// handleListClosedSTORs returns resolved STOR drafts from the durable archive
+// bucket. Returns an empty list when no BlockStore is configured.
+// GET /v1/compliance/stor/closed
+func (s *Server) handleListClosedSTORs(w http.ResponseWriter, _ *http.Request) {
+	if s.bc.BlockStore == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"count": 0, "stors": []any{}})
+		return
+	}
+	closed, err := s.bc.BlockStore.LoadClosedSTORs()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load closed STOR archive")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"count": len(closed), "stors": closed})
+}
+
 // handleResolveSTOR allows a compliance officer to file or dismiss a STOR draft.
 // MAR Article 16(1) requires the report to be filed with the NCA "without delay".
+// Resolved drafts are archived to the durable "closed_stors" bucket (when a
+// BlockStore is configured) and removed from the live PendingSTORs map.
 // POST /v1/compliance/stor/{id}/resolve
 // Body: {"action":"file"|"dismiss","nca_ref":"optional ref","notes":"optional"}
 func (s *Server) handleResolveSTOR(w http.ResponseWriter, r *http.Request) {
 	storID := r.PathValue("id")
 	resolverKey := walletFromCtx(r)
-
-	stor, ok := s.bc.PendingSTORs[storID]
-	if !ok {
-		writeError(w, http.StatusNotFound, "STOR not found")
-		return
-	}
-	if stor.Resolution != gonetwork.STORResolutionPendingReview {
-		writeError(w, http.StatusConflict, fmt.Sprintf("STOR is already %s", stor.Resolution))
-		return
-	}
 
 	var req struct {
 		Action string `json:"action"` // "file" or "dismiss"
@@ -3131,20 +3409,50 @@ func (s *Server) handleResolveSTOR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	switch req.Action {
-	case "file":
-		stor.Resolution = gonetwork.STORResolutionFiledWithNCA
-		stor.NCARef = req.NCARef
-	case "dismiss":
-		stor.Resolution = gonetwork.STORResolutionDismissed
-	default:
+	if req.Action != "file" && req.Action != "dismiss" {
 		writeError(w, http.StatusBadRequest, `action must be "file" or "dismiss"`)
 		return
 	}
+
+	// Mutates bc.PendingSTORs, which is also read/written by detectSTORs inside
+	// applyBlockState — bc.Mu must be held for the whole read-modify-write.
+	s.bc.Mu.Lock()
+	stor, ok := s.bc.PendingSTORs[storID]
+	if !ok {
+		s.bc.Mu.Unlock()
+		writeError(w, http.StatusNotFound, "STOR not found")
+		return
+	}
+	if stor.Resolution != gonetwork.STORResolutionPendingReview {
+		resolution := stor.Resolution
+		s.bc.Mu.Unlock()
+		writeError(w, http.StatusConflict, fmt.Sprintf("STOR is already %s", resolution))
+		return
+	}
+	if req.Action == "file" {
+		stor.Resolution = gonetwork.STORResolutionFiledWithNCA
+		stor.NCARef = req.NCARef
+	} else {
+		stor.Resolution = gonetwork.STORResolutionDismissed
+	}
 	stor.ResolvedAt = time.Now().Unix()
 	stor.ResolvedBy = resolverKey
+	storCopy := *stor
+	// Only remove from the live map once we know the resolved record has
+	// somewhere durable to go; see handleResolveSAR for the same rationale.
+	archiving := s.bc.BlockStore != nil
+	if archiving {
+		delete(s.bc.PendingSTORs, storID)
+	}
+	s.bc.Mu.Unlock()
 
-	writeJSON(w, http.StatusOK, stor)
+	if archiving {
+		if err := s.bc.BlockStore.SaveClosedSTOR(&storCopy); err != nil {
+			log.Printf("handleResolveSTOR: failed to archive resolved STOR %s: %v", storID, err)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, &storCopy)
 }
 
 // ---------------------------------------------------------------------------

@@ -70,6 +70,30 @@ func TestValidateISIN_BadCheckDigit_Error(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ValidateDTI
+// ---------------------------------------------------------------------------
+
+func TestValidateDTI_Empty_OK(t *testing.T) {
+	assert.NoError(t, ValidateDTI(""))
+}
+
+func TestValidateDTI_Valid_OK(t *testing.T) {
+	assert.NoError(t, ValidateDTI("AB12CD34E"))
+}
+
+func TestValidateDTI_WrongLength_Error(t *testing.T) {
+	err := ValidateDTI("ABC123")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "9 characters")
+}
+
+func TestValidateDTI_InvalidChar_Error(t *testing.T) {
+	err := ValidateDTI("AB12CD3$E")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "uppercase alphanumeric")
+}
+
+// ---------------------------------------------------------------------------
 // EncryptPrivateKey / DecryptPrivateKey — v2 (AES-256-GCM + Argon2id)
 // ---------------------------------------------------------------------------
 

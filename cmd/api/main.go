@@ -19,6 +19,17 @@
 //	                               When empty, a fresh ephemeral key is generated.
 //	ONFIDO_WEBHOOK_SECRET        — HMAC secret for Onfido KYC webhook verification.
 //	                               When empty, signature verification is skipped.
+//	GREENHOUSE_AML_PROVIDER      — selects the live AML/sanctions screener:
+//	                               "complyadvantage", "elliptic", or unset/"mock"
+//	                               (default; MockAMLScreener passes every
+//	                               transaction — never use in production).
+//	COMPLYADVANTAGE_API_KEY      — required when GREENHOUSE_AML_PROVIDER=complyadvantage.
+//	COMPLYADVANTAGE_BASE_URL     — optional override (default: https://api.complyadvantage.com).
+//	ELLIPTIC_API_KEY             — required when GREENHOUSE_AML_PROVIDER=elliptic.
+//	ELLIPTIC_API_SECRET          — required when GREENHOUSE_AML_PROVIDER=elliptic.
+//	ELLIPTIC_BASE_URL            — optional override (default: https://aml-api.elliptic.co).
+//	GREENHOUSE_PEP_RESCREEN_INTERVAL — periodic PEP/sanctions re-screening interval
+//	                               (Go duration string, e.g. "24h"). Default: 24h.
 package main
 
 import (
@@ -27,7 +38,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	gn "gonetwork"
 	"gonetwork/api"
@@ -78,6 +91,31 @@ func main() {
 		log.Printf("  Block store    : %s (loaded %d blocks)", dbPath, len(bc.Blocks))
 	}
 	bc.BlockStore = store
+
+	// ── AML Screener ──────────────────────────────────────────────────────────
+	// Defaults to MockAMLScreener (set by NewBlockchain) unless
+	// GREENHOUSE_AML_PROVIDER selects a live provider. Live screeners are
+	// wrapped with AuditedAMLScreener so every screening decision is durably
+	// logged to the "aml_screening_log" bucket for compliance audit trails.
+	if screener, provider := loadAMLScreener(); screener != nil {
+		bc.AMLScreener = gn.NewAuditedAMLScreener(screener, bc.BlockStore, provider)
+		log.Printf("  AML audit log  : persisted to %s (bucket aml_screening_log)", dbPath)
+	} else {
+		log.Println("  AML screener   : MockAMLScreener (dev/test only — set GREENHOUSE_AML_PROVIDER in production)")
+	}
+
+	// ── PEP / Sanctions Re-screening Scheduler ────────────────────────────────
+	// JMLSG 3.4.5 requires ongoing periodic re-screening of onboarded investors.
+	pepInterval := 24 * time.Hour
+	if v := os.Getenv("GREENHOUSE_PEP_RESCREEN_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			pepInterval = d
+		} else {
+			log.Printf("Warning: invalid GREENHOUSE_PEP_RESCREEN_INTERVAL %q, using default %s", v, pepInterval)
+		}
+	}
+	gn.StartPEPRescreeningScheduler(ctx, bc, pepInterval)
+	log.Printf("  PEP rescreen   : every %s", pepInterval)
 
 	// ── API Server ────────────────────────────────────────────────────────────
 	srv := api.NewServer(bc, listenAddr)
@@ -133,4 +171,43 @@ func loadOrGenerateOperatorKey() *gn.PrivateKey {
 	log.Printf("  Operator key   : ephemeral (set GREENHOUSE_OPERATOR_KEY=%s to persist across restarts)",
 		hex.EncodeToString(key.Bytes()))
 	return key
+}
+
+// loadAMLScreener constructs a live AML/sanctions screener from environment
+// variables when GREENHOUSE_AML_PROVIDER selects one. Returns (nil, "") when
+// unset (or "mock"), leaving bc.AMLScreener at its NewBlockchain default
+// (MockAMLScreener — passes every transaction; dev/test only). The returned
+// provider name labels persisted audit log entries (see AuditedAMLScreener).
+func loadAMLScreener() (gn.AMLScreener, string) {
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("GREENHOUSE_AML_PROVIDER")))
+	switch provider {
+	case "", "mock":
+		return nil, ""
+	case "complyadvantage":
+		apiKey := os.Getenv("COMPLYADVANTAGE_API_KEY")
+		if apiKey == "" {
+			log.Fatal("GREENHOUSE_AML_PROVIDER=complyadvantage requires COMPLYADVANTAGE_API_KEY")
+		}
+		baseURL := os.Getenv("COMPLYADVANTAGE_BASE_URL")
+		if baseURL == "" {
+			baseURL = "https://api.complyadvantage.com"
+		}
+		log.Println("  AML screener   : ComplyAdvantage")
+		return gn.NewComplyAdvantageScreener(apiKey, baseURL), provider
+	case "elliptic":
+		apiKey := os.Getenv("ELLIPTIC_API_KEY")
+		apiSecret := os.Getenv("ELLIPTIC_API_SECRET")
+		if apiKey == "" || apiSecret == "" {
+			log.Fatal("GREENHOUSE_AML_PROVIDER=elliptic requires ELLIPTIC_API_KEY and ELLIPTIC_API_SECRET")
+		}
+		baseURL := os.Getenv("ELLIPTIC_BASE_URL")
+		if baseURL == "" {
+			baseURL = "https://aml-api.elliptic.co"
+		}
+		log.Println("  AML screener   : Elliptic")
+		return gn.NewEllipticScreener(apiKey, apiSecret, baseURL), provider
+	default:
+		log.Fatalf("unknown GREENHOUSE_AML_PROVIDER %q (expected complyadvantage, elliptic, or mock)", provider)
+		return nil, ""
+	}
 }

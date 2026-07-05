@@ -2,6 +2,7 @@ package gonetwork
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -176,6 +177,79 @@ func (m *MockAMLScreener) ScreenTransaction(
 	}
 
 	return nil, nil
+}
+
+// ---------------------------------------------------------------------------
+// AuditedAMLScreener — durable screening decision log
+// ---------------------------------------------------------------------------
+
+// AMLScreeningLogEntry is a durable audit record of a single AML screening
+// decision. Persisting every call (not just blocked/flagged results) lets
+// compliance officers and regulators reconstruct the full screening history
+// for any transaction, surviving process restarts and provider swaps —
+// unlike MockAMLScreener.Calls, which is in-memory only.
+type AMLScreeningLogEntry struct {
+	ID          string    `json:"id"`
+	Provider    string    `json:"provider"`
+	SenderKey   string    `json:"sender_key"`
+	ReceiverKey string    `json:"receiver_key"`
+	AssetID     string    `json:"asset_id,omitempty"`
+	Amount      float64   `json:"amount,omitempty"`
+	Currency    string    `json:"currency,omitempty"`
+	Alert       *AMLAlert `json:"alert,omitempty"`
+	ScreenedAt  int64     `json:"screened_at"`
+}
+
+// AuditedAMLScreener wraps any AMLScreener implementation and persists every
+// screening decision to a durable BlockStore bucket, in addition to returning
+// the result to the caller unchanged. Wrap a live provider
+// (ComplyAdvantageScreener, EllipticScreener) with this before assigning it to
+// bc.AMLScreener so screening decisions survive process restarts.
+//
+// Persistence failures are logged but never block or fail the underlying
+// screening call — an audit-log write failure must not itself become an AML
+// availability incident.
+type AuditedAMLScreener struct {
+	inner    AMLScreener
+	store    *BlockStore
+	provider string
+}
+
+// NewAuditedAMLScreener returns an AuditedAMLScreener wrapping inner. store may
+// be nil, in which case screening proceeds normally but nothing is persisted
+// (equivalent to using inner directly) — useful for dev/test nodes with no
+// BlockStore configured.
+func NewAuditedAMLScreener(inner AMLScreener, store *BlockStore, provider string) *AuditedAMLScreener {
+	return &AuditedAMLScreener{inner: inner, store: store, provider: provider}
+}
+
+// ScreenTransaction implements AMLScreener, delegating to inner and then
+// persisting the decision to the audit log.
+func (a *AuditedAMLScreener) ScreenTransaction(
+	senderKey string,
+	receiverKey string,
+	assetID string,
+	amount float64,
+	currency string,
+) (*AMLAlert, error) {
+	alert, err := a.inner.ScreenTransaction(senderKey, receiverKey, assetID, amount, currency)
+	if a.store != nil {
+		entry := &AMLScreeningLogEntry{
+			ID:          generateID("AMLLOG"),
+			Provider:    a.provider,
+			SenderKey:   senderKey,
+			ReceiverKey: receiverKey,
+			AssetID:     assetID,
+			Amount:      amount,
+			Currency:    currency,
+			Alert:       alert,
+			ScreenedAt:  time.Now().Unix(),
+		}
+		if saveErr := a.store.SaveAMLScreeningLog(entry); saveErr != nil {
+			log.Printf("AuditedAMLScreener: failed to persist screening log entry: %v", saveErr)
+		}
+	}
+	return alert, err
 }
 
 // EventSARCreated is the stream event type emitted when a flagged AML alert

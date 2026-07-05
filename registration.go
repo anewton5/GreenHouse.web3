@@ -100,6 +100,15 @@ type IdentityDocument struct {
 	UploadedAt         int64  `json:"uploaded_at"`
 }
 
+// corporateDocuments stores hashed references to uploaded corporate verification documents.
+type CorporateDocuments struct {
+	IncorporationDocumentHash string `json:"incorporation_document_hash"`
+	RegisteredAddressHash     string `json:"registered_address_hash"`
+	ArticlesOfAssociationHash string `json:"articles_of_association_hash,omitempty"`
+	CompaniesHouseExtractHash string `json:"companies_house_extract_hash,omitempty"`
+	UploadedAt                int64  `json:"uploaded_at"`
+}
+
 // ---------------------------------------------------------------------------
 // InvestorClassificationRecord
 // ---------------------------------------------------------------------------
@@ -190,6 +199,15 @@ type RegistrationRecord struct {
 	Document       IdentityDocument             `json:"document"`
 	Classification InvestorClassificationRecord `json:"classification"`
 	Consents       ComplianceConsents           `json:"consents"`
+
+	// Corporate is populated for institutional/corporate registrants (Phase 3).
+	// When non-nil, Validate() additionally requires EntityLEI to be a
+	// structurally valid LEI and enforces the corporate document hash checks.
+	Corporate *CorporateDocuments `json:"corporate,omitempty"`
+	// EntityLEI links this registration to a LegalEntityIdentity (see
+	// entity_identity.go) for institutional/corporate registrants. Optional for
+	// individual investors.
+	EntityLEI string `json:"entity_lei,omitempty"`
 
 	// Jurisdiction is the investor's primary regulatory jurisdiction.
 	// Used to select the applicable ruleset (UK FCA vs EU NCA) for:

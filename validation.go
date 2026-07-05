@@ -256,6 +256,33 @@ func (r *RegistrationRecord) Validate() []ValidationError {
 		add("consents.not_sanctioned", "applicant must confirm they are not subject to financial sanctions")
 	}
 
+	// ── Corporate / institutional onboarding (Phase 3) ─────────────────────────
+	// Only enforced when Corporate is present — individual investors leave this
+	// nil and are unaffected.
+	if r.Corporate != nil {
+		if r.EntityLEI == "" {
+			add("entity_lei", "is required when registering as a corporate entity")
+		} else if err := ValidateLEI(r.EntityLEI); err != nil {
+			add("entity_lei", err.Error())
+		}
+		if r.Corporate.IncorporationDocumentHash == "" {
+			add("corporate.incorporation_document_hash", "is required")
+		} else if !isValidDocHash(r.Corporate.IncorporationDocumentHash) {
+			add("corporate.incorporation_document_hash", "must be a 64-character lowercase hexadecimal SHA-256 hash")
+		}
+		if r.Corporate.RegisteredAddressHash == "" {
+			add("corporate.registered_address_hash", "is required")
+		} else if !isValidDocHash(r.Corporate.RegisteredAddressHash) {
+			add("corporate.registered_address_hash", "must be a 64-character lowercase hexadecimal SHA-256 hash")
+		}
+		if h := r.Corporate.ArticlesOfAssociationHash; h != "" && !isValidDocHash(h) {
+			add("corporate.articles_of_association_hash", "if provided, must be a 64-character lowercase hexadecimal SHA-256 hash")
+		}
+		if h := r.Corporate.CompaniesHouseExtractHash; h != "" && !isValidDocHash(h) {
+			add("corporate.companies_house_extract_hash", "if provided, must be a 64-character lowercase hexadecimal SHA-256 hash")
+		}
+	}
+
 	// ── Jurisdiction ──────────────────────────────────────────────────────────
 
 	if r.Jurisdiction == "" {

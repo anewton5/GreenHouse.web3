@@ -41,6 +41,10 @@ type SPVWrapper struct {
 	NAVUpdatedAt         int64           `json:"NAVUpdatedAt"`         // Unix seconds
 	LegalDocHash         string          `json:"LegalDocHash"`         // SHA3-256 hex of SPV formation document
 	Signature            []byte          `json:"Signature,omitempty"`  // Ed25519 sig by SPVAdminKey
+	// EntityLEI optionally links this SPV to a registered LegalEntityIdentity
+	// (Phase 3), enabling SPVAdminHasRoleClaim to cross-check that SPVAdminKey
+	// holds a valid "spv_admin" institutional role claim for that entity.
+	EntityLEI string `json:"EntityLEI,omitempty"`
 }
 
 // SPVTxType classifies a corporate event at the SPV level.

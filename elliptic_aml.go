@@ -2,6 +2,7 @@ package gonetwork
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -140,7 +141,10 @@ type ellipticWalletRiskResponse struct {
 	} `json:"blockchain_info"`
 }
 
-// callAPI performs a real HTTP request to the Elliptic Wallet Screening endpoint.
+// callAPI performs a real HTTP request to the Elliptic Wallet Screening
+// endpoint, retrying transient failures (network errors, 5xx responses) with
+// bounded exponential backoff via the shared retryHTTP helper (up to 3
+// attempts, ~30s overall cap).
 func (s *EllipticScreener) callAPI(walletKey string) (*AMLAlert, error) {
 	var reqBody ellipticWalletRiskRequest
 	reqBody.Subject.Asset = "holistic" // score all assets
@@ -154,15 +158,19 @@ func (s *EllipticScreener) callAPI(walletKey string) (*AMLAlert, error) {
 	}
 
 	url := s.baseURL + "/v2/wallet/synchronous"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to build Elliptic request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-access-key", s.apiKey)
-	req.Header.Set("x-access-secret", s.apiSecret)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	resp, err := s.client.Do(req)
+	resp, err := retryHTTP(ctx, retryConfig{maxAttempts: 3, safeToRetry: true}, func(ctx context.Context) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-access-key", s.apiKey)
+		req.Header.Set("x-access-secret", s.apiSecret)
+		return s.client.Do(req)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("Elliptic API request failed: %w", err)
 	}

@@ -135,6 +135,12 @@ func (o *OperatorIdentityRegistry) RegistryPublicKey() *PublicKey {
 	return o.registryPub
 }
 
+// IssueClaim creates and signs a topic-scoped Claim for walletKey, using the
+// same registry key that signs CredentialAttestations via IssueCredential.
+func (o *OperatorIdentityRegistry) IssueClaim(walletKey string, topic ClaimTopic, data string, validForDays int) (*Claim, error) {
+	return NewClaim(topic, "", walletKey, data, validForDays, o.registryKey)
+}
+
 // ListPendingRequests returns all pending KYC requests.
 // Called by GET /v1/admin/kyc/pending to populate the operator approval queue.
 func (o *OperatorIdentityRegistry) ListPendingRequests() []*PendingKYCRequest {

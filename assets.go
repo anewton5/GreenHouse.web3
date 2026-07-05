@@ -70,9 +70,15 @@ type TransferRestrictions struct {
 
 // AssetMetadata holds legal and descriptive information about an asset.
 type AssetMetadata struct {
-	CompanyName   string `json:"company_name,omitempty"`
-	Jurisdiction  string `json:"jurisdiction,omitempty"` // ISO 3166-1 alpha-2 country code of incorporation
-	ISIN          string `json:"isin,omitempty"`         // optional — assigned by issuer or registration authority
+	CompanyName  string `json:"company_name,omitempty"`
+	Jurisdiction string `json:"jurisdiction,omitempty"` // ISO 3166-1 alpha-2 country code of incorporation
+	ISIN         string `json:"isin,omitempty"`         // optional — assigned by issuer or registration authority
+	// DTI is the Digital Token Identifier (ISO 24165), assigned externally by
+	// a DTI allocation authority and optionally stored on-chain for reporting.
+	DTI string `json:"dti,omitempty"`
+	// DLI is the DLT Instrument Identifier (ISO 24165 sibling identifier) and
+	// is optional at this stage.
+	DLI           string `json:"dli,omitempty"`
 	VotingRights  bool   `json:"voting_rights,omitempty"`
 	DividendTerms string `json:"dividend_terms,omitempty"`
 	// LegalDocHash is the SHA3-256 hex of the subscription agreement or term sheet.
@@ -182,6 +188,24 @@ func ValidateISIN(isin string) error {
 	}
 	if sum%10 != 0 {
 		return fmt.Errorf("ISIN %q has invalid check digit (Luhn mod-10 failed)", isin)
+	}
+	return nil
+}
+
+// ValidateDTI returns an error if dti does not conform to GreenHouse's
+// ISO 24165 structural checks (9 uppercase alphanumeric characters).
+// Empty values are accepted because DTI remains optional and manually entered.
+func ValidateDTI(dti string) error {
+	if dti == "" {
+		return nil
+	}
+	if len(dti) != 9 {
+		return fmt.Errorf("DTI must be exactly 9 characters (ISO 24165); got %d", len(dti))
+	}
+	for i, c := range dti {
+		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return fmt.Errorf("DTI position %d must be uppercase alphanumeric; got %q", i, c)
+		}
 	}
 	return nil
 }
@@ -523,19 +547,10 @@ func (at *AssetTransaction) Validate(
 		if receiverCred := credentials[at.Tx.Receiver]; receiverCred != nil {
 			if rule, ok := bc.JurisdictionRules[receiverCred.Jurisdiction]; ok {
 				senderCred := credentials[at.Tx.Sender]
-				// Count current retail holders of this asset in the receiver's jurisdiction
-				// so that ApplyJurisdictionRule can enforce the per-jurisdiction retail cap.
-				currentRetailCount := 0
-				suffix := ":" + at.AssetID
-				for key, h := range holdings {
-					if strings.HasSuffix(key, suffix) && h.Balance > 0 {
-						if cred, exists := credentials[h.HolderID]; exists {
-							if cred.InvestorClass == InvestorClassRetail && cred.Jurisdiction == receiverCred.Jurisdiction {
-								currentRetailCount++
-							}
-						}
-					}
-				}
+				// Live count of retail holders of this asset in the receiver's
+				// jurisdiction, so ApplyJurisdictionRule can enforce the
+				// per-jurisdiction retail cap without a caller-maintained counter.
+				currentRetailCount := CountJurisdictionRetailHolders(at.AssetID, receiverCred.Jurisdiction, holdings, credentials)
 				// Use at.Tx.Amount as EUR-denominated ticket value proxy.
 				// Accurate when asset.Currency == "EUR"; for other currencies the
 				// caller should apply FX conversion before calling Validate.
