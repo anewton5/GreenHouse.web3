@@ -959,7 +959,11 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 			// Validate and append under the write lock, but do NOT call
 			// AddBlock (which broadcasts) while holding the lock — a slow
 			// network publish would deadlock the entire chain. Instead we
-			// do the state mutation inline (same as AddBlock minus broadcast).
+			// do the state mutation inline (same as AddBlock minus broadcast),
+			// then apply the block's state transitions (order matching, DVP
+			// settlement, RFQ/market-maker registries, holdings, etc.) so this
+			// node's own state stays in sync with the sealing node rather than
+			// only recording the block shell (see AUDIT §14.3 finding 3).
 			n.Blockchain.Mu.Lock()
 			if n.Blockchain.ValidateBlock(block) {
 				if len(n.Blockchain.Blocks) > 0 {
@@ -972,6 +976,19 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 				block.SetPayloadHash()
 				n.Blockchain.Blocks = append(n.Blockchain.Blocks, block)
 				n.Blockchain.Nonce++
+				idx := len(n.Blockchain.Blocks) - 1
+				n.Blockchain.markCommittedTxHashes(&n.Blockchain.Blocks[idx])
+				if n.Blockchain.BlockStore != nil {
+					if err := n.Blockchain.BlockStore.SaveBlock(&n.Blockchain.Blocks[idx]); err != nil {
+						log.Printf("Failed to persist received block %d: %v", idx, err)
+					}
+				}
+				n.Blockchain.applyBlockState(&n.Blockchain.Blocks[idx])
+				if n.Blockchain.BlockStore != nil {
+					if err := n.Blockchain.BlockStore.SaveState(n.Blockchain, idx); err != nil {
+						log.Printf("Failed to persist state snapshot after block %d: %v", idx, err)
+					}
+				}
 			}
 			n.Blockchain.Mu.Unlock()
 

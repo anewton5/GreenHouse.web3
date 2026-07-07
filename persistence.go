@@ -368,6 +368,9 @@ type stateSnapshot struct {
 	LegalDocAmendments     map[string][]*LegalDocAmendment   `json:"legal_doc_amendments,omitempty"`
 	Claims                 map[string][]*Claim               `json:"claims,omitempty"`
 	TrustedIssuers         *TrustedIssuersRegistry           `json:"trusted_issuers,omitempty"`
+	RFQRequests            map[string]*RFQRequest            `json:"rfq_requests,omitempty"`
+	RFQQuotes              map[string][]*RFQQuote            `json:"rfq_quotes,omitempty"`
+	MarketMakerRegistry    *MarketMakerRegistry              `json:"market_maker_registry,omitempty"`
 	LastAppliedBlock       int                               `json:"last_applied_block"`
 }
 
@@ -392,6 +395,9 @@ func (bs *BlockStore) SaveState(bc *Blockchain, lastBlockIndex int) error {
 		LegalDocAmendments:     bc.LegalDocAmendments,
 		Claims:                 bc.Claims,
 		TrustedIssuers:         bc.TrustedIssuers,
+		RFQRequests:            bc.RFQRequests,
+		RFQQuotes:              bc.RFQQuotes,
+		MarketMakerRegistry:    bc.MarketMakerRegistry,
 		LastAppliedBlock:       lastBlockIndex,
 	}
 	data, err := json.Marshal(snap)
@@ -468,6 +474,16 @@ func (bs *BlockStore) LoadState(bc *Blockchain) (int, error) {
 		if snap.TrustedIssuers != nil {
 			bc.TrustedIssuers = snap.TrustedIssuers
 		}
+		if snap.RFQRequests != nil {
+			bc.RFQRequests = snap.RFQRequests
+		}
+		if snap.RFQQuotes != nil {
+			bc.RFQQuotes = snap.RFQQuotes
+		}
+		if snap.MarketMakerRegistry != nil {
+			bc.MarketMakerRegistry = snap.MarketMakerRegistry
+		}
+		bc.initMarketMakerRegistry()
 		lastApplied = snap.LastAppliedBlock
 		return nil
 	})

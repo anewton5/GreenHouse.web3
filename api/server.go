@@ -212,6 +212,10 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/entities", s.jwt(http.HandlerFunc(s.handleListEntities)))
 	mux.Handle("GET /v1/entities/{lei}", s.jwt(http.HandlerFunc(s.handleGetEntity)))
 	mux.Handle("POST /v1/admin/entities/{lei}/role-claims", s.jwtAdmin(http.HandlerFunc(s.handleIssueEntityRoleClaim)))
+	mux.Handle("POST /v1/admin/market-makers", s.jwtAdmin(http.HandlerFunc(s.handleCreateMarketMaker)))
+	mux.Handle("GET /v1/market-makers/{assetID}", s.jwt(http.HandlerFunc(s.handleListMarketMakers)))
+	mux.Handle("GET /v1/market-makers/{walletKey}/inventory", s.jwt(http.HandlerFunc(s.handleGetMarketMakerInventory)))
+	mux.Handle("DELETE /v1/admin/market-makers/{id}", s.jwtAdmin(http.HandlerFunc(s.handleDeleteMarketMaker)))
 	mux.Handle("POST /v1/kyc/request", s.jwt(http.HandlerFunc(s.handleKYCRequest)))
 	mux.Handle("GET /v1/admin/kyc/pending", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCList)))
 	mux.Handle("POST /v1/admin/kyc/approve", s.jwtAdmin(http.HandlerFunc(s.handleAdminKYCApprove)))
@@ -224,6 +228,13 @@ func (s *Server) Routes() http.Handler {
 
 	// Open orders for the authenticated wallet
 	mux.Handle("GET /v1/orders", s.jwt(http.HandlerFunc(s.handleListOrders)))
+	mux.Handle("POST /v1/rfq/requests", s.jwt(http.HandlerFunc(s.handleCreateRFQRequest)))
+	mux.Handle("GET /v1/rfq/requests", s.jwt(http.HandlerFunc(s.handleListRFQRequests)))
+	mux.Handle("POST /v1/rfq/requests/{id}/quotes", s.jwt(http.HandlerFunc(s.handleCreateRFQQuote)))
+	mux.Handle("GET /v1/rfq/requests/{id}/quotes", s.jwt(http.HandlerFunc(s.handleListRFQQuotes)))
+	mux.Handle("POST /v1/rfq/requests/{id}/accept", s.jwt(http.HandlerFunc(s.handleAcceptRFQQuote)))
+	mux.Handle("DELETE /v1/rfq/requests/{id}", s.jwt(http.HandlerFunc(s.handleCancelRFQRequest)))
+	mux.Handle("GET /v1/market-data/vwap/{assetID}", s.jwt(http.HandlerFunc(s.handleGetMarketDataVWAP)))
 
 	// Issuer order management — see all bids on assets you issued, fill or reject
 	mux.Handle("GET /v1/issuer/orders", s.jwt(http.HandlerFunc(s.handleIssuerListOrders)))

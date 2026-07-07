@@ -1,1 +1,7 @@
 {"ts":1779186161067,"action":"auth.success","actor_key":"bd13a023faff0a08…","outcome":"ok","ip":"[::1]"}
+{"ts":1783281881886,"action":"auth.success","actor_key":"6d3a9c1ce6e5f87e…","outcome":"ok","ip":"[::1]"}
+{"ts":1783281922939,"action":"auth.success","actor_key":"bd13a023faff0a08…","outcome":"ok","ip":"[::1]"}
+{"ts":1783281934792,"action":"auth.success","actor_key":"bd13a023faff0a08…","outcome":"ok","ip":"[::1]"}
+{"ts":1783282076285,"action":"auth.success","actor_key":"bd13a023faff0a08…","outcome":"ok","ip":"[::1]"}
+{"ts":1783282393309,"action":"registration.submitted","actor_key":"bd13a023faff0a08…","outcome":"ok","ip":"[::1]","details":{"jurisdiction":"GB"}}
+{"ts":1783282480964,"action":"auth.success","actor_key":"6d3a9c1ce6e5f87e…","outcome":"ok","ip":"[::1]"}

@@ -1,7 +1,6 @@
 package gonetwork
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -261,50 +260,10 @@ func (wm *WindowManager) Tick(bc *Blockchain) []WindowResult {
 	return results
 }
 
-// applyDVP mirrors the DVP flow from finalizeBlock: issue PaymentInstruction,
-// confirm via PaymentProvider, sign PaymentConfirmation, apply asset transfer.
+// applyDVP delegates to Blockchain.executeTradeDVP so window settlement shares
+// the same DVP primitive as RFQ acceptance.
 func (wm *WindowManager) applyDVP(bc *Blockchain, trade Trade, atx *AssetTransaction) {
-	instruction := &PaymentInstruction{
-		TradeID:       trade.ID,
-		AssetID:       trade.AssetID,
-		Quantity:      trade.Quantity,
-		PricePerUnit:  trade.Price,
-		TotalAmount:   trade.Price * trade.Quantity,
-		Currency:      trade.Currency,
-		Method:        SettlementSEPA,
-		PayerWalletID: trade.BuyerID,
-		PayeeWalletID: trade.SellerID,
-		Reference:     fmt.Sprintf("GH-%s", trade.ID[:8]),
-		ExpiresAt:     time.Now().UTC().Unix() + 86400,
-	}
-	instruction, _ = bc.OracleService.SignInstruction(instruction)
-	bc.PendingInstructions[trade.ID] = instruction
-
-	_ = bc.PaymentProvider.ConfirmPayment(
-		context.Background(),
-		instruction.Reference,
-		instruction.TotalAmount,
-		instruction.Currency,
-	)
-	status, _ := bc.PaymentProvider.GetPaymentStatus(context.Background(), instruction.Reference)
-	if status != PaymentStatusConfirmed {
-		return
-	}
-
-	confirmation := &PaymentConfirmation{
-		InstructionID:   trade.ID,
-		Reference:       instruction.Reference,
-		ConfirmedAmount: instruction.TotalAmount,
-		Currency:        instruction.Currency,
-		ConfirmedAt:     time.Now().UTC().Unix(),
-	}
-	confirmation, _ = bc.OracleService.SignConfirmation(confirmation)
-	bc.cacheConfirmedPaymentLocked(confirmation)
-	if err := bc.persistConfirmedPaymentLocked(confirmation); err != nil {
-		fmt.Printf("DVP confirmation persistence failed for window trade %s: %v\n", trade.ID, err)
-	}
-
-	if err := ApplyAssetTransaction(atx, bc.Assets, bc.Holdings); err != nil {
+	if err := bc.executeTradeDVP(trade, atx); err != nil {
 		fmt.Printf("DVP apply failed for window trade %s: %v\n", trade.ID, err)
 	}
 }

@@ -177,12 +177,16 @@ type VotingStrategy interface {
 	Vote(block Block) bool
 }
 
-type DefaultVotingStrategy struct{}
+type DefaultVotingStrategy struct {
+	Blockchain *Blockchain
+}
 
 func (d *DefaultVotingStrategy) Vote(block Block) bool {
 	// A block with no content of any kind is not worth voting yes on.
 	if len(block.Transactions) == 0 && len(block.AssetTransactions) == 0 &&
-		len(block.OrderTransactions) == 0 && len(block.CredentialTransactions) == 0 {
+		len(block.OrderTransactions) == 0 && len(block.CredentialTransactions) == 0 &&
+		len(block.RFQTransactions) == 0 &&
+		len(block.MarketMakerTransactions) == 0 {
 		return false
 	}
 	// Validate each base transaction's signature when signatures are required.
@@ -200,39 +204,7 @@ func (d *DefaultVotingStrategy) Vote(block Block) bool {
 			return false
 		}
 	}
-	// Item 8 Step B: verify AssetTransaction sender signatures.
-	// AssetTransactions with RequiredSigs == 0 are internal/legacy entries
-	// (e.g. genesis issuances) that do not carry end-user signatures; skip them.
-	for _, at := range block.AssetTransactions {
-		if at.Tx.RequiredSigs == 0 {
-			continue
-		}
-		pubKey, err := PublicKeyFromString(at.Tx.Sender)
-		if err != nil {
-			return false
-		}
-		if !at.Tx.VerifyMultiSignature([]*PublicKey{pubKey}) {
-			return false
-		}
-	}
-	// Item 11: verify OrderTransaction order signatures.
-	// Cancellations carry only a base Tx.Sender signature; new placements must
-	// also have a valid Ed25519 signature over the order fields from the placer.
-	// CredentialTransaction registry-signature verification requires access to
-	// bc.IdentityRegistry and is handled in ValidateBlock (Item 11 Step C).
-	for _, ot := range block.OrderTransactions {
-		if ot.IsCancellation {
-			continue
-		}
-		placerPub, err := PublicKeyFromString(ot.Order.PlacedBy)
-		if err != nil {
-			return false
-		}
-		if !ot.Order.VerifySignature(placerPub) {
-			return false
-		}
-	}
-	return true
+	return d.Blockchain.validateTypedTransactions(block)
 }
 
 // Select the speaker (proposer) for the current view
@@ -409,6 +381,13 @@ func (bc *Blockchain) SortTransactionPool() {
 // Delegate votes on a block (simplified logic)
 func (n *Node) VoteOnBlock(block Block) bool {
 	if n.VotingStrategy != nil {
+		if s, ok := n.VotingStrategy.(*DefaultVotingStrategy); ok {
+			if s.Blockchain == nil {
+				copy := *s
+				copy.Blockchain = n.Blockchain
+				return copy.Vote(block)
+			}
+		}
 		return n.VotingStrategy.Vote(block)
 	}
 	// Default to "yes" if no strategy is set

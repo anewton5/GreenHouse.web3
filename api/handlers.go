@@ -342,6 +342,298 @@ func (s *Server) handleListTrades(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func parseRFQSide(raw string) (gonetwork.OrderSide, error) {
+	switch raw {
+	case "buy":
+		return gonetwork.OrderSideBid, nil
+	case "sell":
+		return gonetwork.OrderSideAsk, nil
+	default:
+		return "", fmt.Errorf("side must be \"buy\" or \"sell\"")
+	}
+}
+
+// handleCreateRFQRequest creates a new RFQ request on behalf of the authenticated wallet.
+// POST /v1/rfq/requests
+func (s *Server) handleCreateRFQRequest(w http.ResponseWriter, r *http.Request) {
+	walletKey := walletFromCtx(r)
+	if reg := s.RegRegistry.Get(walletKey); reg == nil || reg.Status != gonetwork.RegistrationStatusApproved {
+		writeError(w, http.StatusForbidden, "registration approval required to create RFQ requests")
+		return
+	}
+	var req struct {
+		AssetID    string  `json:"asset_id"`
+		Side       string  `json:"side"`
+		Quantity   float64 `json:"quantity"`
+		LimitPrice float64 `json:"limit_price"`
+		TTLSeconds int64   `json:"ttl_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.AssetID == "" {
+		writeError(w, http.StatusBadRequest, "asset_id is required")
+		return
+	}
+	if _, ok := s.bc.Assets[req.AssetID]; !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	side, err := parseRFQSide(req.Side)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Quantity <= 0 {
+		writeError(w, http.StatusBadRequest, "quantity must be greater than zero")
+		return
+	}
+	if req.LimitPrice < 0 {
+		writeError(w, http.StatusBadRequest, "limit_price must be greater than or equal to zero")
+		return
+	}
+	if req.TTLSeconds <= 0 {
+		writeError(w, http.StatusBadRequest, "ttl_seconds must be greater than zero")
+		return
+	}
+	now := time.Now()
+	idHash := sha3.Sum256([]byte(fmt.Sprintf("%s:%s:%d", walletKey, req.AssetID, now.UnixNano())))
+	rfqReq := gonetwork.RFQRequest{
+		ID:           hex.EncodeToString(idHash[:]),
+		AssetID:      req.AssetID,
+		RequesterKey: walletKey,
+		Side:         side,
+		Quantity:     req.Quantity,
+		LimitPrice:   req.LimitPrice,
+		ExpiresAt:    now.Unix() + req.TTLSeconds,
+		Status:       gonetwork.RFQRequestStatusOpen,
+		CreatedAt:    now.Unix(),
+	}
+	rfqTx := gonetwork.RFQTransaction{
+		Tx:      gonetwork.Transaction{Sender: walletKey, Receiver: req.AssetID, RequiredSigs: 0, Nonce: now.UnixNano()},
+		Action:  gonetwork.RFQActionRequest,
+		Request: rfqReq,
+	}
+	s.bc.SealRFQBlock([]gonetwork.RFQTransaction{rfqTx})
+	writeJSON(w, http.StatusCreated, rfqReq)
+}
+
+// handleListRFQRequests lists requests visible to the caller.
+// GET /v1/rfq/requests?assetID=
+func (s *Server) handleListRFQRequests(w http.ResponseWriter, r *http.Request) {
+	callerKey := walletFromCtx(r)
+	assetFilter := r.URL.Query().Get("assetID")
+	out := make([]gonetwork.RFQRequest, 0)
+	for _, req := range s.bc.RFQRequests {
+		if req == nil {
+			continue
+		}
+		if assetFilter != "" && req.AssetID != assetFilter {
+			continue
+		}
+		if req.RequesterKey == callerKey || s.bc.MarketMakerRegistry.IsDesignatedMarketMaker(req.AssetID, callerKey) {
+			out = append(out, *req)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
+	writeJSON(w, http.StatusOK, map[string]any{"requests": out})
+}
+
+// handleCreateRFQQuote records a dealer quote against an RFQ request.
+// POST /v1/rfq/requests/{id}/quotes
+func (s *Server) handleCreateRFQQuote(w http.ResponseWriter, r *http.Request) {
+	callerKey := walletFromCtx(r)
+	if reg := s.RegRegistry.Get(callerKey); reg == nil || reg.Status != gonetwork.RegistrationStatusApproved {
+		writeError(w, http.StatusForbidden, "registration approval required to submit RFQ quotes")
+		return
+	}
+	requestID := r.PathValue("id")
+	rfqReq := s.bc.RFQRequests[requestID]
+	if rfqReq == nil {
+		writeError(w, http.StatusNotFound, "RFQ request not found")
+		return
+	}
+	if !s.bc.MarketMakerRegistry.IsDesignatedMarketMaker(rfqReq.AssetID, callerKey) {
+		writeError(w, http.StatusForbidden, "wallet is not a designated market maker for this asset")
+		return
+	}
+	var req struct {
+		Price      float64 `json:"price"`
+		Quantity   float64 `json:"quantity"`
+		TTLSeconds int64   `json:"ttl_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Price <= 0 || req.Quantity <= 0 || req.TTLSeconds <= 0 {
+		writeError(w, http.StatusBadRequest, "price, quantity, and ttl_seconds must be greater than zero")
+		return
+	}
+	now := time.Now()
+	idHash := sha3.Sum256([]byte(fmt.Sprintf("%s:%s:%d", callerKey, requestID, now.UnixNano())))
+	quote := gonetwork.RFQQuote{
+		ID:        hex.EncodeToString(idHash[:]),
+		RequestID: requestID,
+		DealerKey: callerKey,
+		Price:     req.Price,
+		Quantity:  req.Quantity,
+		ExpiresAt: now.Unix() + req.TTLSeconds,
+		Status:    gonetwork.RFQQuoteStatusActive,
+		CreatedAt: now.Unix(),
+	}
+	rfqTx := gonetwork.RFQTransaction{
+		Tx:     gonetwork.Transaction{Sender: callerKey, Receiver: requestID, RequiredSigs: 0, Nonce: now.UnixNano()},
+		Action: gonetwork.RFQActionQuote,
+		Quote:  quote,
+	}
+	s.bc.SealRFQBlock([]gonetwork.RFQTransaction{rfqTx})
+	writeJSON(w, http.StatusCreated, quote)
+}
+
+// handleListRFQQuotes lists quotes for an RFQ request; requester only.
+// GET /v1/rfq/requests/{id}/quotes
+func (s *Server) handleListRFQQuotes(w http.ResponseWriter, r *http.Request) {
+	callerKey := walletFromCtx(r)
+	requestID := r.PathValue("id")
+	rfqReq := s.bc.RFQRequests[requestID]
+	if rfqReq == nil {
+		writeError(w, http.StatusNotFound, "RFQ request not found")
+		return
+	}
+	if rfqReq.RequesterKey != callerKey {
+		writeError(w, http.StatusForbidden, "only the requester may view RFQ quotes")
+		return
+	}
+	out := make([]gonetwork.RFQQuote, 0, len(s.bc.RFQQuotes[requestID]))
+	for _, quote := range s.bc.RFQQuotes[requestID] {
+		if quote != nil {
+			out = append(out, *quote)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"request_id": requestID, "quotes": out})
+}
+
+// handleAcceptRFQQuote accepts a quote for an RFQ request; requester only.
+// POST /v1/rfq/requests/{id}/accept
+func (s *Server) handleAcceptRFQQuote(w http.ResponseWriter, r *http.Request) {
+	callerKey := walletFromCtx(r)
+	requestID := r.PathValue("id")
+	rfqReq := s.bc.RFQRequests[requestID]
+	if rfqReq == nil {
+		writeError(w, http.StatusNotFound, "RFQ request not found")
+		return
+	}
+	if rfqReq.RequesterKey != callerKey {
+		writeError(w, http.StatusForbidden, "only the requester may accept RFQ quotes")
+		return
+	}
+	if rfqReq.Status == gonetwork.RFQRequestStatusAccepted {
+		writeError(w, http.StatusConflict, "RFQ request has already been accepted")
+		return
+	}
+	if rfqReq.Status == gonetwork.RFQRequestStatusCancelled || rfqReq.Status == gonetwork.RFQRequestStatusExpired {
+		writeError(w, http.StatusConflict, "RFQ request is not open")
+		return
+	}
+	var req struct {
+		QuoteID string `json:"quote_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.QuoteID == "" {
+		writeError(w, http.StatusBadRequest, "quote_id is required")
+		return
+	}
+	var acceptedQuote *gonetwork.RFQQuote
+	for _, quote := range s.bc.RFQQuotes[requestID] {
+		if quote != nil && quote.ID == req.QuoteID {
+			acceptedQuote = quote
+			break
+		}
+	}
+	if acceptedQuote == nil {
+		writeError(w, http.StatusNotFound, "RFQ quote not found")
+		return
+	}
+	if acceptedQuote.Status != gonetwork.RFQQuoteStatusActive || acceptedQuote.IsExpired() {
+		writeError(w, http.StatusConflict, "RFQ quote is not active")
+		return
+	}
+	asset, ok := s.bc.Assets[rfqReq.AssetID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	quantity := rfqReq.Quantity
+	if acceptedQuote.Quantity < quantity {
+		quantity = acceptedQuote.Quantity
+	}
+	buyerKey := rfqReq.RequesterKey
+	sellerKey := acceptedQuote.DealerKey
+	if rfqReq.Side == gonetwork.OrderSideAsk {
+		buyerKey = acceptedQuote.DealerKey
+		sellerKey = rfqReq.RequesterKey
+	}
+	if buyerKey == acceptedQuote.DealerKey {
+		if err := gonetwork.CheckMarketMakerPositionLimit(s.bc, acceptedQuote.DealerKey, asset.ID, quantity); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
+	if err := s.bc.ValidateRFQAcceptCompliance(buyerKey, sellerKey, asset, quantity, acceptedQuote.Price, "rfq:"+acceptedQuote.ID); err != nil {
+		status := http.StatusForbidden
+		if strings.HasPrefix(err.Error(), "FATF Travel Rule:") {
+			status = http.StatusUnprocessableEntity
+		}
+		if strings.HasPrefix(err.Error(), "AML screening failed:") {
+			status = http.StatusInternalServerError
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	now := time.Now()
+	rfqTx := gonetwork.RFQTransaction{
+		Tx:       gonetwork.Transaction{Sender: callerKey, Receiver: acceptedQuote.DealerKey, RequiredSigs: 0, Nonce: now.UnixNano()},
+		Action:   gonetwork.RFQActionAccept,
+		Request:  *rfqReq,
+		AcceptID: acceptedQuote.ID,
+	}
+	s.bc.SealRFQBlock([]gonetwork.RFQTransaction{rfqTx})
+	writeJSON(w, http.StatusOK, map[string]any{"request_id": requestID, "quote_id": acceptedQuote.ID, "status": "accepted"})
+}
+
+// handleCancelRFQRequest cancels an open RFQ request; requester only.
+// DELETE /v1/rfq/requests/{id}
+func (s *Server) handleCancelRFQRequest(w http.ResponseWriter, r *http.Request) {
+	callerKey := walletFromCtx(r)
+	requestID := r.PathValue("id")
+	rfqReq := s.bc.RFQRequests[requestID]
+	if rfqReq == nil {
+		writeError(w, http.StatusNotFound, "RFQ request not found")
+		return
+	}
+	if rfqReq.RequesterKey != callerKey {
+		writeError(w, http.StatusForbidden, "only the requester may cancel an RFQ request")
+		return
+	}
+	if rfqReq.Status == gonetwork.RFQRequestStatusAccepted || rfqReq.Status == gonetwork.RFQRequestStatusExpired {
+		writeError(w, http.StatusConflict, "RFQ request is not open")
+		return
+	}
+	now := time.Now()
+	rfqTx := gonetwork.RFQTransaction{
+		Tx:      gonetwork.Transaction{Sender: callerKey, Receiver: requestID, RequiredSigs: 0, Nonce: now.UnixNano()},
+		Action:  gonetwork.RFQActionCancel,
+		Request: *rfqReq,
+	}
+	s.bc.SealRFQBlock([]gonetwork.RFQTransaction{rfqTx})
+	writeJSON(w, http.StatusOK, map[string]any{"request_id": requestID, "status": "cancelled"})
+}
+
 // handlePlaceOrder creates and stores a new order on behalf of the authenticated wallet.
 // POST /v1/orders
 // Body: {"asset_id":"...","side":"buy","type":"limit","price":10.50,"quantity":100}
@@ -1930,7 +2222,8 @@ func (s *Server) handleListEntities(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleIssueEntityRoleClaim issues a ClaimTopicInstitutionalRole claim
-// binding a wallet to a role (authorised_signatory, ubo, director, spv_admin)
+// binding a wallet to a role (authorised_signatory, ubo, director, spv_admin,
+// market_maker)
 // within a registered legal entity, reusing the Phase 2 claim-issuance
 // machinery (IdentityRegistry.IssueClaim + SealClaimBlock) exactly as
 // commitIssuedCredential does for KYC claims.
@@ -1961,9 +2254,9 @@ func (s *Server) handleIssueEntityRoleClaim(w http.ResponseWriter, r *http.Reque
 	}
 	role := gonetwork.EntityRole(req.Role)
 	switch role {
-	case gonetwork.EntityRoleAuthorisedSignatory, gonetwork.EntityRoleUBO, gonetwork.EntityRoleDirector, gonetwork.EntityRoleSPVAdmin:
+	case gonetwork.EntityRoleAuthorisedSignatory, gonetwork.EntityRoleUBO, gonetwork.EntityRoleDirector, gonetwork.EntityRoleSPVAdmin, gonetwork.EntityRoleMarketMaker:
 	default:
-		writeError(w, http.StatusBadRequest, "role must be one of authorised_signatory, ubo, director, spv_admin")
+		writeError(w, http.StatusBadRequest, "role must be one of authorised_signatory, ubo, director, spv_admin, market_maker")
 		return
 	}
 	validDays := req.ValidForDays
@@ -1981,6 +2274,175 @@ func (s *Server) handleIssueEntityRoleClaim(w http.ResponseWriter, r *http.Reque
 	s.bc.SealClaimBlock([]gonetwork.ClaimTransaction{{Claim: *claim}}, nil)
 
 	writeJSON(w, http.StatusOK, claim)
+}
+
+// handleCreateMarketMaker registers a designated market maker agreement for an asset.
+// POST /v1/admin/market-makers
+func (s *Server) handleCreateMarketMaker(w http.ResponseWriter, r *http.Request) {
+	if s.bc.OperatorKeyProvider == nil {
+		writeError(w, http.StatusNotImplemented, "operator key provider not configured on this node")
+		return
+	}
+	var req struct {
+		AssetID               string  `json:"asset_id"`
+		DealerKey             string  `json:"dealer_key"`
+		DealerLEI             string  `json:"dealer_lei"`
+		FeeRebateBps          int     `json:"fee_rebate_bps"`
+		MaxSpreadBps          int     `json:"max_spread_bps"`
+		MinQuoteSize          float64 `json:"min_quote_size"`
+		PriorityAllocationPct float64 `json:"priority_allocation_pct"`
+		MaxPositionUnits      float64 `json:"max_position_units"`
+		MaxPositionValue      float64 `json:"max_position_value"`
+		EffectiveFrom         int64   `json:"effective_from"`
+		EffectiveTo           int64   `json:"effective_to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.AssetID == "" || req.DealerKey == "" || req.DealerLEI == "" {
+		writeError(w, http.StatusBadRequest, "asset_id, dealer_key, and dealer_lei are required")
+		return
+	}
+	if _, err := gonetwork.PublicKeyFromString(req.DealerKey); err != nil {
+		writeError(w, http.StatusBadRequest, "dealer_key is not a valid Ed25519 public key: "+err.Error())
+		return
+	}
+	if !gonetwork.HasEntityRole(s.bc, req.DealerKey, req.DealerLEI, gonetwork.EntityRoleMarketMaker) {
+		writeError(w, http.StatusConflict, "dealer wallet does not hold a market_maker role claim for the supplied dealer_lei")
+		return
+	}
+	agreement, err := gonetwork.NewMarketMakerAgreementWithProvider(
+		s.bc.OperatorKeyProvider,
+		req.AssetID,
+		req.DealerKey,
+		req.DealerLEI,
+		req.FeeRebateBps,
+		req.MaxSpreadBps,
+		req.MinQuoteSize,
+		req.PriorityAllocationPct,
+		req.MaxPositionUnits,
+		req.MaxPositionValue,
+		req.EffectiveFrom,
+		req.EffectiveTo,
+	)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	mtx, err := gonetwork.NewMarketMakerTransaction(s.bc.OperatorKeyProvider, *agreement, gonetwork.MarketMakerActionRegister, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to sign market maker transaction")
+		return
+	}
+
+	s.bc.SealMarketMakerBlock([]gonetwork.MarketMakerTransaction{mtx})
+	writeJSON(w, http.StatusCreated, agreement)
+}
+
+// handleListMarketMakers returns all currently-active market maker agreements for an asset.
+// GET /v1/market-makers/{assetID}
+func (s *Server) handleListMarketMakers(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("assetID")
+	if assetID == "" {
+		writeError(w, http.StatusBadRequest, "assetID is required")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id":   assetID,
+		"agreements": s.bc.MarketMakerRegistry.ActiveAgreementsFor(assetID),
+	})
+}
+
+// handleGetMarketMakerInventory returns inventory/open exposure for one wallet.
+// GET /v1/market-makers/{walletKey}/inventory
+func (s *Server) handleGetMarketMakerInventory(w http.ResponseWriter, r *http.Request) {
+	targetWallet := r.PathValue("walletKey")
+	if targetWallet == "" {
+		writeError(w, http.StatusBadRequest, "walletKey is required")
+		return
+	}
+	caller := walletFromCtx(r)
+	if caller != targetWallet {
+		if len(s.adminWalletKeys) > 0 && !s.adminWalletKeys[caller] {
+			writeError(w, http.StatusForbidden, "caller must be the wallet owner or an admin")
+			return
+		}
+	}
+	report := gonetwork.InventorySnapshot(targetWallet, s.bc)
+	writeJSON(w, http.StatusOK, report)
+}
+
+// handleGetMarketDataVWAP returns a windowed VWAP for an asset.
+// GET /v1/market-data/vwap/{assetID}?window=1h
+func (s *Server) handleGetMarketDataVWAP(w http.ResponseWriter, r *http.Request) {
+	assetID := r.PathValue("assetID")
+	if assetID == "" {
+		writeError(w, http.StatusBadRequest, "assetID is required")
+		return
+	}
+	if _, ok := s.bc.Assets[assetID]; !ok {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	windowStr := strings.TrimSpace(r.URL.Query().Get("window"))
+	if windowStr == "" {
+		windowStr = "24h"
+	}
+	window, err := time.ParseDuration(windowStr)
+	if err != nil || window <= 0 {
+		writeError(w, http.StatusBadRequest, "window must be a positive time.Duration (for example 1h, 24h, 30m)")
+		return
+	}
+	vwap := gonetwork.VWAP(s.bc.Trades, assetID, window)
+	cutoff := time.Now().Add(-window).Unix()
+	tradeCount := 0
+	for _, tr := range s.bc.Trades {
+		if tr.AssetID != assetID {
+			continue
+		}
+		if tr.ExecutedAt != 0 && tr.ExecutedAt < cutoff {
+			continue
+		}
+		tradeCount++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset_id":    assetID,
+		"window":      window.String(),
+		"vwap":        vwap,
+		"trade_count": tradeCount,
+		"as_of":       time.Now().Unix(),
+	})
+}
+
+// handleDeleteMarketMaker revokes an existing designated market maker agreement.
+// DELETE /v1/admin/market-makers/{id}
+func (s *Server) handleDeleteMarketMaker(w http.ResponseWriter, r *http.Request) {
+	if s.bc.OperatorKeyProvider == nil {
+		writeError(w, http.StatusNotImplemented, "operator key provider not configured on this node")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	agreement := s.bc.MarketMakerRegistry.AgreementByID(id)
+	if agreement == nil {
+		writeError(w, http.StatusNotFound, "market maker agreement not found")
+		return
+	}
+	mtx, err := gonetwork.NewMarketMakerTransaction(s.bc.OperatorKeyProvider, *agreement, gonetwork.MarketMakerActionRevoke, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to sign market maker transaction")
+		return
+	}
+
+	s.bc.SealMarketMakerBlock([]gonetwork.MarketMakerTransaction{mtx})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"agreement_id": id,
+		"status":       gonetwork.MarketMakerStatusRevoked,
+	})
 }
 
 // ---------------------------------------------------------------------------

@@ -145,6 +145,7 @@ const (
 	EntityRoleUBO                 EntityRole = "ubo"
 	EntityRoleDirector            EntityRole = "director"
 	EntityRoleSPVAdmin            EntityRole = "spv_admin"
+	EntityRoleMarketMaker         EntityRole = "market_maker"
 )
 
 // entityRoleDataSeparator joins an LEI and role into a Claim.Data string.
