@@ -46,15 +46,56 @@ type devBlockSummary struct {
 // handleDevState returns a comprehensive snapshot of the current blockchain
 // state without authentication.
 // GET /v1/dev/state
+//
+// Each dashboard section is built by a dedicated snapshot function so this
+// handler stays a thin assembler; see devBlockSummaries, devAssetSnapshot,
+// etc. below.
 func (s *Server) handleDevState(w http.ResponseWriter, r *http.Request) {
 	if !s.isDevMode() {
 		writeError(w, http.StatusForbidden, "dev endpoints are disabled when admin keys are configured")
 		return
 	}
 
-	// Block summaries
-	blocks := make([]devBlockSummary, 0, len(s.bc.Blocks))
-	for i, b := range s.bc.Blocks {
+	orderBookSnapshot, openBids, openAsks := devOrderBookSnapshot(s.bc)
+	amendmentList, totalAmendments := devAmendmentSnapshot(s.bc)
+	recentReports, totalReports := devRecentReports(s.bc)
+	pendingSARs := devPendingSARSnapshot(s.bc)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"timestamp":                 time.Now().UTC().Unix(),
+		"block_count":               len(s.bc.Blocks),
+		"blocks":                    devBlockSummaries(s.bc),
+		"asset_count":               len(s.bc.Assets),
+		"assets":                    devAssetSnapshot(s.bc),
+		"trade_count":               len(s.bc.Trades),
+		"trades":                    s.bc.Trades,
+		"open_bid_count":            openBids,
+		"open_ask_count":            openAsks,
+		"order_books":               orderBookSnapshot,
+		"credential_count":          len(s.bc.Credentials),
+		"credentials":               devCredentialSnapshot(s.bc),
+		"deal_count":                len(s.bc.Deals),
+		"deals":                     devDealSnapshot(s.bc),
+		"corporate_actions":         devCorporateActionSnapshot(s.bc),
+		"liquidity_windows":         devLiquidityWindowSnapshot(s.bc),
+		"pending_payments":          devPendingPaymentSnapshot(s.bc),
+		"spvs":                      devSPVSnapshot(s.bc),
+		"pending_countersign_count": devPendingCountersignCount(s.bc),
+		"amendment_count":           totalAmendments,
+		"amendments":                amendmentList,
+		// Part II compliance
+		"pending_sar_count":       len(pendingSARs),
+		"pending_sars":            pendingSARs,
+		"regulatory_report_count": totalReports,
+		"regulatory_reports":      recentReports,
+		"jurisdiction_rules":      devJurisdictionSnapshot(s.bc),
+	})
+}
+
+// devBlockSummaries builds the lightweight per-block summary list.
+func devBlockSummaries(bc *gonetwork.Blockchain) []devBlockSummary {
+	blocks := make([]devBlockSummary, 0, len(bc.Blocks))
+	for i, b := range bc.Blocks {
 		blocks = append(blocks, devBlockSummary{
 			Index:             i,
 			Hash:              b.CalculateHash(),
@@ -65,17 +106,23 @@ func (s *Server) handleDevState(w http.ResponseWriter, r *http.Request) {
 			CredentialTxCount: len(b.CredentialTransactions),
 		})
 	}
+	return blocks
+}
 
-	// Assets
-	assets := make([]any, 0, len(s.bc.Assets))
-	for _, a := range s.bc.Assets {
+// devAssetSnapshot returns every registered asset.
+func devAssetSnapshot(bc *gonetwork.Blockchain) []any {
+	assets := make([]any, 0, len(bc.Assets))
+	for _, a := range bc.Assets {
 		assets = append(assets, a)
 	}
+	return assets
+}
 
-	// Open order count across all order books
-	openBids, openAsks := 0, 0
-	orderBookSnapshot := make([]any, 0, len(s.bc.OrderBooks))
-	for assetID, ob := range s.bc.OrderBooks {
+// devOrderBookSnapshot returns a per-asset order book summary along with the
+// total count of open bids/asks across all order books.
+func devOrderBookSnapshot(bc *gonetwork.Blockchain) (snapshot []any, openBids int, openAsks int) {
+	snapshot = make([]any, 0, len(bc.OrderBooks))
+	for assetID, ob := range bc.OrderBooks {
 		bidCount, askCount := 0, 0
 		for _, o := range ob.Bids {
 			if string(o.Status) == "open" {
@@ -89,7 +136,7 @@ func (s *Server) handleDevState(w http.ResponseWriter, r *http.Request) {
 				openAsks++
 			}
 		}
-		orderBookSnapshot = append(orderBookSnapshot, map[string]any{
+		snapshot = append(snapshot, map[string]any{
 			"asset_id":  assetID,
 			"bid_count": bidCount,
 			"ask_count": askCount,
@@ -97,64 +144,88 @@ func (s *Server) handleDevState(w http.ResponseWriter, r *http.Request) {
 			"asks":      ob.Asks,
 		})
 	}
+	return snapshot, openBids, openAsks
+}
 
-	// Credentials
-	credentials := make([]any, 0, len(s.bc.Credentials))
-	for _, c := range s.bc.Credentials {
+// devCredentialSnapshot returns every issued KYC credential.
+func devCredentialSnapshot(bc *gonetwork.Blockchain) []any {
+	credentials := make([]any, 0, len(bc.Credentials))
+	for _, c := range bc.Credentials {
 		credentials = append(credentials, c)
 	}
+	return credentials
+}
 
-	// Deals
-	deals := make([]any, 0, len(s.bc.Deals))
-	for _, d := range s.bc.Deals {
+// devDealSnapshot returns every registered deal.
+func devDealSnapshot(bc *gonetwork.Blockchain) []any {
+	deals := make([]any, 0, len(bc.Deals))
+	for _, d := range bc.Deals {
 		deals = append(deals, d)
 	}
+	return deals
+}
 
-	// Corporate actions
-	corpActions := make([]any, 0, len(s.bc.PendingCorporateActions))
-	for _, ca := range s.bc.PendingCorporateActions {
+// devCorporateActionSnapshot returns every pending corporate action.
+func devCorporateActionSnapshot(bc *gonetwork.Blockchain) []any {
+	corpActions := make([]any, 0, len(bc.PendingCorporateActions))
+	for _, ca := range bc.PendingCorporateActions {
 		corpActions = append(corpActions, ca)
 	}
+	return corpActions
+}
 
-	// Liquidity windows
+// devLiquidityWindowSnapshot returns every scheduled/open/closed liquidity window.
+func devLiquidityWindowSnapshot(bc *gonetwork.Blockchain) []any {
 	liquidityWindows := make([]any, 0)
-	if s.bc.WindowManager != nil {
-		for _, win := range s.bc.WindowManager.Windows {
+	if bc.WindowManager != nil {
+		for _, win := range bc.WindowManager.Windows {
 			liquidityWindows = append(liquidityWindows, win)
 		}
 	}
+	return liquidityWindows
+}
 
-	// Pending payment instructions
-	pendingPayments := make([]any, 0, len(s.bc.PendingInstructions))
-	for _, p := range s.bc.PendingInstructions {
+// devPendingPaymentSnapshot returns every pending payment instruction.
+func devPendingPaymentSnapshot(bc *gonetwork.Blockchain) []any {
+	pendingPayments := make([]any, 0, len(bc.PendingInstructions))
+	for _, p := range bc.PendingInstructions {
 		pendingPayments = append(pendingPayments, p)
 	}
+	return pendingPayments
+}
 
-	// SPVs (A-04)
-	spvList := make([]any, 0, len(s.bc.SPVs))
-	for _, spv := range s.bc.SPVs {
+// devSPVSnapshot returns every registered SPV (A-04).
+func devSPVSnapshot(bc *gonetwork.Blockchain) []any {
+	spvList := make([]any, 0, len(bc.SPVs))
+	for _, spv := range bc.SPVs {
 		spvList = append(spvList, spv)
 	}
+	return spvList
+}
 
-	// Participation notes awaiting SPV admin countersignature (A-04)
-	pendingCountersign := 0
-	for _, a := range s.bc.Assets {
+// devPendingCountersignCount counts participation notes still awaiting SPV
+// admin countersignature (A-04).
+func devPendingCountersignCount(bc *gonetwork.Blockchain) int {
+	count := 0
+	for _, a := range bc.Assets {
 		if a.AssetType == gonetwork.AssetTypeParticipationNote && a.CirculatingSupply == 0 {
-			pendingCountersign++
+			count++
 		}
 	}
+	return count
+}
 
-	// Legal document amendment log (A-03)
-	totalAmendments := 0
-	for _, list := range s.bc.LegalDocAmendments {
-		totalAmendments += len(list)
+// devAmendmentSnapshot flattens the legal document amendment log (A-03)
+// across all assets (most recent first across all assets) and returns the
+// total amendment count.
+func devAmendmentSnapshot(bc *gonetwork.Blockchain) (list []any, total int) {
+	for _, l := range bc.LegalDocAmendments {
+		total += len(l)
 	}
-
-	// Flatten amendment list for the dashboard (most recent first across all assets)
-	amendmentList := make([]any, 0, totalAmendments)
-	for assetID, list := range s.bc.LegalDocAmendments {
-		for _, am := range list {
-			amendmentList = append(amendmentList, map[string]any{
+	list = make([]any, 0, total)
+	for assetID, l := range bc.LegalDocAmendments {
+		for _, am := range l {
+			list = append(list, map[string]any{
 				"id":                am.ID,
 				"asset_id":          assetID,
 				"previous_doc_hash": am.PreviousDocHash,
@@ -165,63 +236,43 @@ func (s *Server) handleDevState(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	return list, total
+}
 
-	// ── Part II compliance state ─────────────────────────────────────────
-
-	// Pending SARs (G-09)
-	pendingSARs := make([]any, 0, len(s.bc.PendingSARs))
-	for _, sar := range s.bc.PendingSARs {
+// devPendingSARSnapshot returns pending Suspicious Activity Report drafts (G-09).
+func devPendingSARSnapshot(bc *gonetwork.Blockchain) []any {
+	pendingSARs := make([]any, 0, len(bc.PendingSARs))
+	for _, sar := range bc.PendingSARs {
 		if sar.Status == gonetwork.SARStatusPending {
 			pendingSARs = append(pendingSARs, sar)
 		}
 	}
+	return pendingSARs
+}
 
-	// Recent regulatory reports — last 50 (G-10)
-	allReports := s.bc.RegulatoryReports
+// devRecentReports returns the most recent 50 regulatory reports (G-10) and
+// the total report count.
+func devRecentReports(bc *gonetwork.Blockchain) (recent []any, total int) {
+	allReports := bc.RegulatoryReports
+	total = len(allReports)
 	reportStart := 0
-	if len(allReports) > 50 {
-		reportStart = len(allReports) - 50
+	if total > 50 {
+		reportStart = total - 50
 	}
-	recentReports := make([]any, 0, len(allReports)-reportStart)
+	recent = make([]any, 0, total-reportStart)
 	for _, rep := range allReports[reportStart:] {
-		recentReports = append(recentReports, rep)
+		recent = append(recent, rep)
 	}
+	return recent, total
+}
 
-	// Jurisdiction rules snapshot (G-11)
-	jurisdictions := make(map[string]any, len(s.bc.JurisdictionRules))
-	for code, rule := range s.bc.JurisdictionRules {
+// devJurisdictionSnapshot returns the jurisdiction rules table (G-11).
+func devJurisdictionSnapshot(bc *gonetwork.Blockchain) map[string]any {
+	jurisdictions := make(map[string]any, len(bc.JurisdictionRules))
+	for code, rule := range bc.JurisdictionRules {
 		jurisdictions[code] = rule
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"timestamp":                 time.Now().UTC().Unix(),
-		"block_count":               len(s.bc.Blocks),
-		"blocks":                    blocks,
-		"asset_count":               len(s.bc.Assets),
-		"assets":                    assets,
-		"trade_count":               len(s.bc.Trades),
-		"trades":                    s.bc.Trades,
-		"open_bid_count":            openBids,
-		"open_ask_count":            openAsks,
-		"order_books":               orderBookSnapshot,
-		"credential_count":          len(s.bc.Credentials),
-		"credentials":               credentials,
-		"deal_count":                len(s.bc.Deals),
-		"deals":                     deals,
-		"corporate_actions":         corpActions,
-		"liquidity_windows":         liquidityWindows,
-		"pending_payments":          pendingPayments,
-		"spvs":                      spvList,
-		"pending_countersign_count": pendingCountersign,
-		"amendment_count":           totalAmendments,
-		"amendments":                amendmentList,
-		// Part II compliance
-		"pending_sar_count":       len(pendingSARs),
-		"pending_sars":            pendingSARs,
-		"regulatory_report_count": len(allReports),
-		"regulatory_reports":      recentReports,
-		"jurisdiction_rules":      jurisdictions,
-	})
+	return jurisdictions
 }
 
 // ---------------------------------------------------------------------------

@@ -112,6 +112,67 @@ func TestRFQAccept_HappyPathAndDoubleAcceptRejected(t *testing.T) {
 	assert.Len(t, bc.Trades, 1)
 }
 
+// TestRFQAccept_PartialFill_LeavesRemainderOpen verifies the settleRFQFill fix:
+// accepting a quote smaller than the request's remaining quantity reduces the
+// request's Quantity and leaves it Quoted (not force-closed), so the balance
+// can still be filled by another quote. Only once the remainder is fully
+// consumed does the request transition to Accepted and its other quotes get
+// rejected.
+func TestRFQAccept_PartialFill_LeavesRemainderOpen(t *testing.T) {
+	bc := newRFQTestBlockchain(t)
+	requesterKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	dealerKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	otherDealerKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	requesterKeyStr := base64.StdEncoding.EncodeToString(requesterKey.Public().Bytes())
+	dealerKeyStr := seedDesignatedMarketMaker(t, bc, "ASSET-001", dealerKey, "549300ACMECORP0023")
+	otherDealerKeyStr := seedDesignatedMarketMaker(t, bc, "ASSET-001", otherDealerKey, "549300ACMECORP0024")
+	bc.Assets["ASSET-001"] = &Asset{ID: "ASSET-001", Name: "Alpha", Currency: "EUR", AssetType: AssetTypeEquity, CirculatingSupply: 20}
+	bc.Holdings[HoldingKey(dealerKeyStr, "ASSET-001")] = &AssetHolding{AssetID: "ASSET-001", HolderID: dealerKeyStr, Balance: 20}
+	bc.Holdings[HoldingKey(otherDealerKeyStr, "ASSET-001")] = &AssetHolding{AssetID: "ASSET-001", HolderID: otherDealerKeyStr, Balance: 20}
+
+	// Requester wants 10 units; dealer only quotes 4 (partial), otherDealer quotes 10.
+	request, err := NewRFQRequest(requesterKey, "ASSET-001", OrderSideBid, 10, 12.5, time.Now().Unix()+300)
+	require.NoError(t, err)
+	quote1, err := NewRFQQuote(dealerKey, request.ID, 12.0, 4, time.Now().Unix()+300)
+	require.NoError(t, err)
+	quote2, err := NewRFQQuote(otherDealerKey, request.ID, 12.2, 10, time.Now().Unix()+300)
+	require.NoError(t, err)
+
+	bc.SealRFQBlock([]RFQTransaction{{Tx: Transaction{Sender: requesterKeyStr, RequiredSigs: 0}, Action: RFQActionRequest, Request: *request}})
+	bc.SealRFQBlock([]RFQTransaction{{Tx: Transaction{Sender: dealerKeyStr, RequiredSigs: 0}, Action: RFQActionQuote, Quote: *quote1}})
+	bc.SealRFQBlock([]RFQTransaction{{Tx: Transaction{Sender: otherDealerKeyStr, RequiredSigs: 0}, Action: RFQActionQuote, Quote: *quote2}})
+
+	// Accept the smaller quote first: only 4 of the 10 requested units are filled.
+	bc.SealRFQBlock([]RFQTransaction{{Tx: Transaction{Sender: requesterKeyStr, RequiredSigs: 0}, Action: RFQActionAccept, Request: *request, AcceptID: quote1.ID}})
+
+	require.Len(t, bc.Trades, 1)
+	assert.InDelta(t, 4.0, bc.Trades[0].Quantity, 1e-9)
+	require.NotNil(t, bc.RFQRequests[request.ID])
+	assert.Equal(t, RFQRequestStatusQuoted, bc.RFQRequests[request.ID].Status,
+		"request must remain open (Quoted) after a partial fill, not be force-closed")
+	assert.InDelta(t, 6.0, bc.RFQRequests[request.ID].Quantity, 1e-9,
+		"remaining quantity must be reduced by the filled amount")
+	assert.Equal(t, RFQQuoteStatusAccepted, bc.RFQQuotes[request.ID][0].Status)
+	assert.Equal(t, RFQQuoteStatusActive, bc.RFQQuotes[request.ID][1].Status,
+		"sibling active quotes must NOT be rejected while the request still has an unfilled balance")
+
+	// Accept the second quote for the remaining balance: request is now fully filled.
+	bc.SealRFQBlock([]RFQTransaction{{Tx: Transaction{Sender: requesterKeyStr, RequiredSigs: 0}, Action: RFQActionAccept, Request: *request, AcceptID: quote2.ID}})
+
+	require.Len(t, bc.Trades, 2)
+	assert.InDelta(t, 6.0, bc.Trades[1].Quantity, 1e-9)
+	assert.Equal(t, RFQRequestStatusAccepted, bc.RFQRequests[request.ID].Status)
+	assert.InDelta(t, 0.0, bc.RFQRequests[request.ID].Quantity, 1e-9)
+	assert.Equal(t, RFQQuoteStatusAccepted, bc.RFQQuotes[request.ID][1].Status)
+	assert.InDelta(t, 10.0, bc.Holdings[HoldingKey(requesterKeyStr, "ASSET-001")].Balance, 1e-9)
+	assert.InDelta(t, 16.0, bc.Holdings[HoldingKey(dealerKeyStr, "ASSET-001")].Balance, 1e-9)
+	assert.InDelta(t, 14.0, bc.Holdings[HoldingKey(otherDealerKeyStr, "ASSET-001")].Balance, 1e-9)
+}
+
 func TestExpireRFQRequestsQuotesAndCancel(t *testing.T) {
 	bc := newRFQTestBlockchain(t)
 	requesterKey, err := GeneratePrivateKey()

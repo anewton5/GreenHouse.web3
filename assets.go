@@ -363,6 +363,10 @@ func NewAssetTransaction(
 // pendingActions is the blockchain's PendingCorporateActions map. Pass nil to skip
 // the ROFR check (e.g. in tests that don't exercise ROFR logic).
 // AML screening is optional: pass an AMLScreener as the last variadic argument.
+//
+// Validate is a thin orchestrator: each numbered step in the doc comment above
+// is delegated to a dedicated, independently-testable helper, invoked in the
+// same order listed above. Every helper receives exactly the inputs it needs.
 func (at *AssetTransaction) Validate(
 	bc *Blockchain,
 	assets map[string]*Asset,
@@ -371,80 +375,132 @@ func (at *AssetTransaction) Validate(
 	pendingActions map[string]*CorporateAction,
 	screener ...AMLScreener,
 ) error {
-	// 0. AML screening — runs before any other check so blocked parties are
-	// rejected immediately rather than after expensive validation work.
-	if len(screener) > 0 && screener[0] != nil {
-		asset0, ok0 := assets[at.AssetID]
-		currency := ""
-		if ok0 {
-			currency = asset0.Currency
-		}
-		alert, err := screener[0].ScreenTransaction(
-			at.Tx.Sender, at.Tx.Receiver, at.AssetID, at.Tx.Amount, currency,
-		)
-		if err != nil {
-			return fmt.Errorf("aml screening error: %w", err)
-		}
-		if alert != nil && alert.Severity == AMLSeverityBlock {
-			return fmt.Errorf("transaction blocked by AML screening: %s (list: %s)",
-				alert.Reason, alert.MatchedList)
-		}
-		// 0a. AMLSeverityFlag: record a SAR draft for compliance officer review.
-		// The transaction is not blocked but the flag is durably stored and emitted
-		// as an event so the issuer portal can surface it immediately.
-		if alert != nil && alert.Severity == AMLSeverityFlag && bc != nil {
-			sarID := generateID("SAR")
-			bc.PendingSARs[sarID] = &SARDraft{
-				ID:          sarID,
-				SenderKey:   at.Tx.Sender,
-				ReceiverKey: at.Tx.Receiver,
-				AssetID:     at.AssetID,
-				Amount:      at.Tx.Amount,
-				Currency:    currency,
-				Reason:      alert.Reason,
-				MatchedList: alert.MatchedList,
-				CreatedAt:   time.Now().Unix(),
-				Status:      SARStatusPending,
-			}
-			bc.emitEvent(EventSARCreated, map[string]any{
-				"sar_id":       sarID,
-				"sender_key":   at.Tx.Sender,
-				"receiver_key": at.Tx.Receiver,
-				"asset_id":     at.AssetID,
-				"matched_list": alert.MatchedList,
-				"source":       "aml_validate",
-			})
-		}
+	if err := at.screenAML(bc, assets, screener); err != nil {
+		return err
 	}
 
-	// 1. Asset must exist in the registry.
+	asset, err := at.resolveAssetAndVerifyIssuer(assets)
+	if err != nil {
+		return err
+	}
+
+	if err := at.verifyBaseFieldsAndSignature(); err != nil {
+		return err
+	}
+
+	if err := at.applyTypeSpecificRules(asset, holdings); err != nil {
+		return err
+	}
+
+	if err := at.checkMaxHoldersAndROFR(asset, holdings, pendingActions); err != nil {
+		return err
+	}
+
+	if err := at.checkCredentialEligibility(asset, credentials); err != nil {
+		return err
+	}
+
+	if err := at.checkJurisdictionRule(bc, asset, holdings, credentials); err != nil {
+		return err
+	}
+
+	if err := at.checkMiFIDSuitability(bc, asset); err != nil {
+		return err
+	}
+
+	if err := at.checkProspectusLimits(bc, asset, credentials); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// screenAML implements step 0/0a: AML screening runs before any other check so
+// blocked parties are rejected immediately rather than after expensive
+// validation work. Skipped entirely when no screener is supplied.
+func (at *AssetTransaction) screenAML(bc *Blockchain, assets map[string]*Asset, screener []AMLScreener) error {
+	if len(screener) == 0 || screener[0] == nil {
+		return nil
+	}
+	asset0, ok0 := assets[at.AssetID]
+	currency := ""
+	if ok0 {
+		currency = asset0.Currency
+	}
+	alert, err := screener[0].ScreenTransaction(
+		at.Tx.Sender, at.Tx.Receiver, at.AssetID, at.Tx.Amount, currency,
+	)
+	if err != nil {
+		return fmt.Errorf("aml screening error: %w", err)
+	}
+	if alert != nil && alert.Severity == AMLSeverityBlock {
+		return fmt.Errorf("transaction blocked by AML screening: %s (list: %s)",
+			alert.Reason, alert.MatchedList)
+	}
+	// 0a. AMLSeverityFlag: record a SAR draft for compliance officer review.
+	// The transaction is not blocked but the flag is durably stored and emitted
+	// as an event so the issuer portal can surface it immediately.
+	if alert != nil && alert.Severity == AMLSeverityFlag && bc != nil {
+		sarID := generateID("SAR")
+		bc.PendingSARs[sarID] = &SARDraft{
+			ID:          sarID,
+			SenderKey:   at.Tx.Sender,
+			ReceiverKey: at.Tx.Receiver,
+			AssetID:     at.AssetID,
+			Amount:      at.Tx.Amount,
+			Currency:    currency,
+			Reason:      alert.Reason,
+			MatchedList: alert.MatchedList,
+			CreatedAt:   time.Now().Unix(),
+			Status:      SARStatusPending,
+		}
+		bc.emitEvent(EventSARCreated, map[string]any{
+			"sar_id":       sarID,
+			"sender_key":   at.Tx.Sender,
+			"receiver_key": at.Tx.Receiver,
+			"asset_id":     at.AssetID,
+			"matched_list": alert.MatchedList,
+			"source":       "aml_validate",
+		})
+	}
+	return nil
+}
+
+// resolveAssetAndVerifyIssuer implements steps 1 and 1b: the asset must exist,
+// and if it carries an issuer signature that signature must still verify
+// (detects post-creation tampering of asset fields).
+func (at *AssetTransaction) resolveAssetAndVerifyIssuer(assets map[string]*Asset) (*Asset, error) {
 	asset, ok := assets[at.AssetID]
 	if !ok {
-		return fmt.Errorf("unknown asset ID: %s", at.AssetID)
+		return nil, fmt.Errorf("unknown asset ID: %s", at.AssetID)
 	}
 
-	// 1b. Issuer signature must be intact — detects any post-creation tampering of
-	// asset fields (e.g. TotalSupply inflation, metadata mutation).
 	// Assets created via NewAsset() carry a signature; assets built directly in
 	// the API handler (no private key available) have IssuerSignature == nil and
 	// skip this check, relying on JWT authentication as the identity anchor.
 	if len(asset.IssuerSignature) > 0 {
 		issuerPub, keyErr := PublicKeyFromString(asset.Issuer)
 		if keyErr != nil {
-			return fmt.Errorf("asset %s has a malformed issuer key: %w", asset.ID, keyErr)
+			return nil, fmt.Errorf("asset %s has a malformed issuer key: %w", asset.ID, keyErr)
 		}
 		if !asset.VerifyIssuerSignature(issuerPub) {
-			return fmt.Errorf("asset %s has an invalid issuer signature: record may have been tampered", asset.ID)
+			return nil, fmt.Errorf("asset %s has an invalid issuer signature: record may have been tampered", asset.ID)
 		}
 	}
 
-	// 2. Quantity must be positive (also enforced by VerifyTransaction, but checked
+	return asset, nil
+}
+
+// verifyBaseFieldsAndSignature implements steps 2-4: quantity must be
+// positive, sender/receiver must be present, and the embedded Transaction
+// signature must verify against the sender's public key.
+func (at *AssetTransaction) verifyBaseFieldsAndSignature() error {
+	// Quantity must be positive (also enforced by VerifyTransaction, but checked
 	// here first to give a cleaner error message in asset context).
 	if at.Tx.Amount <= 0 {
 		return fmt.Errorf("quantity must be greater than zero, got %g", at.Tx.Amount)
 	}
 
-	// 3. Sender and receiver must be present.
 	if at.Tx.Sender == "" {
 		return fmt.Errorf("sender must not be empty")
 	}
@@ -452,8 +508,8 @@ func (at *AssetTransaction) Validate(
 		return fmt.Errorf("receiver must not be empty")
 	}
 
-	// 4. Signature must be valid. Decodes sender's public key from the Sender field
-	// and verifies the embedded Transaction signature.
+	// Decodes sender's public key from the Sender field and verifies the
+	// embedded Transaction signature.
 	senderPubKey, err := PublicKeyFromString(at.Tx.Sender)
 	if err != nil {
 		return fmt.Errorf("invalid sender public key: %w", err)
@@ -462,6 +518,13 @@ func (at *AssetTransaction) Validate(
 		return fmt.Errorf("invalid transaction signature: %w", err)
 	}
 
+	return nil
+}
+
+// applyTypeSpecificRules implements steps 5-7: Issue transactions require the
+// issuer to be the sender (and, for participation notes, SPV countersignature);
+// Transfer/Redeem transactions require sufficient, unlocked sender balance.
+func (at *AssetTransaction) applyTypeSpecificRules(asset *Asset, holdings map[string]*AssetHolding) error {
 	switch at.TxType {
 	case AssetTxTypeIssue:
 		// 5. Only the asset issuer may issue new tokens.
@@ -502,6 +565,13 @@ func (at *AssetTransaction) Validate(
 		return fmt.Errorf("unknown asset transaction type: %q", at.TxType)
 	}
 
+	return nil
+}
+
+// checkMaxHoldersAndROFR implements steps 8 and 8b: enforce the asset's
+// MaxHolders cap when a transfer would introduce a new holder, and suspend
+// the transfer for a right-of-first-refusal corporate action when configured.
+func (at *AssetTransaction) checkMaxHoldersAndROFR(asset *Asset, holdings map[string]*AssetHolding, pendingActions map[string]*CorporateAction) error {
 	// 8. MaxHolders: if a transfer would introduce a new holder, check the limit.
 	if at.TxType == AssetTxTypeTransfer && asset.Restrictions.MaxHolders > 0 {
 		receiverHoldingKey := HoldingKey(at.Tx.Receiver, at.AssetID)
@@ -531,65 +601,76 @@ func (at *AssetTransaction) Validate(
 		}
 	}
 
-	// 10. Credential-based checks: AccreditedOnly and BlockedJurisdictions.
-	// Skipped entirely when credentials map is nil (e.g., Week 1 tests, dev mode).
-	if credentials != nil {
-		if err := CheckTransferEligibility(at.Tx.Receiver, asset, credentials); err != nil {
-			return err
-		}
-	}
-
-	// 11. Jurisdiction rule enforcement (Transfer only; requires bc != nil).
-	// Looks up the JurisdictionRule keyed by the receiver's credential jurisdiction
-	// and calls ApplyJurisdictionRule to enforce blocked asset types, ticket-size
-	// limits, and the per-jurisdiction retail holder cap.
-	if bc != nil && at.TxType == AssetTxTypeTransfer && credentials != nil {
-		if receiverCred := credentials[at.Tx.Receiver]; receiverCred != nil {
-			if rule, ok := bc.JurisdictionRules[receiverCred.Jurisdiction]; ok {
-				senderCred := credentials[at.Tx.Sender]
-				// Live count of retail holders of this asset in the receiver's
-				// jurisdiction, so ApplyJurisdictionRule can enforce the
-				// per-jurisdiction retail cap without a caller-maintained counter.
-				currentRetailCount := CountJurisdictionRetailHolders(at.AssetID, receiverCred.Jurisdiction, holdings, credentials)
-				// Use at.Tx.Amount as EUR-denominated ticket value proxy.
-				// Accurate when asset.Currency == "EUR"; for other currencies the
-				// caller should apply FX conversion before calling Validate.
-				if err := ApplyJurisdictionRule(rule, senderCred, receiverCred, asset, at.Tx.Amount, currentRetailCount); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	// 12. MiFID II suitability check (Transfer only; complex instruments; requires bc != nil).
-	// Warrants and convertibles require a positive SuitabilityAssessment on the
-	// receiver's wallet before a transfer is permitted (MiFID II Art. 25).
-	if bc != nil && at.TxType == AssetTxTypeTransfer {
-		if err := CheckSuitability(at.Tx.Receiver, asset, bc.SuitabilityAssessments); err != nil {
-			return err
-		}
-	}
-
-	// 13. Prospectus exemption cap and €8M rolling value threshold (Transfer only; requires bc != nil).
-	// Enforces the Prospectus Regulation Art. 3(2) per-jurisdiction retail investor cap
-	// and the Art. 3(2) / national-law €8M 12-month value ceiling.
-	if bc != nil && at.TxType == AssetTxTypeTransfer {
-		if exemption, ok := bc.ProspectusExemptions[at.AssetID]; ok {
-			var receiverCred *CredentialAttestation
-			if credentials != nil {
-				receiverCred = credentials[at.Tx.Receiver]
-			}
-			if err := CheckProspectusLimits(receiverCred, exemption); err != nil {
-				return err
-			}
-			// Use at.Tx.Amount as EUR proxy (see note at check 11 above).
-			if err := CheckProspectusValueThreshold(exemption, at.Tx.Amount); err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
+}
+
+// checkCredentialEligibility implements step 10: AccreditedOnly and
+// BlockedJurisdictions restrictions. Skipped entirely when credentials is nil
+// (e.g., Week 1 tests, dev mode).
+func (at *AssetTransaction) checkCredentialEligibility(asset *Asset, credentials map[string]*CredentialAttestation) error {
+	if credentials == nil {
+		return nil
+	}
+	return CheckTransferEligibility(at.Tx.Receiver, asset, credentials)
+}
+
+// checkJurisdictionRule implements step 11: looks up the JurisdictionRule
+// keyed by the receiver's credential jurisdiction and calls ApplyJurisdictionRule
+// to enforce blocked asset types, ticket-size limits, and the per-jurisdiction
+// retail holder cap. Transfer only; requires bc != nil.
+func (at *AssetTransaction) checkJurisdictionRule(bc *Blockchain, asset *Asset, holdings map[string]*AssetHolding, credentials map[string]*CredentialAttestation) error {
+	if bc == nil || at.TxType != AssetTxTypeTransfer || credentials == nil {
+		return nil
+	}
+	receiverCred := credentials[at.Tx.Receiver]
+	if receiverCred == nil {
+		return nil
+	}
+	rule, ok := bc.JurisdictionRules[receiverCred.Jurisdiction]
+	if !ok {
+		return nil
+	}
+	senderCred := credentials[at.Tx.Sender]
+	// Live count of retail holders of this asset in the receiver's
+	// jurisdiction, so ApplyJurisdictionRule can enforce the
+	// per-jurisdiction retail cap without a caller-maintained counter.
+	currentRetailCount := CountJurisdictionRetailHolders(at.AssetID, receiverCred.Jurisdiction, holdings, credentials)
+	// Use at.Tx.Amount as EUR-denominated ticket value proxy.
+	// Accurate when asset.Currency == "EUR"; for other currencies the
+	// caller should apply FX conversion before calling Validate.
+	return ApplyJurisdictionRule(rule, senderCred, receiverCred, asset, at.Tx.Amount, currentRetailCount)
+}
+
+// checkMiFIDSuitability implements step 12: warrants and convertibles require
+// a positive SuitabilityAssessment on the receiver's wallet before a transfer
+// is permitted (MiFID II Art. 25). Transfer only; requires bc != nil.
+func (at *AssetTransaction) checkMiFIDSuitability(bc *Blockchain, asset *Asset) error {
+	if bc == nil || at.TxType != AssetTxTypeTransfer {
+		return nil
+	}
+	return CheckSuitability(at.Tx.Receiver, asset, bc.SuitabilityAssessments)
+}
+
+// checkProspectusLimits implements step 13: enforces the Prospectus Regulation
+// Art. 3(2) per-jurisdiction retail investor cap and the €8M 12-month value
+// ceiling. Transfer only; requires bc != nil.
+func (at *AssetTransaction) checkProspectusLimits(bc *Blockchain, asset *Asset, credentials map[string]*CredentialAttestation) error {
+	if bc == nil || at.TxType != AssetTxTypeTransfer {
+		return nil
+	}
+	exemption, ok := bc.ProspectusExemptions[at.AssetID]
+	if !ok {
+		return nil
+	}
+	var receiverCred *CredentialAttestation
+	if credentials != nil {
+		receiverCred = credentials[at.Tx.Receiver]
+	}
+	if err := CheckProspectusLimits(receiverCred, exemption); err != nil {
+		return err
+	}
+	// Use at.Tx.Amount as EUR proxy (see note in checkJurisdictionRule above).
+	return CheckProspectusValueThreshold(exemption, at.Tx.Amount)
 }
 
 // CheckTransferEligibility verifies that a receiver wallet is eligible to hold

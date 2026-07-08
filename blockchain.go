@@ -966,14 +966,31 @@ func (bc *Blockchain) executeTradeDVP(trade Trade, atx *AssetTransaction) error 
 // that identical state transitions occur regardless of how a block was produced.
 //
 // applyBlockState must only be called while bc.Mu is held by the caller.
+// applyBlockState is a thin orchestrator: each transaction family's state
+// transition lives in a dedicated helper below, invoked in the same order as
+// before so identical state transitions occur regardless of how a block was
+// produced.
 func (bc *Blockchain) applyBlockState(block *Block) {
-	// 1. Expire stale payment instructions before running the matching engine.
+	// Expire stale payment instructions and RFQ state before running the
+	// matching engine.
 	bc.ExpireStaleInstructions()
 	bc.ExpireRFQRequests()
 	bc.ExpireRFQQuotes()
 
-	// 2. Apply asset transactions.
-	for _, tx := range block.AssetTransactions {
+	bc.applyAssetTransactions(block.AssetTransactions)
+	bc.applyCredentialTransactions(block.CredentialTransactions)
+	bc.applyClaimIssuerTransactions(block.ClaimIssuerTransactions)
+	bc.applyClaimTransactions(block.ClaimTransactions)
+	bc.applyMarketMakerTransactions(block.MarketMakerTransactions)
+	bc.applyRFQTransactions(block.RFQTransactions, block.Index)
+	bc.applyOrderTransactions(block.OrderTransactions)
+	bc.runMatchingEngine()
+	bc.updateProspectusThresholds()
+}
+
+// applyAssetTransactions validates and applies every AssetTransaction in a block.
+func (bc *Blockchain) applyAssetTransactions(txs []AssetTransaction) {
+	for _, tx := range txs {
 		if err := tx.Validate(bc, bc.Assets, bc.Holdings, bc.Credentials, bc.PendingCorporateActions, bc.AMLScreener); err != nil {
 			fmt.Printf("Skipping invalid asset tx: %v\n", err)
 			continue
@@ -982,9 +999,11 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			fmt.Printf("Failed to apply asset tx: %v\n", err)
 		}
 	}
+}
 
-	// 3. Apply credential transactions.
-	for _, ct := range block.CredentialTransactions {
+// applyCredentialTransactions applies every CredentialTransaction in a block.
+func (bc *Blockchain) applyCredentialTransactions(txs []CredentialTransaction) {
+	for _, ct := range txs {
 		bc.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
 		bc.emitEvent(EventCredentialIssued, map[string]any{
 			"wallet_key":     ct.Attestation.WalletPublicKey,
@@ -993,9 +1012,12 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			"expires_at":     ct.Attestation.ExpiresAt,
 		})
 	}
+}
 
-	// 3b. Apply claim-issuer governance transactions (trusted-issuer add/remove).
-	for _, cit := range block.ClaimIssuerTransactions {
+// applyClaimIssuerTransactions applies trusted-issuer add/remove governance
+// transactions (Phase 2 claim-topic architecture).
+func (bc *Blockchain) applyClaimIssuerTransactions(txs []ClaimIssuerTransaction) {
+	for _, cit := range txs {
 		switch cit.Action {
 		case ClaimIssuerActionAdd:
 			bc.TrustedIssuers.AddIssuer(cit.Topic, cit.IssuerKey)
@@ -1008,9 +1030,12 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			"action":     cit.Action,
 		})
 	}
+}
 
-	// 3c. Apply claim transactions (topic-scoped eligibility attestations).
-	for _, ctx := range block.ClaimTransactions {
+// applyClaimTransactions applies topic-scoped eligibility attestations
+// (Phase 2 claim-topic architecture).
+func (bc *Blockchain) applyClaimTransactions(txs []ClaimTransaction) {
+	for _, ctx := range txs {
 		c := ctx.Claim
 		bc.Claims[c.Subject] = append(bc.Claims[c.Subject], &c)
 		bc.emitEvent(EventClaimIssued, map[string]any{
@@ -1020,9 +1045,12 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			"expires_at": c.ExpiresAt,
 		})
 	}
+}
 
-	// 3d. Apply market-maker governance transactions.
-	for _, mtx := range block.MarketMakerTransactions {
+// applyMarketMakerTransactions applies designated-market-maker governance
+// transactions (register/revoke).
+func (bc *Blockchain) applyMarketMakerTransactions(txs []MarketMakerTransaction) {
+	for _, mtx := range txs {
 		switch mtx.Action {
 		case MarketMakerActionRegister:
 			if err := bc.MarketMakerRegistry.RegisterMarketMaker(&mtx.Agreement); err != nil {
@@ -1058,222 +1086,304 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			bc.emitEvent(EventMarketMakerRevoked, payload)
 		}
 	}
+}
 
-	// 3e. Apply RFQ transactions.
-	for _, rtx := range block.RFQTransactions {
+// applyRFQTransactions dispatches every RFQTransaction in a block to the
+// handler for its action.
+func (bc *Blockchain) applyRFQTransactions(txs []RFQTransaction, blockIndex int) {
+	for _, rtx := range txs {
 		switch rtx.Action {
 		case RFQActionRequest:
-			req := rtx.Request
-			if req.ID == "" {
-				fmt.Println("Skipping RFQ request with empty ID")
-				continue
-			}
-			if req.Status == "" {
-				req.Status = RFQRequestStatusOpen
-			}
-			bc.RFQRequests[req.ID] = &req
-			bc.emitEvent(EventRFQRequestCreated, map[string]any{
-				"request_id":  req.ID,
-				"asset_id":    req.AssetID,
-				"requester":   req.RequesterKey,
-				"side":        req.Side,
-				"quantity":    req.Quantity,
-				"limit_price": req.LimitPrice,
-				"expires_at":  req.ExpiresAt,
-			})
+			bc.applyRFQRequest(rtx)
 		case RFQActionQuote:
-			quote := rtx.Quote
-			req := bc.RFQRequests[quote.RequestID]
-			if req == nil {
-				fmt.Printf("Skipping RFQ quote %s: request %s not found\n", quote.ID, quote.RequestID)
-				continue
-			}
-			if req.Status == RFQRequestStatusAccepted || req.Status == RFQRequestStatusCancelled || req.Status == RFQRequestStatusExpired || req.IsExpired() {
-				fmt.Printf("Skipping RFQ quote %s: request %s is not open\n", quote.ID, quote.RequestID)
-				continue
-			}
-			if !bc.MarketMakerRegistry.IsDesignatedMarketMaker(req.AssetID, quote.DealerKey) {
-				fmt.Printf("Skipping RFQ quote %s: dealer %s is not a designated market maker for asset %s\n", quote.ID, quote.DealerKey, req.AssetID)
-				continue
-			}
-			if quote.Status == "" {
-				quote.Status = RFQQuoteStatusActive
-			}
-			bc.RFQQuotes[quote.RequestID] = append(bc.RFQQuotes[quote.RequestID], &quote)
-			if req.Status == RFQRequestStatusOpen {
-				req.Status = RFQRequestStatusQuoted
-			}
-			bc.emitEvent(EventRFQQuoteSubmitted, map[string]any{
-				"request_id": quote.RequestID,
-				"quote_id":   quote.ID,
-				"dealer_key": quote.DealerKey,
-				"price":      quote.Price,
-				"quantity":   quote.Quantity,
-				"expires_at": quote.ExpiresAt,
-			})
+			bc.applyRFQQuote(rtx)
 		case RFQActionAccept:
-			requestID := rtx.Request.ID
-			if requestID == "" {
-				for candidateRequestID, quotes := range bc.RFQQuotes {
-					for _, quote := range quotes {
-						if quote != nil && quote.ID == rtx.AcceptID {
-							requestID = candidateRequestID
-							break
-						}
-					}
-					if requestID != "" {
-						break
-					}
-				}
-			}
-			req := bc.RFQRequests[requestID]
-			if req == nil {
-				fmt.Printf("Skipping RFQ accept for quote %s: request not found\n", rtx.AcceptID)
-				continue
-			}
-			if req.RequesterKey != rtx.Tx.Sender {
-				fmt.Printf("Skipping RFQ accept for request %s: sender %s is not requester %s\n", req.ID, rtx.Tx.Sender, req.RequesterKey)
-				continue
-			}
-			if req.Status == RFQRequestStatusAccepted || req.Status == RFQRequestStatusCancelled || req.Status == RFQRequestStatusExpired || req.IsExpired() {
-				fmt.Printf("Skipping RFQ accept for request %s: request is not open\n", req.ID)
-				continue
-			}
-			quotes := bc.RFQQuotes[req.ID]
-			var acceptedQuote *RFQQuote
-			for _, quote := range quotes {
-				if quote != nil && quote.ID == rtx.AcceptID {
-					acceptedQuote = quote
+			bc.applyRFQAccept(rtx, blockIndex)
+		case RFQActionCancel:
+			bc.applyRFQCancel(rtx)
+		}
+	}
+}
+
+// applyRFQRequest registers a new open RFQ request.
+func (bc *Blockchain) applyRFQRequest(rtx RFQTransaction) {
+	req := rtx.Request
+	if req.ID == "" {
+		fmt.Println("Skipping RFQ request with empty ID")
+		return
+	}
+	if req.Status == "" {
+		req.Status = RFQRequestStatusOpen
+	}
+	bc.RFQRequests[req.ID] = &req
+	bc.emitEvent(EventRFQRequestCreated, map[string]any{
+		"request_id":  req.ID,
+		"asset_id":    req.AssetID,
+		"requester":   req.RequesterKey,
+		"side":        req.Side,
+		"quantity":    req.Quantity,
+		"limit_price": req.LimitPrice,
+		"expires_at":  req.ExpiresAt,
+	})
+}
+
+// applyRFQQuote records a designated market maker's quote against an open
+// RFQ request.
+func (bc *Blockchain) applyRFQQuote(rtx RFQTransaction) {
+	quote := rtx.Quote
+	req := bc.RFQRequests[quote.RequestID]
+	if req == nil {
+		fmt.Printf("Skipping RFQ quote %s: request %s not found\n", quote.ID, quote.RequestID)
+		return
+	}
+	if req.Status == RFQRequestStatusAccepted || req.Status == RFQRequestStatusCancelled || req.Status == RFQRequestStatusExpired || req.IsExpired() {
+		fmt.Printf("Skipping RFQ quote %s: request %s is not open\n", quote.ID, quote.RequestID)
+		return
+	}
+	if !bc.MarketMakerRegistry.IsDesignatedMarketMaker(req.AssetID, quote.DealerKey) {
+		fmt.Printf("Skipping RFQ quote %s: dealer %s is not a designated market maker for asset %s\n", quote.ID, quote.DealerKey, req.AssetID)
+		return
+	}
+	if quote.Status == "" {
+		quote.Status = RFQQuoteStatusActive
+	}
+	bc.RFQQuotes[quote.RequestID] = append(bc.RFQQuotes[quote.RequestID], &quote)
+	if req.Status == RFQRequestStatusOpen {
+		req.Status = RFQRequestStatusQuoted
+	}
+	bc.emitEvent(EventRFQQuoteSubmitted, map[string]any{
+		"request_id": quote.RequestID,
+		"quote_id":   quote.ID,
+		"dealer_key": quote.DealerKey,
+		"price":      quote.Price,
+		"quantity":   quote.Quantity,
+		"expires_at": quote.ExpiresAt,
+	})
+}
+
+// applyRFQCancel cancels an open RFQ request and rejects its active quotes.
+func (bc *Blockchain) applyRFQCancel(rtx RFQTransaction) {
+	req := bc.RFQRequests[rtx.Request.ID]
+	if req == nil {
+		fmt.Printf("Skipping RFQ cancel: request %s not found\n", rtx.Request.ID)
+		return
+	}
+	if req.RequesterKey != rtx.Tx.Sender {
+		fmt.Printf("Skipping RFQ cancel: sender %s is not requester %s\n", rtx.Tx.Sender, req.RequesterKey)
+		return
+	}
+	if req.Status == RFQRequestStatusAccepted || req.Status == RFQRequestStatusExpired {
+		return
+	}
+	req.Status = RFQRequestStatusCancelled
+	for _, quote := range bc.RFQQuotes[req.ID] {
+		if quote != nil && quote.Status == RFQQuoteStatusActive {
+			quote.Status = RFQQuoteStatusRejected
+		}
+	}
+}
+
+// applyRFQAccept implements RFQActionAccept: resolves the request+quote pair,
+// re-validates every guard condition, and (if all pass) settles the trade.
+func (bc *Blockchain) applyRFQAccept(rtx RFQTransaction, blockIndex int) {
+	req, quote, ok := bc.resolveRFQAcceptTargets(rtx)
+	if !ok {
+		return
+	}
+	asset, buyerID, sellerID, quantity, ok := bc.prepareRFQAcceptTrade(req, quote)
+	if !ok {
+		return
+	}
+	bc.settleRFQAccept(req, quote, asset, buyerID, sellerID, quantity, blockIndex)
+}
+
+// resolveRFQAcceptTargets locates the RFQRequest and RFQQuote referenced by an
+// RFQActionAccept transaction and re-validates ownership, request status, and
+// quote status/expiry/limit-price. Returns ok=false (having already logged
+// the reason) when the accept cannot proceed.
+func (bc *Blockchain) resolveRFQAcceptTargets(rtx RFQTransaction) (req *RFQRequest, quote *RFQQuote, ok bool) {
+	requestID := rtx.Request.ID
+	if requestID == "" {
+		for candidateRequestID, quotes := range bc.RFQQuotes {
+			for _, q := range quotes {
+				if q != nil && q.ID == rtx.AcceptID {
+					requestID = candidateRequestID
 					break
 				}
 			}
-			if acceptedQuote == nil {
-				fmt.Printf("Skipping RFQ accept for request %s: quote %s not found\n", req.ID, rtx.AcceptID)
-				continue
-			}
-			if acceptedQuote.Status != RFQQuoteStatusActive || acceptedQuote.IsExpired() {
-				fmt.Printf("Skipping RFQ accept for request %s: quote %s is not active\n", req.ID, acceptedQuote.ID)
-				continue
-			}
-			if req.LimitPrice > 0 {
-				if req.Side == OrderSideBid && acceptedQuote.Price > req.LimitPrice {
-					fmt.Printf("Skipping RFQ accept for request %s: quote price %.4f exceeds bid limit %.4f\n", req.ID, acceptedQuote.Price, req.LimitPrice)
-					continue
-				}
-				if req.Side == OrderSideAsk && acceptedQuote.Price < req.LimitPrice {
-					fmt.Printf("Skipping RFQ accept for request %s: quote price %.4f below ask limit %.4f\n", req.ID, acceptedQuote.Price, req.LimitPrice)
-					continue
-				}
-			}
-			quantity := req.Quantity
-			if acceptedQuote.Quantity < quantity {
-				quantity = acceptedQuote.Quantity
-			}
-			asset := bc.Assets[req.AssetID]
-			if asset == nil {
-				fmt.Printf("Skipping RFQ accept for request %s: asset %s not found\n", req.ID, req.AssetID)
-				continue
-			}
-			buyerID := req.RequesterKey
-			sellerID := acceptedQuote.DealerKey
-			if req.Side == OrderSideAsk {
-				buyerID = acceptedQuote.DealerKey
-				sellerID = req.RequesterKey
-			}
-			// Defense-in-depth: re-run the same position-limit and compliance
-			// checks the API layer runs before sealing, so a trade cannot be
-			// executed here without them regardless of how this RFQTransaction
-			// reached applyBlockState (see AUDIT §14.2 findings 1-2).
-			if buyerID == acceptedQuote.DealerKey {
-				if err := checkMarketMakerPositionLimitLocked(bc, acceptedQuote.DealerKey, req.AssetID, quantity); err != nil {
-					fmt.Printf("Skipping RFQ accept for request %s: %v\n", req.ID, err)
-					continue
-				}
-			}
-			if err := bc.ValidateRFQAcceptCompliance(buyerID, sellerID, asset, quantity, acceptedQuote.Price, "rfq:"+acceptedQuote.ID); err != nil {
-				fmt.Printf("Skipping RFQ accept for request %s: compliance check failed: %v\n", req.ID, err)
-				continue
-			}
-			tradeIDHash := sha3.Sum256([]byte(fmt.Sprintf("rfq:%s:%s:%d", req.ID, acceptedQuote.ID, time.Now().UnixNano())))
-			trade := Trade{
-				ID:         hex.EncodeToString(tradeIDHash[:]),
-				AssetID:    req.AssetID,
-				BidOrderID: "rfq:" + req.ID,
-				AskOrderID: "rfq:" + acceptedQuote.ID,
-				BuyerID:    buyerID,
-				SellerID:   sellerID,
-				Price:      acceptedQuote.Price,
-				Quantity:   quantity,
-				Currency:   asset.Currency,
-				ExecutedAt: time.Now().Unix(),
-			}
-			atx := &AssetTransaction{
-				Tx: Transaction{
-					Sender:       sellerID,
-					Receiver:     buyerID,
-					Amount:       quantity,
-					RequiredSigs: 1,
-					Nonce:        time.Now().UnixNano(),
-				},
-				AssetID: req.AssetID,
-				TxType:  AssetTxTypeTransfer,
-			}
-			bc.Trades = append(bc.Trades, trade)
-			bc.emitEvent(EventTradeExecuted, map[string]any{
-				"trade_id":  trade.ID,
-				"asset_id":  trade.AssetID,
-				"quantity":  trade.Quantity,
-				"price":     trade.Price,
-				"currency":  trade.Currency,
-				"buyer_id":  trade.BuyerID,
-				"seller_id": trade.SellerID,
-			})
-			bc.detectSTORs(trade)
-			if err := bc.executeTradeDVP(trade, atx); err != nil {
-				fmt.Printf("RFQ DVP settle failed for trade %s: %v\n", trade.ID, err)
-				continue
-			}
-			acceptedQuote.Status = RFQQuoteStatusAccepted
-			for _, quote := range quotes {
-				if quote != nil && quote.ID != acceptedQuote.ID && quote.Status == RFQQuoteStatusActive {
-					quote.Status = RFQQuoteStatusRejected
-				}
-			}
-			req.Status = RFQRequestStatusAccepted
-			GenerateMiFIRReport(bc, trade, block.Index)
-			GenerateAIFMDReport(bc, trade, block.Index)
-			bc.emitEvent(EventRFQAccepted, map[string]any{
-				"request_id": req.ID,
-				"quote_id":   acceptedQuote.ID,
-				"trade_id":   trade.ID,
-				"asset_id":   trade.AssetID,
-				"quantity":   trade.Quantity,
-				"price":      trade.Price,
-			})
-		case RFQActionCancel:
-			req := bc.RFQRequests[rtx.Request.ID]
-			if req == nil {
-				fmt.Printf("Skipping RFQ cancel: request %s not found\n", rtx.Request.ID)
-				continue
-			}
-			if req.RequesterKey != rtx.Tx.Sender {
-				fmt.Printf("Skipping RFQ cancel: sender %s is not requester %s\n", rtx.Tx.Sender, req.RequesterKey)
-				continue
-			}
-			if req.Status == RFQRequestStatusAccepted || req.Status == RFQRequestStatusExpired {
-				continue
-			}
-			req.Status = RFQRequestStatusCancelled
-			for _, quote := range bc.RFQQuotes[req.ID] {
-				if quote != nil && quote.Status == RFQQuoteStatusActive {
-					quote.Status = RFQQuoteStatusRejected
-				}
+			if requestID != "" {
+				break
 			}
 		}
 	}
+	req = bc.RFQRequests[requestID]
+	if req == nil {
+		fmt.Printf("Skipping RFQ accept for quote %s: request not found\n", rtx.AcceptID)
+		return nil, nil, false
+	}
+	if req.RequesterKey != rtx.Tx.Sender {
+		fmt.Printf("Skipping RFQ accept for request %s: sender %s is not requester %s\n", req.ID, rtx.Tx.Sender, req.RequesterKey)
+		return nil, nil, false
+	}
+	if req.Status == RFQRequestStatusAccepted || req.Status == RFQRequestStatusCancelled || req.Status == RFQRequestStatusExpired || req.IsExpired() {
+		fmt.Printf("Skipping RFQ accept for request %s: request is not open\n", req.ID)
+		return nil, nil, false
+	}
 
-	// 4. Apply order transactions (add new orders / process cancellations).
-	for _, ot := range block.OrderTransactions {
+	for _, q := range bc.RFQQuotes[req.ID] {
+		if q != nil && q.ID == rtx.AcceptID {
+			quote = q
+			break
+		}
+	}
+	if quote == nil {
+		fmt.Printf("Skipping RFQ accept for request %s: quote %s not found\n", req.ID, rtx.AcceptID)
+		return nil, nil, false
+	}
+	if quote.Status != RFQQuoteStatusActive || quote.IsExpired() {
+		fmt.Printf("Skipping RFQ accept for request %s: quote %s is not active\n", req.ID, quote.ID)
+		return nil, nil, false
+	}
+	if req.LimitPrice > 0 {
+		if req.Side == OrderSideBid && quote.Price > req.LimitPrice {
+			fmt.Printf("Skipping RFQ accept for request %s: quote price %.4f exceeds bid limit %.4f\n", req.ID, quote.Price, req.LimitPrice)
+			return nil, nil, false
+		}
+		if req.Side == OrderSideAsk && quote.Price < req.LimitPrice {
+			fmt.Printf("Skipping RFQ accept for request %s: quote price %.4f below ask limit %.4f\n", req.ID, quote.Price, req.LimitPrice)
+			return nil, nil, false
+		}
+	}
+	return req, quote, true
+}
+
+// prepareRFQAcceptTrade resolves the asset, buyer/seller, and fill quantity
+// for an accepted RFQ quote, then re-runs the position-limit and AML/MiFID
+// compliance checks the API layer already ran before sealing — defense in
+// depth so a trade cannot be executed here without them regardless of how
+// this RFQTransaction reached applyBlockState (see AUDIT §14.2 findings 1-2).
+func (bc *Blockchain) prepareRFQAcceptTrade(req *RFQRequest, quote *RFQQuote) (asset *Asset, buyerID string, sellerID string, quantity float64, ok bool) {
+	quantity = req.Quantity
+	if quote.Quantity < quantity {
+		quantity = quote.Quantity
+	}
+	asset, exists := bc.Assets[req.AssetID]
+	if !exists {
+		fmt.Printf("Skipping RFQ accept for request %s: asset %s not found\n", req.ID, req.AssetID)
+		return nil, "", "", 0, false
+	}
+	buyerID = req.RequesterKey
+	sellerID = quote.DealerKey
+	if req.Side == OrderSideAsk {
+		buyerID = quote.DealerKey
+		sellerID = req.RequesterKey
+	}
+	if buyerID == quote.DealerKey {
+		if err := checkMarketMakerPositionLimitLocked(bc, quote.DealerKey, req.AssetID, quantity); err != nil {
+			fmt.Printf("Skipping RFQ accept for request %s: %v\n", req.ID, err)
+			return nil, "", "", 0, false
+		}
+	}
+	if err := bc.ValidateRFQAcceptCompliance(buyerID, sellerID, asset, quantity, quote.Price, "rfq:"+quote.ID); err != nil {
+		fmt.Printf("Skipping RFQ accept for request %s: compliance check failed: %v\n", req.ID, err)
+		return nil, "", "", 0, false
+	}
+	return asset, buyerID, sellerID, quantity, true
+}
+
+// settleRFQAccept executes the DVP trade for an accepted RFQ quote and
+// records the resulting fill via settleRFQFill.
+func (bc *Blockchain) settleRFQAccept(req *RFQRequest, quote *RFQQuote, asset *Asset, buyerID, sellerID string, quantity float64, blockIndex int) {
+	tradeIDHash := sha3.Sum256([]byte(fmt.Sprintf("rfq:%s:%s:%d", req.ID, quote.ID, time.Now().UnixNano())))
+	trade := Trade{
+		ID:         hex.EncodeToString(tradeIDHash[:]),
+		AssetID:    req.AssetID,
+		BidOrderID: "rfq:" + req.ID,
+		AskOrderID: "rfq:" + quote.ID,
+		BuyerID:    buyerID,
+		SellerID:   sellerID,
+		Price:      quote.Price,
+		Quantity:   quantity,
+		Currency:   asset.Currency,
+		ExecutedAt: time.Now().Unix(),
+	}
+	atx := &AssetTransaction{
+		Tx: Transaction{
+			Sender:       sellerID,
+			Receiver:     buyerID,
+			Amount:       quantity,
+			RequiredSigs: 1,
+			Nonce:        time.Now().UnixNano(),
+		},
+		AssetID: req.AssetID,
+		TxType:  AssetTxTypeTransfer,
+	}
+	bc.Trades = append(bc.Trades, trade)
+	bc.emitEvent(EventTradeExecuted, map[string]any{
+		"trade_id":  trade.ID,
+		"asset_id":  trade.AssetID,
+		"quantity":  trade.Quantity,
+		"price":     trade.Price,
+		"currency":  trade.Currency,
+		"buyer_id":  trade.BuyerID,
+		"seller_id": trade.SellerID,
+	})
+	bc.detectSTORs(trade)
+	if err := bc.executeTradeDVP(trade, atx); err != nil {
+		fmt.Printf("RFQ DVP settle failed for trade %s: %v\n", trade.ID, err)
+		return
+	}
+
+	fullyFilled := bc.settleRFQFill(req, quote, quantity)
+
+	GenerateMiFIRReport(bc, trade, blockIndex)
+	GenerateAIFMDReport(bc, trade, blockIndex)
+	bc.emitEvent(EventRFQAccepted, map[string]any{
+		"request_id":         req.ID,
+		"quote_id":           quote.ID,
+		"trade_id":           trade.ID,
+		"asset_id":           trade.AssetID,
+		"quantity":           trade.Quantity,
+		"price":              trade.Price,
+		"filled_quantity":    quantity,
+		"remaining_quantity": req.Quantity,
+		"fully_filled":       fullyFilled,
+	})
+}
+
+// rfqQuantityEpsilon is the tolerance below which a request's remaining
+// quantity is treated as fully consumed (floating-point fill accounting).
+const rfqQuantityEpsilon = 1e-9
+
+// settleRFQFill records a fill of fillQty against req and marks quote as
+// accepted. If the fill exhausts req's remaining quantity (within
+// rfqQuantityEpsilon) the request is marked Accepted and every other
+// still-active quote for it is rejected — the request is fully done.
+// Otherwise req.Quantity is reduced by fillQty and req.Status is left
+// unchanged (Quoted) so further quotes/accepts can fill the remaining
+// balance, instead of silently dropping the unfilled remainder.
+//
+// Shared by applyRFQAccept (live execution) and catchUpBlock (crash-recovery
+// replay) so both paths compute identical request/quote state.
+func (bc *Blockchain) settleRFQFill(req *RFQRequest, quote *RFQQuote, fillQty float64) (fullyFilled bool) {
+	quote.Status = RFQQuoteStatusAccepted
+	req.Quantity -= fillQty
+	if req.Quantity > rfqQuantityEpsilon {
+		return false
+	}
+	req.Status = RFQRequestStatusAccepted
+	for _, q := range bc.RFQQuotes[req.ID] {
+		if q != nil && q.ID != quote.ID && q.Status == RFQQuoteStatusActive {
+			q.Status = RFQQuoteStatusRejected
+		}
+	}
+	return true
+}
+
+// applyOrderTransactions adds new orders to their order book (creating the
+// book on first use) or processes cancellations.
+func (bc *Blockchain) applyOrderTransactions(txs []OrderTransaction) {
+	for _, ot := range txs {
 		if ot.IsCancellation {
 			if ob, ok := bc.OrderBooks[ot.Order.AssetID]; ok {
 				if err := ob.CancelOrder(ot.Order.ID, ot.Tx.Sender); err != nil {
@@ -1306,9 +1416,13 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			})
 		}
 	}
+}
 
-	// 5. Run the matching engine for all order books.
-	// Window-managed assets are matched by Tick() on window close; skip them here.
+// runMatchingEngine ticks the liquidity WindowManager and runs the CLOB
+// matching engine for every non-window-managed order book, settling each
+// resulting trade via the shared DVP helper.
+func (bc *Blockchain) runMatchingEngine() {
+	// Window-managed assets are matched by Tick() on window close; skip them below.
 	if bc.WindowManager != nil {
 		windowResults := bc.WindowManager.Tick(bc)
 		bc.WindowResults = append(bc.WindowResults, windowResults...)
@@ -1343,15 +1457,18 @@ func (bc *Blockchain) applyBlockState(block *Block) {
 			// MAR Article 16: detect market-manipulation patterns on every trade.
 			bc.detectSTORs(trade)
 
-			// 6-8. Reuse the shared DVP helper for CLOB settlement as well so the
+			// Reuse the shared DVP helper for CLOB settlement as well so the
 			// matching, RFQ, and liquidity-window paths share one settlement primitive.
 			if err := bc.executeTradeDVP(trade, assetTxs[i]); err != nil {
 				fmt.Printf("DVP settle failed for trade %s: %v\n", trade.ID, err)
 			}
 		}
 	}
+}
 
-	// 9. Update prospectus retail-holder counts and emit threshold warnings.
+// updateProspectusThresholds refreshes prospectus retail-holder counts and
+// emits threshold warnings.
+func (bc *Blockchain) updateProspectusThresholds() {
 	for _, pe := range bc.ProspectusExemptions {
 		UpdateRetailCounts(pe, bc.Holdings, bc.Credentials)
 	}
@@ -2045,8 +2162,34 @@ func verifyTypedTransactionBaseSignature(tx Transaction) bool {
 	return tx.VerifyMultiSignature([]*PublicKey{pubKey})
 }
 
+// validateTypedTransactions verifies the embedded signatures for every typed
+// transaction family in a block. It is a thin orchestrator: each family's
+// checks live in a dedicated helper below, invoked in the same order as
+// today so the exact stop-on-first-failure behavior and log lines are
+// preserved.
 func (bc *Blockchain) validateTypedTransactions(block Block) bool {
-	for _, at := range block.AssetTransactions {
+	if !validateAssetTxSignatures(block.AssetTransactions) {
+		return false
+	}
+	if !validateOrderTxSignatures(block.OrderTransactions) {
+		return false
+	}
+	if !bc.validateCredentialTxSignatures(block.CredentialTransactions) {
+		return false
+	}
+	if !validateRFQTxSignatures(block.RFQTransactions) {
+		return false
+	}
+	if !bc.validateMarketMakerTxSignatures(block.MarketMakerTransactions) {
+		return false
+	}
+	return true
+}
+
+// validateAssetTxSignatures verifies the sender signature on every
+// AssetTransaction that carries RequiredSigs > 0.
+func validateAssetTxSignatures(txs []AssetTransaction) bool {
+	for _, at := range txs {
 		if at.Tx.RequiredSigs == 0 {
 			continue
 		}
@@ -2060,8 +2203,13 @@ func (bc *Blockchain) validateTypedTransactions(block Block) bool {
 			return false
 		}
 	}
+	return true
+}
 
-	for _, ot := range block.OrderTransactions {
+// validateOrderTxSignatures verifies the placer signature on every
+// non-cancellation OrderTransaction.
+func validateOrderTxSignatures(txs []OrderTransaction) bool {
+	for _, ot := range txs {
 		if ot.IsCancellation {
 			continue
 		}
@@ -2075,107 +2223,147 @@ func (bc *Blockchain) validateTypedTransactions(block Block) bool {
 			return false
 		}
 	}
+	return true
+}
 
-	if bc != nil && bc.IdentityRegistry != nil {
-		regPub := bc.IdentityRegistry.RegistryPublicKey()
-		for _, ct := range block.CredentialTransactions {
-			a := &ct.Attestation
-			if len(a.RegistrySignature) == 0 {
-				fmt.Printf("Invalid block: CredentialTransaction for wallet %s has no registry signature\n", a.WalletPublicKey)
-				return false
-			}
-			credHashBytes, err := hex.DecodeString(a.CredentialHash)
-			if err != nil || len(credHashBytes) == 0 {
-				fmt.Printf("Invalid block: CredentialTransaction for wallet %s has invalid CredentialHash\n", a.WalletPublicKey)
-				return false
-			}
-			sig := &Signature{value: a.RegistrySignature}
-			if !sig.Verify(regPub, credHashBytes) {
-				fmt.Printf("Invalid block: CredentialTransaction for wallet %s has invalid registry signature\n", a.WalletPublicKey)
-				return false
-			}
-		}
+// validateCredentialTxSignatures verifies the registry signature on every
+// CredentialTransaction. Skipped entirely when bc.IdentityRegistry is nil
+// (dev/test posture), matching today's behavior.
+func (bc *Blockchain) validateCredentialTxSignatures(txs []CredentialTransaction) bool {
+	if bc == nil || bc.IdentityRegistry == nil {
+		return true
 	}
-
-	for _, rtx := range block.RFQTransactions {
-		switch rtx.Action {
-		case RFQActionRequest:
-			if rtx.Request.ID == "" || rtx.Request.RequesterKey == "" {
-				fmt.Println("Invalid block: RFQ request is missing id or requester key")
-				return false
-			}
-			if rtx.Tx.Sender != "" && rtx.Tx.Sender != rtx.Request.RequesterKey {
-				fmt.Println("Invalid block: RFQ request sender does not match requester")
-				return false
-			}
-			requesterPub, err := PublicKeyFromString(rtx.Request.RequesterKey)
-			if err != nil {
-				fmt.Printf("Invalid block: RFQ request has invalid requester key: %v\n", err)
-				return false
-			}
-			if !rtx.Request.VerifySignature(requesterPub) {
-				fmt.Printf("Invalid block: RFQ request %s has invalid requester signature\n", rtx.Request.ID)
-				return false
-			}
-			if rtx.Tx.RequiredSigs > 0 && !verifyTypedTransactionBaseSignature(rtx.Tx) {
-				fmt.Printf("Invalid block: RFQ request %s has invalid base transaction signature\n", rtx.Request.ID)
-				return false
-			}
-		case RFQActionQuote:
-			if rtx.Quote.ID == "" || rtx.Quote.RequestID == "" || rtx.Quote.DealerKey == "" {
-				fmt.Println("Invalid block: RFQ quote is missing id, request_id, or dealer_key")
-				return false
-			}
-			if rtx.Tx.Sender != "" && rtx.Tx.Sender != rtx.Quote.DealerKey {
-				fmt.Println("Invalid block: RFQ quote sender does not match dealer")
-				return false
-			}
-			dealerPub, err := PublicKeyFromString(rtx.Quote.DealerKey)
-			if err != nil {
-				fmt.Printf("Invalid block: RFQ quote has invalid dealer key: %v\n", err)
-				return false
-			}
-			if !rtx.Quote.VerifySignature(dealerPub) {
-				fmt.Printf("Invalid block: RFQ quote %s has invalid dealer signature\n", rtx.Quote.ID)
-				return false
-			}
-			if rtx.Tx.RequiredSigs > 0 && !verifyTypedTransactionBaseSignature(rtx.Tx) {
-				fmt.Printf("Invalid block: RFQ quote %s has invalid base transaction signature\n", rtx.Quote.ID)
-				return false
-			}
-		case RFQActionAccept, RFQActionCancel:
-			if rtx.Request.ID == "" || rtx.Request.RequesterKey == "" {
-				fmt.Println("Invalid block: RFQ accept/cancel is missing embedded request metadata")
-				return false
-			}
-			if rtx.Tx.Sender != "" && rtx.Tx.Sender != rtx.Request.RequesterKey {
-				fmt.Println("Invalid block: RFQ accept/cancel sender does not match requester")
-				return false
-			}
-			requesterPub, err := PublicKeyFromString(rtx.Request.RequesterKey)
-			if err != nil {
-				fmt.Printf("Invalid block: RFQ accept/cancel has invalid requester key: %v\n", err)
-				return false
-			}
-			if !rtx.Request.VerifySignature(requesterPub) {
-				fmt.Printf("Invalid block: RFQ request %s embedded in accept/cancel has invalid requester signature\n", rtx.Request.ID)
-				return false
-			}
-			if rtx.Action == RFQActionAccept && rtx.AcceptID == "" {
-				fmt.Println("Invalid block: RFQ accept is missing accept_id")
-				return false
-			}
-			if rtx.Tx.RequiredSigs > 0 && !verifyTypedTransactionBaseSignature(rtx.Tx) {
-				fmt.Printf("Invalid block: RFQ %s for request %s has invalid base transaction signature\n", rtx.Action, rtx.Request.ID)
-				return false
-			}
-		default:
-			fmt.Printf("Invalid block: unknown RFQ action %q\n", rtx.Action)
+	regPub := bc.IdentityRegistry.RegistryPublicKey()
+	for _, ct := range txs {
+		a := &ct.Attestation
+		if len(a.RegistrySignature) == 0 {
+			fmt.Printf("Invalid block: CredentialTransaction for wallet %s has no registry signature\n", a.WalletPublicKey)
+			return false
+		}
+		credHashBytes, err := hex.DecodeString(a.CredentialHash)
+		if err != nil || len(credHashBytes) == 0 {
+			fmt.Printf("Invalid block: CredentialTransaction for wallet %s has invalid CredentialHash\n", a.WalletPublicKey)
+			return false
+		}
+		sig := &Signature{value: a.RegistrySignature}
+		if !sig.Verify(regPub, credHashBytes) {
+			fmt.Printf("Invalid block: CredentialTransaction for wallet %s has invalid registry signature\n", a.WalletPublicKey)
 			return false
 		}
 	}
+	return true
+}
 
-	for _, mtx := range block.MarketMakerTransactions {
+// validateRFQTxSignatures verifies the signature(s) on every RFQTransaction,
+// dispatching per action to a dedicated checker.
+func validateRFQTxSignatures(txs []RFQTransaction) bool {
+	for _, rtx := range txs {
+		if !rfqTxSignatureValid(rtx) {
+			return false
+		}
+	}
+	return true
+}
+
+// rfqTxSignatureValid verifies a single RFQTransaction's signature(s)
+// according to its action.
+func rfqTxSignatureValid(rtx RFQTransaction) bool {
+	switch rtx.Action {
+	case RFQActionRequest:
+		return validateRFQRequestSig(rtx)
+	case RFQActionQuote:
+		return validateRFQQuoteSig(rtx)
+	case RFQActionAccept, RFQActionCancel:
+		return validateRFQAcceptOrCancelSig(rtx)
+	default:
+		fmt.Printf("Invalid block: unknown RFQ action %q\n", rtx.Action)
+		return false
+	}
+}
+
+func validateRFQRequestSig(rtx RFQTransaction) bool {
+	if rtx.Request.ID == "" || rtx.Request.RequesterKey == "" {
+		fmt.Println("Invalid block: RFQ request is missing id or requester key")
+		return false
+	}
+	if rtx.Tx.Sender != "" && rtx.Tx.Sender != rtx.Request.RequesterKey {
+		fmt.Println("Invalid block: RFQ request sender does not match requester")
+		return false
+	}
+	requesterPub, err := PublicKeyFromString(rtx.Request.RequesterKey)
+	if err != nil {
+		fmt.Printf("Invalid block: RFQ request has invalid requester key: %v\n", err)
+		return false
+	}
+	if !rtx.Request.VerifySignature(requesterPub) {
+		fmt.Printf("Invalid block: RFQ request %s has invalid requester signature\n", rtx.Request.ID)
+		return false
+	}
+	if rtx.Tx.RequiredSigs > 0 && !verifyTypedTransactionBaseSignature(rtx.Tx) {
+		fmt.Printf("Invalid block: RFQ request %s has invalid base transaction signature\n", rtx.Request.ID)
+		return false
+	}
+	return true
+}
+
+func validateRFQQuoteSig(rtx RFQTransaction) bool {
+	if rtx.Quote.ID == "" || rtx.Quote.RequestID == "" || rtx.Quote.DealerKey == "" {
+		fmt.Println("Invalid block: RFQ quote is missing id, request_id, or dealer_key")
+		return false
+	}
+	if rtx.Tx.Sender != "" && rtx.Tx.Sender != rtx.Quote.DealerKey {
+		fmt.Println("Invalid block: RFQ quote sender does not match dealer")
+		return false
+	}
+	dealerPub, err := PublicKeyFromString(rtx.Quote.DealerKey)
+	if err != nil {
+		fmt.Printf("Invalid block: RFQ quote has invalid dealer key: %v\n", err)
+		return false
+	}
+	if !rtx.Quote.VerifySignature(dealerPub) {
+		fmt.Printf("Invalid block: RFQ quote %s has invalid dealer signature\n", rtx.Quote.ID)
+		return false
+	}
+	if rtx.Tx.RequiredSigs > 0 && !verifyTypedTransactionBaseSignature(rtx.Tx) {
+		fmt.Printf("Invalid block: RFQ quote %s has invalid base transaction signature\n", rtx.Quote.ID)
+		return false
+	}
+	return true
+}
+
+func validateRFQAcceptOrCancelSig(rtx RFQTransaction) bool {
+	if rtx.Request.ID == "" || rtx.Request.RequesterKey == "" {
+		fmt.Println("Invalid block: RFQ accept/cancel is missing embedded request metadata")
+		return false
+	}
+	if rtx.Tx.Sender != "" && rtx.Tx.Sender != rtx.Request.RequesterKey {
+		fmt.Println("Invalid block: RFQ accept/cancel sender does not match requester")
+		return false
+	}
+	requesterPub, err := PublicKeyFromString(rtx.Request.RequesterKey)
+	if err != nil {
+		fmt.Printf("Invalid block: RFQ accept/cancel has invalid requester key: %v\n", err)
+		return false
+	}
+	if !rtx.Request.VerifySignature(requesterPub) {
+		fmt.Printf("Invalid block: RFQ request %s embedded in accept/cancel has invalid requester signature\n", rtx.Request.ID)
+		return false
+	}
+	if rtx.Action == RFQActionAccept && rtx.AcceptID == "" {
+		fmt.Println("Invalid block: RFQ accept is missing accept_id")
+		return false
+	}
+	if rtx.Tx.RequiredSigs > 0 && !verifyTypedTransactionBaseSignature(rtx.Tx) {
+		fmt.Printf("Invalid block: RFQ %s for request %s has invalid base transaction signature\n", rtx.Action, rtx.Request.ID)
+		return false
+	}
+	return true
+}
+
+// validateMarketMakerTxSignatures verifies the base transaction signature and
+// operator signature on every MarketMakerTransaction.
+func (bc *Blockchain) validateMarketMakerTxSignatures(txs []MarketMakerTransaction) bool {
+	for _, mtx := range txs {
 		if mtx.Tx.RequiredSigs > 0 && !verifyTypedTransactionBaseSignature(mtx.Tx) {
 			fmt.Printf("Invalid block: MarketMakerTransaction for agreement %s has invalid base transaction signature\n", mtx.Agreement.ID)
 			return false
@@ -2187,50 +2375,95 @@ func (bc *Blockchain) validateTypedTransactions(block Block) bool {
 			}
 		}
 	}
+	return true
+}
+
+// ValidateBlock is a thin orchestrator that runs each structural/signature
+// check in the same order as before, stopping at the first failure (matching
+// the original short-circuit behavior and log lines exactly).
+func (bc *Blockchain) ValidateBlock(block Block) bool {
+	if !bc.verifyPrevHashLinkage(block) {
+		return false
+	}
+	if !verifyPayloadHashIntegrity(block) {
+		return false
+	}
+	if !blockHasAnyTransactions(&block) {
+		fmt.Println("Invalid block: contains no transactions of any kind")
+		return false
+	}
+	if !bc.rejectDuplicateTxHashes(&block) {
+		return false
+	}
+	if !verifyBaseTransactions(block.Transactions) {
+		return false
+	}
+	if !bc.validateTypedTransactions(block) {
+		return false
+	}
+	if !bc.verifyClaimTransactionSignatures(block.ClaimTransactions) {
+		return false
+	}
+	if !bc.verifyClaimIssuerSignatures(block.ClaimIssuerTransactions) {
+		return false
+	}
+	if !bc.verifyDelegateSignatures(block) {
+		return false
+	}
+
+	fmt.Println("Block validated successfully")
 
 	return true
 }
 
-func (bc *Blockchain) ValidateBlock(block Block) bool {
-	// Check if the block's previous hash matches the hash of the last block in the chain
-	if len(bc.Blocks) > 0 {
-		lastBlock := bc.Blocks[len(bc.Blocks)-1]
-		if block.PrevHash != lastBlock.CalculateHash() {
-			fmt.Printf("Invalid block: previous hash does not match (expected: %s, got: %s)\n", lastBlock.CalculateHash(), block.PrevHash)
-			return false
-		}
+// verifyPrevHashLinkage checks that the block's previous hash matches the
+// hash of the last block in the chain (no-op for the genesis case).
+func (bc *Blockchain) verifyPrevHashLinkage(block Block) bool {
+	if len(bc.Blocks) == 0 {
+		return true
 	}
-
-	// Verify that PayloadHash is consistent with the block's content. Any field
-	// covered by blockHashInput (including SealedAt) that is altered after sealing
-	// will produce a different hash and fail this check. A missing PayloadHash
-	// (empty string) is allowed only for legacy / test blocks that never went
-	// through AddBlock.
-	if block.PayloadHash != "" {
-		originalHash := block.PayloadHash
-		block.SetPayloadHash()
-		if block.PayloadHash != originalHash {
-			fmt.Printf("Invalid block: PayloadHash does not match block content (got %s, recomputed %s)\n", originalHash, block.PayloadHash)
-			return false
-		}
-		block.PayloadHash = originalHash // restore for downstream signature checks
-	}
-
-	// Block must contain at least one transaction family.
-	if len(block.Transactions) == 0 && len(block.AssetTransactions) == 0 &&
-		len(block.OrderTransactions) == 0 && len(block.CredentialTransactions) == 0 &&
-		len(block.ClaimTransactions) == 0 && len(block.ClaimIssuerTransactions) == 0 &&
-		len(block.RFQTransactions) == 0 &&
-		len(block.MarketMakerTransactions) == 0 {
-		fmt.Println("Invalid block: contains no transactions of any kind")
+	lastBlock := bc.Blocks[len(bc.Blocks)-1]
+	if block.PrevHash != lastBlock.CalculateHash() {
+		fmt.Printf("Invalid block: previous hash does not match (expected: %s, got: %s)\n", lastBlock.CalculateHash(), block.PrevHash)
 		return false
 	}
+	return true
+}
 
-	// Item 24: reject duplicate transactions already committed on-chain and
-	// reject duplicate transaction hashes repeated within the same block.
+// verifyPayloadHashIntegrity checks that PayloadHash is consistent with the
+// block's content. Any field covered by blockHashInput (including SealedAt)
+// that is altered after sealing will produce a different hash and fail this
+// check. A missing PayloadHash (empty string) is allowed only for legacy /
+// test blocks that never went through AddBlock. block is taken by value, so
+// the recompute-and-compare below never mutates the caller's block.
+func verifyPayloadHashIntegrity(block Block) bool {
+	if block.PayloadHash == "" {
+		return true
+	}
+	originalHash := block.PayloadHash
+	block.SetPayloadHash()
+	if block.PayloadHash != originalHash {
+		fmt.Printf("Invalid block: PayloadHash does not match block content (got %s, recomputed %s)\n", originalHash, block.PayloadHash)
+		return false
+	}
+	return true
+}
+
+// blockHasAnyTransactions reports whether block contains at least one
+// transaction of any family. Reuses blockTransactionHashKeys so "what counts
+// as a transaction family" is defined in exactly one place (previously
+// duplicated here as an 8-term boolean expression).
+func blockHasAnyTransactions(block *Block) bool {
+	return len(blockTransactionHashKeys(block)) > 0
+}
+
+// rejectDuplicateTxHashes implements Item 24: reject duplicate transactions
+// already committed on-chain and reject duplicate transaction hashes repeated
+// within the same block.
+func (bc *Blockchain) rejectDuplicateTxHashes(block *Block) bool {
 	committed := bc.committedTxHashesSnapshot()
 	seen := make(map[string]struct{})
-	for _, key := range blockTransactionHashKeys(&block) {
+	for _, key := range blockTransactionHashKeys(block) {
 		if _, exists := seen[key]; exists {
 			bc.recordDuplicateTxHashRejection(key, "duplicate_within_block")
 			fmt.Printf("Invalid block: duplicate transaction hash within block (%s)\n", key)
@@ -2243,12 +2476,15 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			return false
 		}
 	}
+	return true
+}
 
-	// Verify all transactions in the block
-	for _, tx := range block.Transactions {
+// verifyBaseTransactions verifies signature and field validity for every
+// legacy base Transaction in the block.
+func verifyBaseTransactions(txs []Transaction) bool {
+	for _, tx := range txs {
 		fmt.Printf("Validating transaction from %s to %s\n", tx.Sender, tx.Receiver)
 
-		// Decode sender's public key
 		pubKey, err := PublicKeyFromString(tx.Sender)
 		if err != nil {
 			fmt.Printf("Invalid block: error decoding sender's public key (%v)\n", err)
@@ -2257,13 +2493,11 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 
 		pubKeys := []*PublicKey{pubKey}
 
-		// Verify transaction signatures
 		if !tx.VerifyMultiSignature(pubKeys) {
 			fmt.Println("Invalid block: contains invalid multi-signature transaction")
 			return false
 		}
 
-		// Verify transaction fields
 		if tx.Amount <= 0 {
 			fmt.Println("Invalid block: transaction amount must be greater than zero")
 			return false
@@ -2273,16 +2507,16 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			return false
 		}
 	}
-	if !bc.validateTypedTransactions(block) {
-		return false
-	}
+	return true
+}
 
-	// Phase 2: verify ClaimTransaction issuer signatures. Trust is additionally
-	// enforced once at least one issuer has been registered in
-	// bc.TrustedIssuers; an empty registry means no trust policy has been
-	// configured yet (dev/test posture), matching how CredentialTransaction
-	// verification is skipped when bc.IdentityRegistry is nil.
-	for _, ctx := range block.ClaimTransactions {
+// verifyClaimTransactionSignatures verifies every ClaimTransaction's issuer
+// signature (Phase 2). Trust is additionally enforced once at least one
+// issuer has been registered in bc.TrustedIssuers; an empty registry means no
+// trust policy has been configured yet (dev/test posture), matching how
+// CredentialTransaction verification is skipped when bc.IdentityRegistry is nil.
+func (bc *Blockchain) verifyClaimTransactionSignatures(txs []ClaimTransaction) bool {
+	for _, ctx := range txs {
 		c := ctx.Claim
 		issuerPub, err := PublicKeyFromString(c.Issuer)
 		if err != nil {
@@ -2300,55 +2534,59 @@ func (bc *Blockchain) ValidateBlock(block Block) bool {
 			}
 		}
 	}
+	return true
+}
 
-	// Phase 2: verify ClaimIssuerTransaction is signed by the node operator key
-	// (single-authority governance at this stage — see VELA roadmap Section 6.4).
-	// Skipped when bc.OperatorKeyProvider is nil (dev/test without operator key).
-	if bc.OperatorKeyProvider != nil {
-		for _, cit := range block.ClaimIssuerTransactions {
-			if !bc.OperatorKeyProvider.Verify(cit.SigningHash(), cit.AdminSignature) {
-				fmt.Printf("Invalid block: ClaimIssuerTransaction for topic %q has invalid admin signature\n", cit.Topic)
-				return false
-			}
-		}
+// verifyClaimIssuerSignatures verifies that every ClaimIssuerTransaction is
+// signed by the node operator key (single-authority governance at this stage
+// — see VELA roadmap Section 6.4). Skipped when bc.OperatorKeyProvider is nil
+// (dev/test without operator key).
+func (bc *Blockchain) verifyClaimIssuerSignatures(txs []ClaimIssuerTransaction) bool {
+	if bc.OperatorKeyProvider == nil {
+		return true
 	}
-
-	// Verify block signatures: require BFT supermajority (⌈2n/3⌉).
-	// Guard n==0 for single-operator mode where no delegates are registered.
-	if len(bc.Delegates) > 0 {
-		required := int(math.Ceil(float64(2*len(bc.Delegates)) / 3.0))
-		if len(block.Signatures) < required {
-			fmt.Printf("Invalid block: need %d signatures, have %d\n", required, len(block.Signatures))
-			return false
-		}
-
-		// Item 8 Step C: verify each delegate Ed25519 signature against PayloadHash.
-		// All production delegates must have a PublicKey (enforced via Item 7
-		// startup guard + createBlock signing). Delegates without a key can no
-		// longer contribute valid signatures, so they do not count toward the
-		// threshold — the bypass that skipped keyless delegates has been removed.
-		payloadHashBytes, err := hex.DecodeString(block.PayloadHash)
-		if err != nil {
-			fmt.Printf("Invalid block: cannot decode PayloadHash (%v)\n", err)
-			return false
-		}
-		validSigs := 0
-		for _, delegate := range bc.Delegates {
-			for _, sig := range block.Signatures {
-				if ed25519.Verify(delegate.PublicKey, payloadHashBytes, sig) {
-					validSigs++
-					break
-				}
-			}
-		}
-		if validSigs < required {
-			fmt.Printf("Invalid block: %d/%d valid Ed25519 delegate signatures\n", validSigs, required)
+	for _, cit := range txs {
+		if !bc.OperatorKeyProvider.Verify(cit.SigningHash(), cit.AdminSignature) {
+			fmt.Printf("Invalid block: ClaimIssuerTransaction for topic %q has invalid admin signature\n", cit.Topic)
 			return false
 		}
 	}
+	return true
+}
 
-	fmt.Println("Block validated successfully")
+// verifyDelegateSignatures verifies block signatures require a BFT
+// supermajority (⌈2n/3⌉) of valid delegate Ed25519 signatures over
+// PayloadHash. Guards n==0 for single-operator mode where no delegates are
+// registered. Delegates without a key can never contribute valid signatures
+// so they do not count toward the threshold.
+func (bc *Blockchain) verifyDelegateSignatures(block Block) bool {
+	if len(bc.Delegates) == 0 {
+		return true
+	}
+	required := int(math.Ceil(float64(2*len(bc.Delegates)) / 3.0))
+	if len(block.Signatures) < required {
+		fmt.Printf("Invalid block: need %d signatures, have %d\n", required, len(block.Signatures))
+		return false
+	}
 
+	payloadHashBytes, err := hex.DecodeString(block.PayloadHash)
+	if err != nil {
+		fmt.Printf("Invalid block: cannot decode PayloadHash (%v)\n", err)
+		return false
+	}
+	validSigs := 0
+	for _, delegate := range bc.Delegates {
+		for _, sig := range block.Signatures {
+			if ed25519.Verify(delegate.PublicKey, payloadHashBytes, sig) {
+				validSigs++
+				break
+			}
+		}
+	}
+	if validSigs < required {
+		fmt.Printf("Invalid block: %d/%d valid Ed25519 delegate signatures\n", validSigs, required)
+		return false
+	}
 	return true
 }
 
@@ -2555,17 +2793,18 @@ func (bc *Blockchain) catchUpBlock(block *Block) {
 		}
 	}
 	for _, rtx := range block.RFQTransactions {
-		// NOTE: accept/cancel replay is deliberately state-only (status
-		// transitions only) — it does not reconstruct the Trade, call
-		// executeTradeDVP, or update quote statuses. Re-running DVP settlement
-		// here would re-invoke the external PaymentProvider (ConfirmPayment)
-		// for a payment reference that may already have real-world side
-		// effects, which is unsafe during crash recovery. This mirrors the
-		// identical, deliberate limitation for CLOB-matched trades, which are
-		// also never round-tripped through the block payload for the same
-		// reason (see AUDIT §14.3 finding 5). The crash window this covers is
-		// the narrow gap between SaveBlock and SaveState inside a single
-		// Seal*Block lock hold, not a general trade-replay mechanism.
+		// NOTE: accept replay does NOT reconstruct the Trade or call
+		// executeTradeDVP — only quote/request bookkeeping (status + remaining
+		// quantity) is replayed, via the same settleRFQFill helper the live
+		// path uses so the two never diverge. Re-running DVP settlement here
+		// would re-invoke the external PaymentProvider (ConfirmPayment) for a
+		// payment reference that may already have real-world side effects,
+		// which is unsafe during crash recovery. This mirrors the identical,
+		// deliberate limitation for CLOB-matched trades, which are also never
+		// round-tripped through the block payload for the same reason (see
+		// AUDIT §14.3 finding 5). The crash window this covers is the narrow
+		// gap between SaveBlock and SaveState inside a single Seal*Block lock
+		// hold, not a general trade-replay mechanism.
 		switch rtx.Action {
 		case RFQActionRequest:
 			req := rtx.Request
@@ -2578,9 +2817,29 @@ func (bc *Blockchain) catchUpBlock(block *Block) {
 				req.Status = RFQRequestStatusCancelled
 			}
 		case RFQActionAccept:
-			if req := bc.RFQRequests[rtx.Request.ID]; req != nil {
-				req.Status = RFQRequestStatusAccepted
+			req := bc.RFQRequests[rtx.Request.ID]
+			if req == nil {
+				continue
 			}
+			var quote *RFQQuote
+			for _, q := range bc.RFQQuotes[req.ID] {
+				if q != nil && q.ID == rtx.AcceptID {
+					quote = q
+					break
+				}
+			}
+			if quote == nil {
+				// Matching quote could not be located (e.g. snapshot restored
+				// from an older store) — mark the request accepted so it does
+				// not appear silently open forever, matching pre-fix behavior.
+				req.Status = RFQRequestStatusAccepted
+				continue
+			}
+			fillQty := req.Quantity
+			if quote.Quantity < fillQty {
+				fillQty = quote.Quantity
+			}
+			bc.settleRFQFill(req, quote, fillQty)
 		}
 	}
 	for _, mtx := range block.MarketMakerTransactions {
@@ -2831,41 +3090,8 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 		log.Fatalf("NewBlockchain: %v", err)
 	}
 
-	// Settlement router — populated by RegisterSettlementProvider after construction.
-	bc.SettlementRouter = make(map[SettlementMethod]PaymentProvider)
-
-	// Default to mock service implementations so existing tests need no changes
-	if bc.AMLScreener == nil {
-		bc.AMLScreener = NewMockAMLScreener()
-	}
-	// G-09: SAR draft store
-	bc.PendingSARs = make(map[string]*SARDraft)
-	// G-10: regulatory report log
-	bc.RegulatoryReports = []*RegulatoryReport{}
-	// MAR Article 18: insider lists
-	bc.InsiderLists = make(map[string]*InsiderList)
-	// MAR Article 16: STOR drafts and wash-trade detection window
-	bc.PendingSTORs = make(map[string]*STORDraft)
-	bc.RecentCounterpartyTrades = make(map[string][]Trade)
-	if bc.PaymentProvider == nil {
-		bc.PaymentProvider = NewMockPaymentProvider()
-	}
-	if bc.IdentityRegistry == nil {
-		bc.IdentityRegistry, _ = NewMockIdentityRegistry()
-	}
-	if bc.OracleService == nil {
-		bc.OracleService, _ = NewMockOracleService()
-	}
-
-	// Load the network registry public key from GREENHOUSE_REGISTRY_PUBKEY (hex).
-	// Must be set before productionReadinessError so the guard can verify it.
-	if regKeyHex := os.Getenv("GREENHOUSE_REGISTRY_PUBKEY"); regKeyHex != "" {
-		regKey, err := PublicKeyFromHex(regKeyHex)
-		if err != nil {
-			log.Fatalf("NewBlockchain: invalid GREENHOUSE_REGISTRY_PUBKEY: %v", err)
-		}
-		bc.NetworkRegistryKey = regKey
-	}
+	bc.initDefaultServices()
+	bc.loadNetworkRegistryKey()
 
 	// I-2: Production guard — refuse mock services at startup.
 	// Must come after all fallback mock assignments above so it fires only when
@@ -2893,70 +3119,9 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 	// LoadState restores bc.Assets, bc.Holdings, bc.Credentials, and
 	// bc.WalletSequences. Any blocks sealed after the last snapshot are replayed
 	// via catchUpBlock (no order matching) to close the crash-window gap.
-	if dbPath := os.Getenv("GREENHOUSE_DB_PATH"); dbPath != "" {
-		store, err := OpenBlockStore(dbPath)
-		if err != nil {
-			log.Fatalf("NewBlockchain: cannot open block store %q: %v", dbPath, err)
-		}
-		bc.BlockStore = store
-
-		// Clear the in-memory genesis before loading from disk.
-		bc.Blocks = []Block{}
-		if err := store.LoadBlocks(bc); err != nil {
-			log.Printf("NewBlockchain: block load error: %v", err)
-		}
-
-		if len(bc.Blocks) == 0 {
-			// First run — re-create genesis and persist it so it survives restart.
-			genesis := Block{
-				Index:        0,
-				Transactions: []Transaction{},
-				PrevHash:     strings.Repeat("0", 64),
-				Nonce:        0,
-				Signatures:   [][]byte{},
-			}
-			genesis.SetPayloadHash()
-			bc.Blocks = append(bc.Blocks, genesis)
-			if err := store.SaveBlock(&genesis); err != nil {
-				log.Printf("NewBlockchain: failed to persist genesis block: %v", err)
-			}
-		} else {
-			// Restored from store — align the nonce counter with the saved chain.
-			// Pattern: genesis direct-append (no Nonce++) + (N-1) AddBlock calls
-			// → bc.Nonce = len(bc.Blocks) - 1 after the original run.
-			bc.Nonce = len(bc.Blocks) - 1
-
-			// Restore state snapshot (Assets, Holdings, Credentials, WalletSequences).
-			lastApplied, err := store.LoadState(bc)
-			if err != nil {
-				log.Printf("NewBlockchain: state restore error: %v", err)
-			}
-			bc.initMarketMakerRegistry()
-
-			// Re-apply any blocks sealed after the last snapshot.
-			// Handles the crash window between SaveBlock and SaveState.
-			for i := lastApplied + 1; i < len(bc.Blocks); i++ {
-				bc.catchUpBlock(&bc.Blocks[i])
-			}
-		}
-
-		bc.pruneConfirmedPaymentsLocked(time.Now())
-
-		// Restore the active delegate set saved by the last VoteForDelegates call
-		// (Item 10 Step B). Re-initialises Inbox and viewChangeRequests so delegates
-		// are immediately usable for consensus without a new election round.
-		if err := store.LoadDelegates(bc); err != nil {
-			log.Printf("NewBlockchain: LoadDelegates: %v", err)
-		}
-
-		// Step C: if no delegates were persisted but recovered state indicates the
-		// chain had active participants, attempt to re-elect from in-memory state.
-		// This is a best-effort hook — it is a no-op until LockedWallets and Nodes
-		// are also persisted (a dependency of future Item 11 work).
-		if len(bc.Delegates) == 0 && (len(bc.Credentials) > 0 || len(bc.Assets) > 0) {
-			bc.VoteForDelegates(nil)
-		}
-	}
+	// C-4: restore chain/state from the persistent BBolt block store when
+	// GREENHOUSE_DB_PATH is set (no-op otherwise).
+	bc.restoreFromBlockStore(os.Getenv("GREENHOUSE_DB_PATH"))
 
 	bc.rebuildCommittedTxHashes()
 
@@ -2968,48 +3133,189 @@ func NewBlockchain(ctx context.Context, topicName string) *Blockchain {
 		}
 	}
 
-	var bootstrapPeers []string
-	if raw := os.Getenv("GREENHOUSE_BOOTSTRAP_PEERS"); raw != "" {
-		for _, addr := range strings.Split(raw, ",") {
-			if addr = strings.TrimSpace(addr); addr != "" {
-				bootstrapPeers = append(bootstrapPeers, addr)
-			}
-		}
-	}
-
-	// Initialize the P2PNode. A failure is non-fatal: the blockchain operates
-	// in standalone mode (bc.P2PNode == nil) without gossip propagation.
-	// Skip P2P initialisation when GONETWORK_NO_P2P=1.  This env var is set
-	// by newTestBlockchain() so that the ~95 unit-test blockchain instances
-	// do not each spin up a real libp2p host with mDNS/GossipSub/DHT.
-	// Production and P2P-specific tests leave the variable unset.
-	if os.Getenv("GONETWORK_NO_P2P") == "" {
-		// log.Fatalf was removed because it called os.Exit, killing the entire
-		// test process when port exhaustion or network errors occur.
-		p2pNode, err := NewP2PNode(ctx, bc, topicName, bootstrapPeers)
-		if err != nil {
-			log.Printf("Warning: Failed to initialize P2PNode (running in standalone mode): %v", err)
-		} else {
-			bc.P2PNode = p2pNode
-		}
-	}
-
-	// G-10: initialise the regulatory reporting service.
-	// DefaultReportingService is used in dev/test (on-chain record only).
-	// In production, NCAReportingService also transmits reports to the NCA/ARM.
-	// If BlockStore is available, failed submissions are persisted to the
-	// "reporting_outbox" bucket and retried by a background goroutine.
-	bc.ReportingService = &DefaultReportingService{}
-	if os.Getenv("GH_ENV") == "production" {
-		ncaSvc := NewNCAReportingService()
-		if bc.BlockStore != nil {
-			ncaSvc.outbox = bc.BlockStore.SaveToReportingOutbox
-			go bc.runReportingOutboxRetry(ctx, ncaSvc)
-		}
-		bc.ReportingService = ncaSvc
-	}
+	bootstrapPeers := parseBootstrapPeers()
+	bc.initP2PNode(ctx, topicName, bootstrapPeers)
+	bc.initReportingService(ctx)
 
 	return bc
+}
+
+// initDefaultServices wires the settlement router and falls back to mock
+// service implementations for AMLScreener/PaymentProvider/IdentityRegistry/
+// OracleService so existing tests need no changes, plus the compliance state
+// maps (SARs, regulatory reports, insider lists, STOR drafts, wash-trade
+// detection window).
+func (bc *Blockchain) initDefaultServices() {
+	// Settlement router — populated by RegisterSettlementProvider after construction.
+	bc.SettlementRouter = make(map[SettlementMethod]PaymentProvider)
+
+	// Default to mock service implementations so existing tests need no changes
+	if bc.AMLScreener == nil {
+		bc.AMLScreener = NewMockAMLScreener()
+	}
+	// G-09: SAR draft store
+	bc.PendingSARs = make(map[string]*SARDraft)
+	// G-10: regulatory report log
+	bc.RegulatoryReports = []*RegulatoryReport{}
+	// MAR Article 18: insider lists
+	bc.InsiderLists = make(map[string]*InsiderList)
+	// MAR Article 16: STOR drafts and wash-trade detection window
+	bc.PendingSTORs = make(map[string]*STORDraft)
+	bc.RecentCounterpartyTrades = make(map[string][]Trade)
+	if bc.PaymentProvider == nil {
+		bc.PaymentProvider = NewMockPaymentProvider()
+	}
+	if bc.IdentityRegistry == nil {
+		bc.IdentityRegistry, _ = NewMockIdentityRegistry()
+	}
+	if bc.OracleService == nil {
+		bc.OracleService, _ = NewMockOracleService()
+	}
+}
+
+// loadNetworkRegistryKey parses GREENHOUSE_REGISTRY_PUBKEY (hex-encoded
+// Ed25519 public key) into bc.NetworkRegistryKey. Must run before
+// productionReadinessError so the guard can verify it is set. A no-op when
+// the environment variable is unset (dev/test open-mode P2P).
+func (bc *Blockchain) loadNetworkRegistryKey() {
+	regKeyHex := os.Getenv("GREENHOUSE_REGISTRY_PUBKEY")
+	if regKeyHex == "" {
+		return
+	}
+	regKey, err := PublicKeyFromHex(regKeyHex)
+	if err != nil {
+		log.Fatalf("NewBlockchain: invalid GREENHOUSE_REGISTRY_PUBKEY: %v", err)
+	}
+	bc.NetworkRegistryKey = regKey
+}
+
+// restoreFromBlockStore opens the persistent BBolt block store at dbPath (a
+// no-op when dbPath is empty) and restores blocks, the state snapshot,
+// delegates, and confirmed-payment pruning. On first run it re-creates and
+// persists the genesis block. Any blocks sealed after the last state snapshot
+// are replayed via catchUpBlock (no order matching) to close the crash-window
+// gap between SaveBlock and SaveState.
+func (bc *Blockchain) restoreFromBlockStore(dbPath string) {
+	if dbPath == "" {
+		return
+	}
+	store, err := OpenBlockStore(dbPath)
+	if err != nil {
+		log.Fatalf("NewBlockchain: cannot open block store %q: %v", dbPath, err)
+	}
+	bc.BlockStore = store
+
+	// Clear the in-memory genesis before loading from disk.
+	bc.Blocks = []Block{}
+	if err := store.LoadBlocks(bc); err != nil {
+		log.Printf("NewBlockchain: block load error: %v", err)
+	}
+
+	if len(bc.Blocks) == 0 {
+		// First run — re-create genesis and persist it so it survives restart.
+		genesis := Block{
+			Index:        0,
+			Transactions: []Transaction{},
+			PrevHash:     strings.Repeat("0", 64),
+			Nonce:        0,
+			Signatures:   [][]byte{},
+		}
+		genesis.SetPayloadHash()
+		bc.Blocks = append(bc.Blocks, genesis)
+		if err := store.SaveBlock(&genesis); err != nil {
+			log.Printf("NewBlockchain: failed to persist genesis block: %v", err)
+		}
+	} else {
+		// Restored from store — align the nonce counter with the saved chain.
+		// Pattern: genesis direct-append (no Nonce++) + (N-1) AddBlock calls
+		// → bc.Nonce = len(bc.Blocks) - 1 after the original run.
+		bc.Nonce = len(bc.Blocks) - 1
+
+		// Restore state snapshot (Assets, Holdings, Credentials, WalletSequences).
+		lastApplied, err := store.LoadState(bc)
+		if err != nil {
+			log.Printf("NewBlockchain: state restore error: %v", err)
+		}
+		bc.initMarketMakerRegistry()
+
+		// Re-apply any blocks sealed after the last snapshot.
+		// Handles the crash window between SaveBlock and SaveState.
+		for i := lastApplied + 1; i < len(bc.Blocks); i++ {
+			bc.catchUpBlock(&bc.Blocks[i])
+		}
+	}
+
+	bc.pruneConfirmedPaymentsLocked(time.Now())
+
+	// Restore the active delegate set saved by the last VoteForDelegates call
+	// (Item 10 Step B). Re-initialises Inbox and viewChangeRequests so delegates
+	// are immediately usable for consensus without a new election round.
+	if err := store.LoadDelegates(bc); err != nil {
+		log.Printf("NewBlockchain: LoadDelegates: %v", err)
+	}
+
+	// Step C: if no delegates were persisted but recovered state indicates the
+	// chain had active participants, attempt to re-elect from in-memory state.
+	// This is a best-effort hook — it is a no-op until LockedWallets and Nodes
+	// are also persisted (a dependency of future Item 11 work).
+	if len(bc.Delegates) == 0 && (len(bc.Credentials) > 0 || len(bc.Assets) > 0) {
+		bc.VoteForDelegates(nil)
+	}
+}
+
+// parseBootstrapPeers reads GREENHOUSE_BOOTSTRAP_PEERS (comma-separated
+// multiaddrs) into a slice, trimming whitespace and skipping empty entries.
+// An empty/unset variable means standalone / local-only mode, which is the
+// default for tests and local development.
+func parseBootstrapPeers() []string {
+	var bootstrapPeers []string
+	raw := os.Getenv("GREENHOUSE_BOOTSTRAP_PEERS")
+	if raw == "" {
+		return nil
+	}
+	for _, addr := range strings.Split(raw, ",") {
+		if addr = strings.TrimSpace(addr); addr != "" {
+			bootstrapPeers = append(bootstrapPeers, addr)
+		}
+	}
+	return bootstrapPeers
+}
+
+// initP2PNode starts the libp2p node unless disabled via GONETWORK_NO_P2P
+// (set by newTestBlockchain() so the ~95 unit-test blockchain instances do
+// not each spin up a real libp2p host with mDNS/GossipSub/DHT; production and
+// P2P-specific tests leave the variable unset). A failure is non-fatal: the
+// blockchain operates in standalone mode (bc.P2PNode == nil) without gossip
+// propagation — log.Fatalf is deliberately not used here because it would
+// call os.Exit, killing the entire test process on port exhaustion or
+// network errors.
+func (bc *Blockchain) initP2PNode(ctx context.Context, topicName string, bootstrapPeers []string) {
+	if os.Getenv("GONETWORK_NO_P2P") != "" {
+		return
+	}
+	p2pNode, err := NewP2PNode(ctx, bc, topicName, bootstrapPeers)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize P2PNode (running in standalone mode): %v", err)
+		return
+	}
+	bc.P2PNode = p2pNode
+}
+
+// initReportingService selects DefaultReportingService (dev/test, on-chain
+// record only) or NCAReportingService (production, also transmits reports to
+// the NCA/ARM) and wires the reporting-outbox retry goroutine when a
+// BlockStore is available.
+func (bc *Blockchain) initReportingService(ctx context.Context) {
+	bc.ReportingService = &DefaultReportingService{}
+	if os.Getenv("GH_ENV") != "production" {
+		return
+	}
+	ncaSvc := NewNCAReportingService()
+	if bc.BlockStore != nil {
+		ncaSvc.outbox = bc.BlockStore.SaveToReportingOutbox
+		go bc.runReportingOutboxRetry(ctx, ncaSvc)
+	}
+	bc.ReportingService = ncaSvc
 }
 
 // runReportingOutboxRetry is a background goroutine that retries any reports

@@ -558,6 +558,22 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// apiError pairs an HTTP status with a message so internal helpers (guard
+// checks, compliance gates, etc.) can signal a specific HTTP response without
+// writing to http.ResponseWriter themselves. Callers write the response via
+// writeError(w, err.status, err.msg) once control returns to the handler.
+type apiError struct {
+	status int
+	msg    string
+}
+
+func (e *apiError) Error() string { return e.msg }
+
+// newAPIError constructs an *apiError.
+func newAPIError(status int, msg string) *apiError {
+	return &apiError{status: status, msg: msg}
+}
+
 // newChallenge generates a random 32-byte challenge and returns its hex encoding.
 func newChallenge() (string, error) {
 	b := make([]byte, 32)

@@ -413,42 +413,23 @@ func tunedGossipSubParams(validatorCount int) pubsub.GossipSubParams {
 }
 
 // NewP2PNode initializes a new libp2p node with mDNS and DHT-based peer discovery
+// NewP2PNode initializes a new libp2p node with mDNS and DHT-based peer discovery.
+// It is a thin orchestrator over the construction-phase helpers below,
+// executed in the same order as before: gater/manifest → host → production
+// guard → DHT → gossipsub → topics → mDNS → node struct → background DHT
+// discovery → reconnect notifee → stream handler.
 func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, bootstrapPeers []string) (*P2PNode, error) {
-	// Create an allowlist gater bound to the blockchain's registry key.
-	// When NetworkRegistryKey is nil (dev/test) the gater runs in open mode.
-	gater := NewAllowlistGater(blockchain.NetworkRegistryKey)
-
-	// Load a static peer manifest if GREENHOUSE_PEER_MANIFEST is set.
-	// This pre-populates the allowlist from a signed JSON manifest before the
-	// node begins accepting connections, ensuring no unlisted peer can connect
-	// before the manifest is applied.
-	if manifestPath := os.Getenv("GREENHOUSE_PEER_MANIFEST"); manifestPath != "" {
-		if err := LoadPeerManifest(manifestPath, gater); err != nil {
-			return nil, fmt.Errorf("NewP2PNode: failed to load peer manifest %q: %w", manifestPath, err)
-		}
-		logger.Infof("Loaded peer manifest from %s", manifestPath)
+	gater, err := newAllowlistGaterForNode(blockchain)
+	if err != nil {
+		return nil, err
 	}
 
-	// Create a bounded connection manager so peers cannot exhaust file
-	// descriptors by opening unbounded simultaneous connections.
-	cm, err := connmgr.NewConnManager(20, 40, connmgr.WithGracePeriod(time.Minute))
+	h, err := newLibp2pHostWithGater(gater)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create connection manager: %v", err)
-	}
-
-	// Create a new libp2p host with connection gater + bounded conn manager.
-	h, err := libp2p.New(
-		libp2p.Security(noise.ID, noise.New),
-		libp2p.ConnectionGater(gater),
-		libp2p.ConnectionManager(cm),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create libp2p host: %v", err)
+		return nil, err
 	}
 	logger.Infof("Libp2p host created with ID: %s", h.ID())
 	log.Printf("P2P: using Noise XX security transport (mutual auth)")
-
-	// Log listening addresses
 	for _, addr := range h.Addrs() {
 		logger.Infof("Listening on: %s/p2p/%s", addr.String(), h.ID().String())
 	}
@@ -477,40 +458,9 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 		}
 	}()
 
-	var dht *kaddht.IpfsDHT
-
-	if os.Getenv("GH_ENV") != "production" && os.Getenv("GONETWORK_DISABLE_P2P_DHT") != "1" {
-		// Initialize the DHT in client mode for peer discovery.
-		// Client mode means this node only queries the DHT and never accepts
-		// routing table entries from unknown peers, eliminating the Sybil
-		// attack surface described in GO-2024-3218. The bootstrap node
-		// (cmd/bootstrap) runs in ModeServer and is the sole authoritative
-		// DHT server.
-		dht, err = kaddht.New(ctx, h, kaddht.Mode(kaddht.ModeClient))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create DHT: %v", err)
-		}
-		logger.Infof("DHT initialized in client mode for peer discovery")
-
-		// Bootstrap the DHT with the provided bootstrap peers
-		for _, addr := range bootstrapPeers {
-			logger.Infof("Attempting to connect to bootstrap peer: %s", addr)
-			peerAddr, err := peer.AddrInfoFromString(addr)
-			if err != nil {
-				logger.Warnf("Invalid bootstrap peer address: %s", addr)
-				continue
-			}
-			if err := h.Connect(bgCtx, *peerAddr); err != nil {
-				logger.Warnf("Failed to connect to bootstrap peer: %s", addr)
-			} else {
-				logger.Infof("Connected to bootstrap peer: %s", addr)
-			}
-		}
-
-	} else if os.Getenv("GH_ENV") == "production" {
-		logger.Infof("DHT discovery disabled in production (GH_ENV=production)")
-	} else {
-		logger.Infof("DHT discovery disabled (GONETWORK_DISABLE_P2P_DHT=1)")
+	dht, err := initDHTIfEnabled(ctx, bgCtx, h, bootstrapPeers)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create a tuned GossipSub service for validator-sized meshes.
@@ -518,99 +468,28 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	if validatorCount == 0 {
 		validatorCount = 5 // default expected validator set size in dev/test
 	}
-	gsParams := tunedGossipSubParams(validatorCount)
-	ps, err := pubsub.NewGossipSub(
-		ctx,
-		h,
-		pubsub.WithMaxMessageSize(256*1024),
-		pubsub.WithFloodPublish(true),
-		pubsub.WithGossipSubParams(gsParams),
-	)
+	ps, err := newTunedGossipSubService(ctx, h, validatorCount)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create pubsub: %v", err)
+		return nil, err
 	}
-	logger.Infof("PubSub service initialized (D=%d Dlo=%d Dhi=%d heartbeat=%s)", gsParams.D, gsParams.Dlo, gsParams.Dhi, gsParams.HeartbeatInterval)
 
-	// Join a topic
-	topic, err := ps.Join(topicName)
+	topics, err := joinAndValidateTopics(ps, gater, topicName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to join topic: %v", err)
+		return nil, err
 	}
-	logger.Infof("Joined topic: %s", topicName)
-
-	consensusTopicName := topicName + "/consensus"
-	consensusTopic, err := ps.Join(consensusTopicName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to join consensus topic: %v", err)
-	}
-	logger.Infof("Joined consensus topic: %s", consensusTopicName)
-
-	// Register a topic validator so that GossipSub rejects messages from
-	// peers that are not in the allowlist. This closes the gap where a peer
-	// that obtained a connection (or was never connection-gated in open mode)
-	// could inject arbitrary payloads to all validators.
-	// In open mode (gater.allowed is empty) InterceptPeerDial returns true for
-	// all peers, so the validator accepts all messages — behaviour is unchanged
-	// for development and test environments.
-	if err := ps.RegisterTopicValidator(topicName, func(_ context.Context, pid peer.ID, _ *pubsub.Message) pubsub.ValidationResult {
-		if !gater.InterceptPeerDial(pid) {
-			return pubsub.ValidationReject
-		}
-		return pubsub.ValidationAccept
-	}); err != nil {
-		return nil, fmt.Errorf("failed to register topic validator: %w", err)
-	}
-	logger.Infof("Topic validator registered for %s", topicName)
-
-	if err := ps.RegisterTopicValidator(consensusTopicName, func(_ context.Context, pid peer.ID, _ *pubsub.Message) pubsub.ValidationResult {
-		if !gater.InterceptPeerDial(pid) {
-			return pubsub.ValidationReject
-		}
-		return pubsub.ValidationAccept
-	}); err != nil {
-		return nil, fmt.Errorf("failed to register consensus topic validator: %w", err)
-	}
-	logger.Infof("Topic validator registered for %s", consensusTopicName)
-
-	// Subscribe to the topic
-	sub, err := topic.Subscribe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to topic: %v", err)
-	}
-	logger.Infof("Subscribed to topic")
-
-	consensusSub, err := consensusTopic.Subscribe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to consensus topic: %v", err)
-	}
-	logger.Infof("Subscribed to consensus topic")
 
 	// Enable mDNS for same-machine / LAN peer discovery before creating the
 	// node so the service reference can be stored (prevents GC and keeps it live).
-	// M-10: mDNS is only enabled outside production to avoid advertising
-	// node addresses on the local LAN in production deployments.
-	var mdnsSvc mdns.Service
-	if os.Getenv("GH_ENV") != "production" && os.Getenv("GONETWORK_DISABLE_P2P_MDNS") != "1" {
-		sanitizedTopic := strings.NewReplacer("/", "-", " ", "-").Replace(topicName)
-		mdnsTag := "greenhouse-mdns-" + sanitizedTopic
-		mdnsSvc, err = setupMdnsDiscovery(bgCtx, h, mdnsTag)
-		if err != nil {
-			logger.Warnf("mDNS discovery unavailable: %v", err)
-		}
-	} else if os.Getenv("GH_ENV") == "production" {
-		logger.Infof("mDNS discovery disabled in production (GH_ENV=production)")
-	} else {
-		logger.Infof("mDNS discovery disabled (GONETWORK_DISABLE_P2P_MDNS=1)")
-	}
+	mdnsSvc := setupMdnsIfEnabled(bgCtx, h, topicName)
 
 	// Create and return the P2PNode
 	node := &P2PNode{
 		Host:             h,
 		PubSub:           ps,
-		Topic:            topic,
-		Sub:              sub,
-		ConsensusTopic:   consensusTopic,
-		ConsensusSub:     consensusSub,
+		Topic:            topics.topic,
+		Sub:              topics.sub,
+		ConsensusTopic:   topics.consensusTopic,
+		ConsensusSub:     topics.consensusSub,
 		Blockchain:       blockchain,
 		MdnsService:      mdnsSvc,
 		Gater:            gater,
@@ -624,83 +503,7 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 	// so the goroutine terminates when the node is shut down.
 	if dht != nil {
 		node.startTrackedBackground(func() {
-
-			// Retry connecting to bootstrap peers
-			if len(bootstrapPeers) > 0 {
-				retryCount := 0
-				maxRetries := 10
-				for len(h.Network().Peers()) == 0 && retryCount < maxRetries {
-					logger.Debugf("Waiting for peers in the routing table... (attempt %d/%d)", retryCount+1, maxRetries)
-					select {
-					case <-bgCtx.Done():
-						return
-					case <-time.After(2 * time.Second):
-					}
-					retryCount++
-				}
-				logger.Infof("Current peers in the network: %v", h.Network().Peers())
-			}
-
-			if err := dht.Bootstrap(bgCtx); err != nil {
-				logger.Warnf("Failed to bootstrap DHT: %v", err)
-				return
-			}
-			logger.Infof("DHT bootstrapped successfully")
-
-			// Give DHT time to populate routing table
-			select {
-			case <-bgCtx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-			peersCount := len(dht.RoutingTable().ListPeers())
-			logger.Infof("DHT routing table now has %d peers", peersCount)
-
-			// Advertise the rendezvous point
-			rendezvous := "greenhouse-p2p-network"
-			logger.Infof("Advertising rendezvous point: %s", rendezvous)
-
-			// Generate a valid CID from the rendezvous string
-			hash := sha256.Sum256([]byte(rendezvous))
-			mh, err := multihash.Encode(hash[:], multihash.SHA2_256)
-			if err != nil {
-				logger.Warnf("Failed to create multihash for rendezvous: %v", err)
-				return
-			}
-			rendezvousCID := cid.NewCidV1(cid.Raw, mh)
-
-			if err := dht.Provide(bgCtx, rendezvousCID, true); err != nil {
-				logger.Warnf("Failed to advertise rendezvous point: %v", err)
-			} else {
-				logger.Infof("Rendezvous point advertised successfully")
-			}
-
-			// Discover peers advertising the same rendezvous point
-			for {
-				if bgCtx.Err() != nil {
-					return // node is shutting down
-				}
-				peers, err := dht.FindProviders(bgCtx, rendezvousCID)
-				if err != nil {
-					logger.Debugf("Error finding providers: %v", err)
-				} else {
-					for _, p := range peers {
-						if p.ID != h.ID() {
-							logger.Infof("Discovered peer: %s", p.ID.String())
-							if err := h.Connect(bgCtx, p); err != nil {
-								logger.Debugf("Failed to connect to peer %s: %v", p.ID.String(), err)
-							} else {
-								logger.Infof("Successfully connected to peer: %s", p.ID.String())
-							}
-						}
-					}
-				}
-				select {
-				case <-bgCtx.Done():
-					return
-				case <-time.After(5 * time.Second):
-				}
-			}
+			node.runDHTDiscovery(bgCtx, dht, bootstrapPeers)
 		})
 	}
 
@@ -713,6 +516,283 @@ func NewP2PNode(ctx context.Context, blockchain *Blockchain, topicName string, b
 
 	committed = true
 	return node, nil
+}
+
+// newAllowlistGaterForNode creates an allowlist gater bound to the
+// blockchain's registry key (open mode when NetworkRegistryKey is nil, i.e.
+// dev/test) and pre-populates it from a signed JSON manifest when
+// GREENHOUSE_PEER_MANIFEST is set, ensuring no unlisted peer can connect
+// before the manifest is applied.
+func newAllowlistGaterForNode(blockchain *Blockchain) (*AllowlistGater, error) {
+	gater := NewAllowlistGater(blockchain.NetworkRegistryKey)
+
+	if manifestPath := os.Getenv("GREENHOUSE_PEER_MANIFEST"); manifestPath != "" {
+		if err := LoadPeerManifest(manifestPath, gater); err != nil {
+			return nil, fmt.Errorf("NewP2PNode: failed to load peer manifest %q: %w", manifestPath, err)
+		}
+		logger.Infof("Loaded peer manifest from %s", manifestPath)
+	}
+	return gater, nil
+}
+
+// newLibp2pHostWithGater creates a bounded connection manager (so peers
+// cannot exhaust file descriptors by opening unbounded simultaneous
+// connections) and a new libp2p host secured with Noise XX and gated by gater.
+func newLibp2pHostWithGater(gater *AllowlistGater) (host.Host, error) {
+	cm, err := connmgr.NewConnManager(20, 40, connmgr.WithGracePeriod(time.Minute))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection manager: %v", err)
+	}
+
+	h, err := libp2p.New(
+		libp2p.Security(noise.ID, noise.New),
+		libp2p.ConnectionGater(gater),
+		libp2p.ConnectionManager(cm),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create libp2p host: %v", err)
+	}
+	return h, nil
+}
+
+// initDHTIfEnabled creates and bootstraps a client-mode Kademlia DHT unless
+// disabled by GH_ENV=production or GONETWORK_DISABLE_P2P_DHT=1 (the
+// production guard requiring GREENHOUSE_PEER_MANIFEST has already run in
+// NewP2PNode by the time this is called). Client mode means this node only
+// queries the DHT and never accepts routing table entries from unknown
+// peers, eliminating the Sybil attack surface described in GO-2024-3218. The
+// bootstrap node (cmd/bootstrap) runs in ModeServer and is the sole
+// authoritative DHT server. Returns a nil DHT (not an error) when disabled.
+func initDHTIfEnabled(ctx, bgCtx context.Context, h host.Host, bootstrapPeers []string) (*kaddht.IpfsDHT, error) {
+	if os.Getenv("GH_ENV") == "production" {
+		logger.Infof("DHT discovery disabled in production (GH_ENV=production)")
+		return nil, nil
+	}
+	if os.Getenv("GONETWORK_DISABLE_P2P_DHT") == "1" {
+		logger.Infof("DHT discovery disabled (GONETWORK_DISABLE_P2P_DHT=1)")
+		return nil, nil
+	}
+
+	dht, err := kaddht.New(ctx, h, kaddht.Mode(kaddht.ModeClient))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DHT: %v", err)
+	}
+	logger.Infof("DHT initialized in client mode for peer discovery")
+
+	// Bootstrap the DHT with the provided bootstrap peers
+	for _, addr := range bootstrapPeers {
+		logger.Infof("Attempting to connect to bootstrap peer: %s", addr)
+		peerAddr, err := peer.AddrInfoFromString(addr)
+		if err != nil {
+			logger.Warnf("Invalid bootstrap peer address: %s", addr)
+			continue
+		}
+		if err := h.Connect(bgCtx, *peerAddr); err != nil {
+			logger.Warnf("Failed to connect to bootstrap peer: %s", addr)
+		} else {
+			logger.Infof("Connected to bootstrap peer: %s", addr)
+		}
+	}
+
+	return dht, nil
+}
+
+// newTunedGossipSubService creates a GossipSub service tuned for a
+// validator-sized mesh (see tunedGossipSubParams).
+func newTunedGossipSubService(ctx context.Context, h host.Host, validatorCount int) (*pubsub.PubSub, error) {
+	gsParams := tunedGossipSubParams(validatorCount)
+	ps, err := pubsub.NewGossipSub(
+		ctx,
+		h,
+		pubsub.WithMaxMessageSize(256*1024),
+		pubsub.WithFloodPublish(true),
+		pubsub.WithGossipSubParams(gsParams),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pubsub: %v", err)
+	}
+	logger.Infof("PubSub service initialized (D=%d Dlo=%d Dhi=%d heartbeat=%s)", gsParams.D, gsParams.Dlo, gsParams.Dhi, gsParams.HeartbeatInterval)
+	return ps, nil
+}
+
+// p2pTopicSet bundles the joined/subscribed topic handles returned by
+// joinAndValidateTopics.
+type p2pTopicSet struct {
+	topic          *pubsub.Topic
+	sub            *pubsub.Subscription
+	consensusTopic *pubsub.Topic
+	consensusSub   *pubsub.Subscription
+}
+
+// joinAndValidateTopics joins the main and consensus topics, registers an
+// allowlist-backed topic validator on each (closing the gap where a peer
+// that obtained a connection — or was never connection-gated in open mode —
+// could inject arbitrary payloads to all validators; in open mode
+// InterceptPeerDial returns true for all peers so behavior is unchanged for
+// dev/test), and subscribes to both.
+func joinAndValidateTopics(ps *pubsub.PubSub, gater *AllowlistGater, topicName string) (p2pTopicSet, error) {
+	var ts p2pTopicSet
+
+	topic, err := ps.Join(topicName)
+	if err != nil {
+		return ts, fmt.Errorf("failed to join topic: %v", err)
+	}
+	logger.Infof("Joined topic: %s", topicName)
+
+	consensusTopicName := topicName + "/consensus"
+	consensusTopic, err := ps.Join(consensusTopicName)
+	if err != nil {
+		return ts, fmt.Errorf("failed to join consensus topic: %v", err)
+	}
+	logger.Infof("Joined consensus topic: %s", consensusTopicName)
+
+	if err := ps.RegisterTopicValidator(topicName, func(_ context.Context, pid peer.ID, _ *pubsub.Message) pubsub.ValidationResult {
+		if !gater.InterceptPeerDial(pid) {
+			return pubsub.ValidationReject
+		}
+		return pubsub.ValidationAccept
+	}); err != nil {
+		return ts, fmt.Errorf("failed to register topic validator: %w", err)
+	}
+	logger.Infof("Topic validator registered for %s", topicName)
+
+	if err := ps.RegisterTopicValidator(consensusTopicName, func(_ context.Context, pid peer.ID, _ *pubsub.Message) pubsub.ValidationResult {
+		if !gater.InterceptPeerDial(pid) {
+			return pubsub.ValidationReject
+		}
+		return pubsub.ValidationAccept
+	}); err != nil {
+		return ts, fmt.Errorf("failed to register consensus topic validator: %w", err)
+	}
+	logger.Infof("Topic validator registered for %s", consensusTopicName)
+
+	sub, err := topic.Subscribe()
+	if err != nil {
+		return ts, fmt.Errorf("failed to subscribe to topic: %v", err)
+	}
+	logger.Infof("Subscribed to topic")
+
+	consensusSub, err := consensusTopic.Subscribe()
+	if err != nil {
+		return ts, fmt.Errorf("failed to subscribe to consensus topic: %v", err)
+	}
+	logger.Infof("Subscribed to consensus topic")
+
+	ts.topic = topic
+	ts.sub = sub
+	ts.consensusTopic = consensusTopic
+	ts.consensusSub = consensusSub
+	return ts, nil
+}
+
+// setupMdnsIfEnabled enables mDNS for same-machine / LAN peer discovery
+// unless disabled by GH_ENV=production (M-10: avoid advertising node
+// addresses on the local LAN in production deployments) or
+// GONETWORK_DISABLE_P2P_MDNS=1. Returns nil (not an error) when discovery is
+// disabled or unavailable, matching the original best-effort behavior.
+func setupMdnsIfEnabled(bgCtx context.Context, h host.Host, topicName string) mdns.Service {
+	if os.Getenv("GH_ENV") == "production" {
+		logger.Infof("mDNS discovery disabled in production (GH_ENV=production)")
+		return nil
+	}
+	if os.Getenv("GONETWORK_DISABLE_P2P_MDNS") == "1" {
+		logger.Infof("mDNS discovery disabled (GONETWORK_DISABLE_P2P_MDNS=1)")
+		return nil
+	}
+
+	sanitizedTopic := strings.NewReplacer("/", "-", " ", "-").Replace(topicName)
+	mdnsTag := "greenhouse-mdns-" + sanitizedTopic
+	mdnsSvc, err := setupMdnsDiscovery(bgCtx, h, mdnsTag)
+	if err != nil {
+		logger.Warnf("mDNS discovery unavailable: %v", err)
+		return nil
+	}
+	return mdnsSvc
+}
+
+// runDHTDiscovery bootstraps the DHT, advertises the rendezvous point, and
+// continuously discovers/connects to peers advertising the same rendezvous
+// point. Invoked as a tracked background goroutine from NewP2PNode and exits
+// when bgCtx is cancelled (node shutdown).
+func (n *P2PNode) runDHTDiscovery(bgCtx context.Context, dht *kaddht.IpfsDHT, bootstrapPeers []string) {
+	h := n.Host
+
+	// Retry connecting to bootstrap peers
+	if len(bootstrapPeers) > 0 {
+		retryCount := 0
+		maxRetries := 10
+		for len(h.Network().Peers()) == 0 && retryCount < maxRetries {
+			logger.Debugf("Waiting for peers in the routing table... (attempt %d/%d)", retryCount+1, maxRetries)
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			retryCount++
+		}
+		logger.Infof("Current peers in the network: %v", h.Network().Peers())
+	}
+
+	if err := dht.Bootstrap(bgCtx); err != nil {
+		logger.Warnf("Failed to bootstrap DHT: %v", err)
+		return
+	}
+	logger.Infof("DHT bootstrapped successfully")
+
+	// Give DHT time to populate routing table
+	select {
+	case <-bgCtx.Done():
+		return
+	case <-time.After(5 * time.Second):
+	}
+	peersCount := len(dht.RoutingTable().ListPeers())
+	logger.Infof("DHT routing table now has %d peers", peersCount)
+
+	// Advertise the rendezvous point
+	rendezvous := "greenhouse-p2p-network"
+	logger.Infof("Advertising rendezvous point: %s", rendezvous)
+
+	// Generate a valid CID from the rendezvous string
+	hash := sha256.Sum256([]byte(rendezvous))
+	mh, err := multihash.Encode(hash[:], multihash.SHA2_256)
+	if err != nil {
+		logger.Warnf("Failed to create multihash for rendezvous: %v", err)
+		return
+	}
+	rendezvousCID := cid.NewCidV1(cid.Raw, mh)
+
+	if err := dht.Provide(bgCtx, rendezvousCID, true); err != nil {
+		logger.Warnf("Failed to advertise rendezvous point: %v", err)
+	} else {
+		logger.Infof("Rendezvous point advertised successfully")
+	}
+
+	// Discover peers advertising the same rendezvous point
+	for {
+		if bgCtx.Err() != nil {
+			return // node is shutting down
+		}
+		peers, err := dht.FindProviders(bgCtx, rendezvousCID)
+		if err != nil {
+			logger.Debugf("Error finding providers: %v", err)
+		} else {
+			for _, p := range peers {
+				if p.ID != h.ID() {
+					logger.Infof("Discovered peer: %s", p.ID.String())
+					if err := h.Connect(bgCtx, p); err != nil {
+						logger.Debugf("Failed to connect to peer %s: %v", p.ID.String(), err)
+					} else {
+						logger.Infof("Successfully connected to peer: %s", p.ID.String())
+					}
+				}
+			}
+		}
+		select {
+		case <-bgCtx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
 }
 
 func (n *P2PNode) BroadcastAllowlistTransaction(at AllowlistTransaction) error {
@@ -899,6 +979,9 @@ func (n *P2PNode) BroadcastPaymentConfirmation(pc PaymentConfirmation) error {
 	return n.Topic.Publish(n.publishCtx(), data)
 }
 
+// HandleMessages is a thin orchestrator: the receive loop stays here (Sub.Next,
+// self-origin filter, revoked-peer filter, envelope unmarshal) and each
+// message type's processing is delegated to a dedicated handler below.
 func (n *P2PNode) HandleMessages(ctx context.Context) {
 	if n != nil && n.ConsensusSub != nil {
 		go n.handleConsensusMessages(ctx)
@@ -941,148 +1024,193 @@ func (n *P2PNode) HandleMessages(ctx context.Context) {
 		// Process the message based on its type
 		switch p2pMessage.Type {
 		case MessageTypeTransaction:
-			var tx Transaction
-			if err := json.Unmarshal(p2pMessage.Payload, &tx); err != nil {
-				log.Printf("Failed to deserialize transaction: %v", err)
-				continue
-			}
-			log.Printf("Received transaction: %+v", tx)
-			n.Blockchain.AddTransaction(tx)
-
+			n.handleTransactionMessage(p2pMessage.Payload)
 		case MessageTypeBlock:
-			var block Block
-			if err := json.Unmarshal(p2pMessage.Payload, &block); err != nil {
-				log.Printf("Failed to deserialize block: %v", err)
-				continue
-			}
-			log.Printf("Received block: %+v", block)
-			// Validate and append under the write lock, but do NOT call
-			// AddBlock (which broadcasts) while holding the lock — a slow
-			// network publish would deadlock the entire chain. Instead we
-			// do the state mutation inline (same as AddBlock minus broadcast),
-			// then apply the block's state transitions (order matching, DVP
-			// settlement, RFQ/market-maker registries, holdings, etc.) so this
-			// node's own state stays in sync with the sealing node rather than
-			// only recording the block shell (see AUDIT §14.3 finding 3).
-			n.Blockchain.Mu.Lock()
-			if n.Blockchain.ValidateBlock(block) {
-				if len(n.Blockchain.Blocks) > 0 {
-					block.PrevHash = n.Blockchain.Blocks[len(n.Blockchain.Blocks)-1].CalculateHash()
-				} else {
-					block.PrevHash = strings.Repeat("0", 64)
-				}
-				block.Index = len(n.Blockchain.Blocks)
-				block.Nonce = n.Blockchain.Nonce
-				block.SetPayloadHash()
-				n.Blockchain.Blocks = append(n.Blockchain.Blocks, block)
-				n.Blockchain.Nonce++
-				idx := len(n.Blockchain.Blocks) - 1
-				n.Blockchain.markCommittedTxHashes(&n.Blockchain.Blocks[idx])
-				if n.Blockchain.BlockStore != nil {
-					if err := n.Blockchain.BlockStore.SaveBlock(&n.Blockchain.Blocks[idx]); err != nil {
-						log.Printf("Failed to persist received block %d: %v", idx, err)
-					}
-				}
-				n.Blockchain.applyBlockState(&n.Blockchain.Blocks[idx])
-				if n.Blockchain.BlockStore != nil {
-					if err := n.Blockchain.BlockStore.SaveState(n.Blockchain, idx); err != nil {
-						log.Printf("Failed to persist state snapshot after block %d: %v", idx, err)
-					}
-				}
-			}
-			n.Blockchain.Mu.Unlock()
-
+			n.applyReceivedBlock(p2pMessage.Payload)
 		case MessageTypeAck:
-			log.Println("Received acknowledgment message")
-
+			handleAckMessage()
 		case MessageTypePing:
-			log.Println("Received ping message")
-			ackMessage := P2PMessage{
-				Type:    MessageTypeAck,
-				Payload: []byte("pong"),
-			}
-			data, _ := json.Marshal(ackMessage)
-			n.Topic.Publish(ctx, data)
-
+			n.handlePingMessage(ctx)
 		case MessageTypeAssetTransaction:
-			var at AssetTransaction
-			if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
-				log.Printf("Failed to deserialize asset transaction: %v", err)
-				continue
-			}
-			n.Blockchain.Mu.Lock()
-			if err := at.Validate(n.Blockchain, n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials, n.Blockchain.PendingCorporateActions, n.Blockchain.AMLScreener); err == nil {
-				n.Blockchain.PendingAssetTransactions = append(n.Blockchain.PendingAssetTransactions, at)
-			} else {
-				log.Printf("Received invalid asset transaction: %v", err)
-			}
-			n.Blockchain.Mu.Unlock()
-
+			n.handleAssetTransactionMessage(p2pMessage.Payload)
 		case MessageTypeCredential:
-			var ct CredentialTransaction
-			if err := json.Unmarshal(p2pMessage.Payload, &ct); err != nil {
-				log.Printf("Failed to deserialize credential transaction: %v", err)
-				continue
-			}
-			// Credentials are registry-signed — apply directly on receipt.
-			n.Blockchain.Mu.Lock()
-			if ct.Attestation.IsValid() {
-				n.Blockchain.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
-			}
-			n.Blockchain.Mu.Unlock()
-
+			n.handleCredentialMessage(p2pMessage.Payload)
 		case MessageTypePaymentConfirmation:
-			var pc PaymentConfirmation
-			if err := json.Unmarshal(p2pMessage.Payload, &pc); err != nil {
-				log.Printf("Failed to deserialize payment confirmation: %v", err)
-				continue
-			}
-			n.Blockchain.Mu.Lock()
-			if n.Blockchain.OracleService.VerifyConfirmation(&pc) {
-				n.Blockchain.cacheConfirmedPaymentLocked(&pc)
-				if err := n.Blockchain.persistConfirmedPaymentLocked(&pc); err != nil {
-					log.Printf("Failed to persist payment confirmation %s: %v", pc.InstructionID, err)
-				}
-			}
-			n.Blockchain.Mu.Unlock()
-
+			n.handlePaymentConfirmationMessage(p2pMessage.Payload)
 		case MessageTypeAllowlistAdd:
-			var at AllowlistTransaction
-			if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
-				log.Printf("Failed to deserialize allowlist transaction: %v", err)
-				continue
-			}
-			if n.Gater != nil {
-				pid, err := peer.Decode(at.PeerID)
-				if err != nil {
-					log.Printf("Rejected allowlist_add with invalid peer ID %q: %v", at.PeerID, err)
-					continue
-				}
-				if err := n.Gater.AllowPeer(pid, at.Signature); err != nil {
-					log.Printf("Rejected allowlist_add for peer %s: %v", at.PeerID, err)
-				}
-			}
-
+			n.handleAllowlistAddMessage(p2pMessage.Payload)
 		case MessageTypeAllowlistRevoke:
-			var at AllowlistTransaction
-			if err := json.Unmarshal(p2pMessage.Payload, &at); err != nil {
-				log.Printf("Failed to deserialize allowlist transaction: %v", err)
-				continue
-			}
-			if n.Gater != nil {
-				pid, err := peer.Decode(at.PeerID)
-				if err != nil {
-					log.Printf("Rejected allowlist_revoke with invalid peer ID %q: %v", at.PeerID, err)
-					continue
-				}
-				if err := n.Gater.RevokePeer(pid, at.Signature); err != nil {
-					log.Printf("Rejected allowlist_revoke for peer %s: %v", at.PeerID, err)
-				}
-			}
-
+			n.handleAllowlistRevokeMessage(p2pMessage.Payload)
 		default:
 			log.Printf("Unknown message type: %s", p2pMessage.Type)
 		}
+	}
+}
+
+// handleTransactionMessage deserializes and queues a received base Transaction.
+func (n *P2PNode) handleTransactionMessage(payload []byte) {
+	var tx Transaction
+	if err := json.Unmarshal(payload, &tx); err != nil {
+		log.Printf("Failed to deserialize transaction: %v", err)
+		return
+	}
+	log.Printf("Received transaction: %+v", tx)
+	n.Blockchain.AddTransaction(tx)
+}
+
+// applyReceivedBlock deserializes, validates, appends, and applies the state
+// transitions for a block received over P2P.
+func (n *P2PNode) applyReceivedBlock(payload []byte) {
+	var block Block
+	if err := json.Unmarshal(payload, &block); err != nil {
+		log.Printf("Failed to deserialize block: %v", err)
+		return
+	}
+	log.Printf("Received block: %+v", block)
+	// Validate and append under the write lock, but do NOT call
+	// AddBlock (which broadcasts) while holding the lock — a slow
+	// network publish would deadlock the entire chain. Instead we
+	// do the state mutation inline (same as AddBlock minus broadcast),
+	// then apply the block's state transitions (order matching, DVP
+	// settlement, RFQ/market-maker registries, holdings, etc.) so this
+	// node's own state stays in sync with the sealing node rather than
+	// only recording the block shell (see AUDIT §14.3 finding 3).
+	n.Blockchain.Mu.Lock()
+	defer n.Blockchain.Mu.Unlock()
+	if !n.Blockchain.ValidateBlock(block) {
+		return
+	}
+	if len(n.Blockchain.Blocks) > 0 {
+		block.PrevHash = n.Blockchain.Blocks[len(n.Blockchain.Blocks)-1].CalculateHash()
+	} else {
+		block.PrevHash = strings.Repeat("0", 64)
+	}
+	block.Index = len(n.Blockchain.Blocks)
+	block.Nonce = n.Blockchain.Nonce
+	block.SetPayloadHash()
+	n.Blockchain.Blocks = append(n.Blockchain.Blocks, block)
+	n.Blockchain.Nonce++
+	idx := len(n.Blockchain.Blocks) - 1
+	n.Blockchain.markCommittedTxHashes(&n.Blockchain.Blocks[idx])
+	if n.Blockchain.BlockStore != nil {
+		if err := n.Blockchain.BlockStore.SaveBlock(&n.Blockchain.Blocks[idx]); err != nil {
+			log.Printf("Failed to persist received block %d: %v", idx, err)
+		}
+	}
+	n.Blockchain.applyBlockState(&n.Blockchain.Blocks[idx])
+	if n.Blockchain.BlockStore != nil {
+		if err := n.Blockchain.BlockStore.SaveState(n.Blockchain, idx); err != nil {
+			log.Printf("Failed to persist state snapshot after block %d: %v", idx, err)
+		}
+	}
+}
+
+// handleAckMessage logs receipt of an acknowledgment message.
+func handleAckMessage() {
+	log.Println("Received acknowledgment message")
+}
+
+// handlePingMessage responds to a ping with an ack on the main topic.
+func (n *P2PNode) handlePingMessage(ctx context.Context) {
+	log.Println("Received ping message")
+	ackMessage := P2PMessage{
+		Type:    MessageTypeAck,
+		Payload: []byte("pong"),
+	}
+	data, _ := json.Marshal(ackMessage)
+	n.Topic.Publish(ctx, data)
+}
+
+// handleAssetTransactionMessage deserializes and validates a received
+// AssetTransaction, queueing it for block inclusion if valid.
+func (n *P2PNode) handleAssetTransactionMessage(payload []byte) {
+	var at AssetTransaction
+	if err := json.Unmarshal(payload, &at); err != nil {
+		log.Printf("Failed to deserialize asset transaction: %v", err)
+		return
+	}
+	n.Blockchain.Mu.Lock()
+	defer n.Blockchain.Mu.Unlock()
+	if err := at.Validate(n.Blockchain, n.Blockchain.Assets, n.Blockchain.Holdings, n.Blockchain.Credentials, n.Blockchain.PendingCorporateActions, n.Blockchain.AMLScreener); err == nil {
+		n.Blockchain.PendingAssetTransactions = append(n.Blockchain.PendingAssetTransactions, at)
+	} else {
+		log.Printf("Received invalid asset transaction: %v", err)
+	}
+}
+
+// handleCredentialMessage applies a received, registry-signed credential
+// attestation directly (no block-inclusion queue).
+func (n *P2PNode) handleCredentialMessage(payload []byte) {
+	var ct CredentialTransaction
+	if err := json.Unmarshal(payload, &ct); err != nil {
+		log.Printf("Failed to deserialize credential transaction: %v", err)
+		return
+	}
+	// Credentials are registry-signed — apply directly on receipt.
+	n.Blockchain.Mu.Lock()
+	defer n.Blockchain.Mu.Unlock()
+	if ct.Attestation.IsValid() {
+		n.Blockchain.Credentials[ct.Attestation.WalletPublicKey] = &ct.Attestation
+	}
+}
+
+// handlePaymentConfirmationMessage verifies and caches/persists a received
+// payment confirmation.
+func (n *P2PNode) handlePaymentConfirmationMessage(payload []byte) {
+	var pc PaymentConfirmation
+	if err := json.Unmarshal(payload, &pc); err != nil {
+		log.Printf("Failed to deserialize payment confirmation: %v", err)
+		return
+	}
+	n.Blockchain.Mu.Lock()
+	defer n.Blockchain.Mu.Unlock()
+	if n.Blockchain.OracleService.VerifyConfirmation(&pc) {
+		n.Blockchain.cacheConfirmedPaymentLocked(&pc)
+		if err := n.Blockchain.persistConfirmedPaymentLocked(&pc); err != nil {
+			log.Printf("Failed to persist payment confirmation %s: %v", pc.InstructionID, err)
+		}
+	}
+}
+
+// handleAllowlistAddMessage verifies and applies a received allowlist
+// admission transaction.
+func (n *P2PNode) handleAllowlistAddMessage(payload []byte) {
+	var at AllowlistTransaction
+	if err := json.Unmarshal(payload, &at); err != nil {
+		log.Printf("Failed to deserialize allowlist transaction: %v", err)
+		return
+	}
+	if n.Gater == nil {
+		return
+	}
+	pid, err := peer.Decode(at.PeerID)
+	if err != nil {
+		log.Printf("Rejected allowlist_add with invalid peer ID %q: %v", at.PeerID, err)
+		return
+	}
+	if err := n.Gater.AllowPeer(pid, at.Signature); err != nil {
+		log.Printf("Rejected allowlist_add for peer %s: %v", at.PeerID, err)
+	}
+}
+
+// handleAllowlistRevokeMessage verifies and applies a received allowlist
+// revocation transaction.
+func (n *P2PNode) handleAllowlistRevokeMessage(payload []byte) {
+	var at AllowlistTransaction
+	if err := json.Unmarshal(payload, &at); err != nil {
+		log.Printf("Failed to deserialize allowlist transaction: %v", err)
+		return
+	}
+	if n.Gater == nil {
+		return
+	}
+	pid, err := peer.Decode(at.PeerID)
+	if err != nil {
+		log.Printf("Rejected allowlist_revoke with invalid peer ID %q: %v", at.PeerID, err)
+		return
+	}
+	if err := n.Gater.RevokePeer(pid, at.Signature); err != nil {
+		log.Printf("Rejected allowlist_revoke for peer %s: %v", at.PeerID, err)
 	}
 }
 

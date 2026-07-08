@@ -113,14 +113,32 @@ func isPrintableName(s string) bool {
 //
 // This replaces the legacy IsComplete() empty-string check with full semantic
 // validation required for AML/KYC compliance under 5AMLD, MLR 2017, and MiFID II.
+//
+// Validation is delegated to one section-scoped helper per part of the record,
+// invoked in the same order as this doc comment lists them. Each helper is
+// independently testable and self-contained (no cross-section dependencies).
 func (r *RegistrationRecord) Validate() []ValidationError {
 	var errs []ValidationError
+	errs = append(errs, r.personalInfoErrors()...)
+	errs = append(errs, r.addressErrors()...)
+	errs = append(errs, r.documentErrors()...)
+	errs = append(errs, r.consentErrors()...)
+	// Corporate/institutional checks only apply when Corporate is present —
+	// individual investors leave this nil and are unaffected.
+	if r.Corporate != nil {
+		errs = append(errs, r.corporateErrors()...)
+	}
+	errs = append(errs, r.jurisdictionErrors()...)
+	return errs
+}
 
+// personalInfoErrors validates full legal name, date of birth (incl. age ≥ 18),
+// nationality, tax residency, and optional tax ID number.
+func (r *RegistrationRecord) personalInfoErrors() []ValidationError {
+	var errs []ValidationError
 	add := func(field, msg string) {
 		errs = append(errs, ValidationError{Field: field, Message: msg})
 	}
-
-	// ── Personal information ───────────────────────────────────────────────────
 
 	name := strings.TrimSpace(r.Personal.FullLegalName)
 	switch {
@@ -164,7 +182,15 @@ func (r *RegistrationRecord) Validate() []ValidationError {
 		add("personal.tax_id_number", "if provided, must be between 4 and 50 characters")
 	}
 
-	// ── Residential address ────────────────────────────────────────────────────
+	return errs
+}
+
+// addressErrors validates the residential address block.
+func (r *RegistrationRecord) addressErrors() []ValidationError {
+	var errs []ValidationError
+	add := func(field, msg string) {
+		errs = append(errs, ValidationError{Field: field, Message: msg})
+	}
 
 	if strings.TrimSpace(r.Address.Line1) == "" {
 		add("address.line1", "is required")
@@ -190,7 +216,16 @@ func (r *RegistrationRecord) Validate() []ValidationError {
 		add("address.country", fmt.Sprintf("%q is not a valid ISO 3166-1 alpha-2 country code", r.Address.Country))
 	}
 
-	// ── Identity document ─────────────────────────────────────────────────────
+	return errs
+}
+
+// documentErrors validates the identity document block (type, issuing country,
+// expiry, document hash, proof-of-address hash).
+func (r *RegistrationRecord) documentErrors() []ValidationError {
+	var errs []ValidationError
+	add := func(field, msg string) {
+		errs = append(errs, ValidationError{Field: field, Message: msg})
+	}
 
 	if r.Document.Type == "" {
 		add("document.type", "is required")
@@ -227,7 +262,16 @@ func (r *RegistrationRecord) Validate() []ValidationError {
 		add("document.proof_of_address_hash", "must be a 64-character lowercase hexadecimal SHA-256 hash")
 	}
 
-	// ── Compliance consents ────────────────────────────────────────────────────
+	return errs
+}
+
+// consentErrors validates T&C/privacy/risk-warning acceptance timestamps,
+// source-of-funds/wealth declarations, and PEP/sanctions self-certification.
+func (r *RegistrationRecord) consentErrors() []ValidationError {
+	var errs []ValidationError
+	add := func(field, msg string) {
+		errs = append(errs, ValidationError{Field: field, Message: msg})
+	}
 
 	if r.Consents.TermsOfServiceAcceptedAt <= 0 {
 		add("consents.terms_of_service_accepted_at", "terms of service must be accepted before submitting")
@@ -256,40 +300,52 @@ func (r *RegistrationRecord) Validate() []ValidationError {
 		add("consents.not_sanctioned", "applicant must confirm they are not subject to financial sanctions")
 	}
 
-	// ── Corporate / institutional onboarding (Phase 3) ─────────────────────────
-	// Only enforced when Corporate is present — individual investors leave this
-	// nil and are unaffected.
-	if r.Corporate != nil {
-		if r.EntityLEI == "" {
-			add("entity_lei", "is required when registering as a corporate entity")
-		} else if err := ValidateLEI(r.EntityLEI); err != nil {
-			add("entity_lei", err.Error())
-		}
-		if r.Corporate.IncorporationDocumentHash == "" {
-			add("corporate.incorporation_document_hash", "is required")
-		} else if !isValidDocHash(r.Corporate.IncorporationDocumentHash) {
-			add("corporate.incorporation_document_hash", "must be a 64-character lowercase hexadecimal SHA-256 hash")
-		}
-		if r.Corporate.RegisteredAddressHash == "" {
-			add("corporate.registered_address_hash", "is required")
-		} else if !isValidDocHash(r.Corporate.RegisteredAddressHash) {
-			add("corporate.registered_address_hash", "must be a 64-character lowercase hexadecimal SHA-256 hash")
-		}
-		if h := r.Corporate.ArticlesOfAssociationHash; h != "" && !isValidDocHash(h) {
-			add("corporate.articles_of_association_hash", "if provided, must be a 64-character lowercase hexadecimal SHA-256 hash")
-		}
-		if h := r.Corporate.CompaniesHouseExtractHash; h != "" && !isValidDocHash(h) {
-			add("corporate.companies_house_extract_hash", "if provided, must be a 64-character lowercase hexadecimal SHA-256 hash")
-		}
+	return errs
+}
+
+// corporateErrors validates the corporate/institutional onboarding block
+// (Phase 3). Callers must only invoke this when r.Corporate != nil.
+func (r *RegistrationRecord) corporateErrors() []ValidationError {
+	var errs []ValidationError
+	add := func(field, msg string) {
+		errs = append(errs, ValidationError{Field: field, Message: msg})
 	}
 
-	// ── Jurisdiction ──────────────────────────────────────────────────────────
+	if r.EntityLEI == "" {
+		add("entity_lei", "is required when registering as a corporate entity")
+	} else if err := ValidateLEI(r.EntityLEI); err != nil {
+		add("entity_lei", err.Error())
+	}
+	if r.Corporate.IncorporationDocumentHash == "" {
+		add("corporate.incorporation_document_hash", "is required")
+	} else if !isValidDocHash(r.Corporate.IncorporationDocumentHash) {
+		add("corporate.incorporation_document_hash", "must be a 64-character lowercase hexadecimal SHA-256 hash")
+	}
+	if r.Corporate.RegisteredAddressHash == "" {
+		add("corporate.registered_address_hash", "is required")
+	} else if !isValidDocHash(r.Corporate.RegisteredAddressHash) {
+		add("corporate.registered_address_hash", "must be a 64-character lowercase hexadecimal SHA-256 hash")
+	}
+	if h := r.Corporate.ArticlesOfAssociationHash; h != "" && !isValidDocHash(h) {
+		add("corporate.articles_of_association_hash", "if provided, must be a 64-character lowercase hexadecimal SHA-256 hash")
+	}
+	if h := r.Corporate.CompaniesHouseExtractHash; h != "" && !isValidDocHash(h) {
+		add("corporate.companies_house_extract_hash", "if provided, must be a 64-character lowercase hexadecimal SHA-256 hash")
+	}
 
+	return errs
+}
+
+// jurisdictionErrors validates the top-level jurisdiction field.
+func (r *RegistrationRecord) jurisdictionErrors() []ValidationError {
+	var errs []ValidationError
 	if r.Jurisdiction == "" {
-		add("jurisdiction", "is required")
+		errs = append(errs, ValidationError{Field: "jurisdiction", Message: "is required"})
 	} else if !IsValidISO3166(r.Jurisdiction) {
-		add("jurisdiction", fmt.Sprintf("%q is not a valid ISO 3166-1 alpha-2 country code", r.Jurisdiction))
+		errs = append(errs, ValidationError{
+			Field:   "jurisdiction",
+			Message: fmt.Sprintf("%q is not a valid ISO 3166-1 alpha-2 country code", r.Jurisdiction),
+		})
 	}
-
 	return errs
 }

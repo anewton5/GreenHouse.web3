@@ -257,25 +257,37 @@ func (s *Server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
 		a.Metadata.CompanyName = req.Name
 	}
 
-	if _, exists := s.bc.Assets[assetID]; exists {
+	// Mutates s.bc.Assets/Holdings, which are also read/written by the
+	// concurrent block-application engine (applyBlockState) and other
+	// handlers — must hold s.bc.Mu for the whole read-modify-write.
+	conflict := func() bool {
+		s.bc.Mu.Lock()
+		defer s.bc.Mu.Unlock()
+
+		if _, exists := s.bc.Assets[assetID]; exists {
+			return true
+		}
+		s.bc.Assets[assetID] = a
+
+		// A-04: Participation notes require SPV admin countersignature before supply
+		// is released. Leave CirculatingSupply = 0 and create no issuer holding.
+		// The POST /v1/assets/{id}/countersign endpoint releases supply.
+		if assetType != gonetwork.AssetTypeParticipationNote {
+			// For all other asset types, create the issuer's initial holding at full
+			// supply so they can immediately place ask orders and initiate transfers.
+			issuerHoldingKey := gonetwork.HoldingKey(walletKey, assetID)
+			s.bc.Holdings[issuerHoldingKey] = &gonetwork.AssetHolding{
+				AssetID:  assetID,
+				HolderID: walletKey,
+				Balance:  req.TotalSupply,
+			}
+			a.CirculatingSupply = req.TotalSupply
+		}
+		return false
+	}()
+	if conflict {
 		writeError(w, http.StatusConflict, "asset already exists")
 		return
-	}
-	s.bc.Assets[assetID] = a
-
-	// A-04: Participation notes require SPV admin countersignature before supply
-	// is released. Leave CirculatingSupply = 0 and create no issuer holding.
-	// The POST /v1/assets/{id}/countersign endpoint releases supply.
-	if assetType != gonetwork.AssetTypeParticipationNote {
-		// For all other asset types, create the issuer's initial holding at full
-		// supply so they can immediately place ask orders and initiate transfers.
-		issuerHoldingKey := gonetwork.HoldingKey(walletKey, assetID)
-		s.bc.Holdings[issuerHoldingKey] = &gonetwork.AssetHolding{
-			AssetID:  assetID,
-			HolderID: walletKey,
-			Balance:  req.TotalSupply,
-		}
-		a.CirculatingSupply = req.TotalSupply
 	}
 
 	s.bc.SealBlock(
@@ -661,78 +673,89 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "asset_id is required")
 		return
 	}
-	asset, ok := s.bc.Assets[req.AssetID]
-	if !ok {
-		writeError(w, http.StatusNotFound, "asset not found")
-		return
-	}
-	// A-04: Block ask orders on participation notes that have not yet been
-	// countersigned by the SPV administrator.
-	if asset.AssetType == gonetwork.AssetTypeParticipationNote && asset.CirculatingSupply == 0 && req.Side == "sell" {
-		writeError(w, http.StatusConflict, "asset awaiting SPV admin countersignature: ask orders not permitted until supply is released")
-		return
-	}
-	if req.Quantity <= 0 {
-		writeError(w, http.StatusBadRequest, "quantity must be greater than zero")
-		return
-	}
-	if req.Type == "limit" && req.Price <= 0 {
-		writeError(w, http.StatusBadRequest, "price must be greater than zero for limit orders")
-		return
-	}
 
-	// Map "buy"/"sell" → OrderSide constants.
-	var side gonetwork.OrderSide
-	switch req.Side {
-	case "buy":
-		side = gonetwork.OrderSideBid
-	case "sell":
-		side = gonetwork.OrderSideAsk
-	default:
-		writeError(w, http.StatusBadRequest, "side must be \"buy\" or \"sell\"")
-		return
-	}
+	// Mutates s.bc.OrderBooks, which is also read/written by the concurrent
+	// block-application engine (applyBlockState) and other handlers — must
+	// hold s.bc.Mu for the whole read-validate-mutate sequence.
+	var order *gonetwork.Order
+	var now time.Time
+	apiErr := func() *apiError {
+		s.bc.Mu.Lock()
+		defer s.bc.Mu.Unlock()
 
-	// For market orders use a highly aggressive price to ensure immediate matching.
-	price := req.Price
-	if req.Type == "market" {
-		if side == gonetwork.OrderSideBid {
-			price = 1e15 // will match any ask
-		} else {
-			price = 0.0001 // will match any bid
+		asset, ok := s.bc.Assets[req.AssetID]
+		if !ok {
+			return newAPIError(http.StatusNotFound, "asset not found")
 		}
-	}
+		// A-04: Block ask orders on participation notes that have not yet been
+		// countersigned by the SPV administrator.
+		if asset.AssetType == gonetwork.AssetTypeParticipationNote && asset.CirculatingSupply == 0 && req.Side == "sell" {
+			return newAPIError(http.StatusConflict, "asset awaiting SPV admin countersignature: ask orders not permitted until supply is released")
+		}
+		if req.Quantity <= 0 {
+			return newAPIError(http.StatusBadRequest, "quantity must be greater than zero")
+		}
+		if req.Type == "limit" && req.Price <= 0 {
+			return newAPIError(http.StatusBadRequest, "price must be greater than zero for limit orders")
+		}
 
-	now := time.Now()
-	idSrc := fmt.Sprintf("%s:%s:%d", walletKey, req.AssetID, now.UnixNano())
-	idHash := sha3.Sum256([]byte(idSrc))
-	orderID := hex.EncodeToString(idHash[:])
+		// Map "buy"/"sell" → OrderSide constants.
+		var side gonetwork.OrderSide
+		switch req.Side {
+		case "buy":
+			side = gonetwork.OrderSideBid
+		case "sell":
+			side = gonetwork.OrderSideAsk
+		default:
+			return newAPIError(http.StatusBadRequest, "side must be \"buy\" or \"sell\"")
+		}
 
-	order := &gonetwork.Order{
-		ID:       orderID,
-		AssetID:  req.AssetID,
-		Side:     side,
-		Type:     req.Type,
-		Price:    price,
-		Quantity: req.Quantity,
-		Filled:   0,
-		PlacedBy: walletKey,
-		PlacedAt: now.UnixNano(),
-		Status:   gonetwork.OrderStatusOpen,
-	}
+		// For market orders use a highly aggressive price to ensure immediate matching.
+		price := req.Price
+		if req.Type == "market" {
+			if side == gonetwork.OrderSideBid {
+				price = 1e15 // will match any ask
+			} else {
+				price = 0.0001 // will match any bid
+			}
+		}
 
-	// Get or create the order book for this asset.
-	ob, ok := s.bc.OrderBooks[req.AssetID]
-	if !ok {
-		ob = gonetwork.NewOrderBook(req.AssetID)
-		s.bc.OrderBooks[req.AssetID] = ob
-	}
+		now = time.Now()
+		idSrc := fmt.Sprintf("%s:%s:%d", walletKey, req.AssetID, now.UnixNano())
+		idHash := sha3.Sum256([]byte(idSrc))
+		orderID := hex.EncodeToString(idHash[:])
 
-	// Insert directly (JWT authentication already validates the caller).
-	if side == gonetwork.OrderSideBid {
-		ob.Bids = append(ob.Bids, order)
-	} else {
-		ob.Asks = append(ob.Asks, order)
+		order = &gonetwork.Order{
+			ID:       orderID,
+			AssetID:  req.AssetID,
+			Side:     side,
+			Type:     req.Type,
+			Price:    price,
+			Quantity: req.Quantity,
+			Filled:   0,
+			PlacedBy: walletKey,
+			PlacedAt: now.UnixNano(),
+			Status:   gonetwork.OrderStatusOpen,
+		}
+
+		// Get or create the order book for this asset.
+		ob, ok := s.bc.OrderBooks[req.AssetID]
+		if !ok {
+			ob = gonetwork.NewOrderBook(req.AssetID)
+			s.bc.OrderBooks[req.AssetID] = ob
+		}
+
+		// Insert directly (JWT authentication already validates the caller).
+		if side == gonetwork.OrderSideBid {
+			ob.Bids = append(ob.Bids, order)
+		} else {
+			ob.Asks = append(ob.Asks, order)
+		}
+		return nil
+	}()
+	if apiErr != nil {
+		writeError(w, apiErr.status, apiErr.msg)
+		return
 	}
 
 	s.bc.EmitEvent(gonetwork.EventOrderPlaced, map[string]any{
@@ -764,16 +787,16 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleCancelOrder marks an order for cancellation.
-// DELETE /v1/orders/{id}
-func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	walletKey := walletFromCtx(r)
-
+// findOpenOrderAndAsset searches every order book for an order with the given
+// ID and resolves its asset. Callers must hold s.bc.Mu (the caller's choice
+// of Lock/RLock) for the duration of this call and any subsequent access to
+// the returned order/asset, since both come directly from server-owned maps
+// shared with the concurrent block-application engine.
+func (s *Server) findOpenOrderAndAsset(orderID string) (*gonetwork.Order, *gonetwork.Asset, *apiError) {
 	var found *gonetwork.Order
 	for _, book := range s.bc.OrderBooks {
 		for _, o := range append(book.Bids, book.Asks...) {
-			if o.ID == id {
+			if o.ID == orderID {
 				found = o
 				break
 			}
@@ -783,18 +806,44 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if found == nil {
-		writeError(w, http.StatusNotFound, "order not found")
+		return nil, nil, newAPIError(http.StatusNotFound, "order not found")
+	}
+	asset, ok := s.bc.Assets[found.AssetID]
+	if !ok {
+		return nil, nil, newAPIError(http.StatusNotFound, "asset not found")
+	}
+	return found, asset, nil
+}
+
+// handleCancelOrder marks an order for cancellation.
+// DELETE /v1/orders/{id}
+func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	walletKey := walletFromCtx(r)
+
+	var found *gonetwork.Order
+	apiErr := func() *apiError {
+		s.bc.Mu.Lock()
+		defer s.bc.Mu.Unlock()
+
+		o, _, err := s.findOpenOrderAndAsset(id)
+		if err != nil {
+			return err
+		}
+		if o.PlacedBy != walletKey {
+			return newAPIError(http.StatusForbidden, "only the order placer may cancel it")
+		}
+		if o.Status != gonetwork.OrderStatusOpen {
+			return newAPIError(http.StatusConflict, "order is not open")
+		}
+		o.Status = gonetwork.OrderStatusCancelled
+		found = o
+		return nil
+	}()
+	if apiErr != nil {
+		writeError(w, apiErr.status, apiErr.msg)
 		return
 	}
-	if found.PlacedBy != walletKey {
-		writeError(w, http.StatusForbidden, "only the order placer may cancel it")
-		return
-	}
-	if found.Status != gonetwork.OrderStatusOpen {
-		writeError(w, http.StatusConflict, "order is not open")
-		return
-	}
-	found.Status = gonetwork.OrderStatusCancelled
 
 	s.bc.EmitEvent(gonetwork.EventOrderCancelled, map[string]any{
 		"order_id": id,
@@ -2567,6 +2616,17 @@ func (s *Server) handleIssuerListOrders(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
+// orderIDPrefix returns the first 8 characters of orderID, or the whole
+// string if it is shorter — a defensive guard against out-of-range slicing.
+// Production order IDs are always 64-char hex, but this avoids a panic for
+// any shorter or malformed ID.
+func orderIDPrefix(orderID string) string {
+	if len(orderID) < 8 {
+		return orderID
+	}
+	return orderID[:8]
+}
+
 // handleFillOrder marks an order as filled and credits the buyer's holding.
 // The issuer must own the asset. Filling allocates tokens from the issuer's
 // holding (or directly from circulating supply if the issuer has no holding yet).
@@ -2575,69 +2635,95 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 	orderID := r.PathValue("id")
 	issuerKey := walletFromCtx(r)
 
-	// Find the order across all books.
 	var found *gonetwork.Order
-	for _, book := range s.bc.OrderBooks {
-		for _, o := range append(book.Bids, book.Asks...) {
-			if o.ID == orderID {
-				found = o
-				break
-			}
+	var trade gonetwork.Trade
+
+	// Mutates s.bc.Holdings/Trades/PendingSARs and order/asset fields, which
+	// are also read/written by the concurrent block-application engine
+	// (applyBlockState) and other handlers — must hold s.bc.Mu for the whole
+	// find-validate-settle sequence. Note: the AML screening call inside
+	// checkFillOrderCompliance therefore runs under this lock, matching how
+	// AssetTransaction.Validate already runs AML screening under bc.Mu via
+	// applyBlockState/SealBlock elsewhere in this codebase.
+	apiErr := func() *apiError {
+		s.bc.Mu.Lock()
+		defer s.bc.Mu.Unlock()
+
+		o, asset, err := s.findOpenOrderAndAsset(orderID)
+		if err != nil {
+			return err
 		}
-		if found != nil {
-			break
+		if asset.Issuer != issuerKey {
+			return newAPIError(http.StatusForbidden, "only the asset issuer may fill orders")
 		}
-	}
-	if found == nil {
-		writeError(w, http.StatusNotFound, "order not found")
+		if o.Status != gonetwork.OrderStatusOpen {
+			return newAPIError(http.StatusConflict, "order is not open")
+		}
+
+		fillQty := o.Quantity - o.Filled
+		tradeID := "trade-" + orderIDPrefix(orderID)
+
+		if err := s.checkFillOrderCompliance(orderID, o, asset, issuerKey, fillQty, tradeID); err != nil {
+			return err
+		}
+
+		trade = s.settleFillOrder(o, asset, issuerKey, fillQty, tradeID)
+		found = o
+		return nil
+	}()
+	if apiErr != nil {
+		writeError(w, apiErr.status, apiErr.msg)
 		return
 	}
 
-	// Verify the caller issued the asset.
-	asset, ok := s.bc.Assets[found.AssetID]
-	if !ok {
-		writeError(w, http.StatusNotFound, "asset not found")
-		return
-	}
-	if asset.Issuer != issuerKey {
-		writeError(w, http.StatusForbidden, "only the asset issuer may fill orders")
-		return
-	}
-	if found.Status != gonetwork.OrderStatusOpen {
-		writeError(w, http.StatusConflict, "order is not open")
-		return
-	}
+	s.bc.EmitEvent(gonetwork.EventTradeExecuted, map[string]any{
+		"trade_id":  trade.ID,
+		"asset_id":  trade.AssetID,
+		"buyer_id":  trade.BuyerID,
+		"seller_id": trade.SellerID,
+		"quantity":  trade.Quantity,
+		"price":     trade.Price,
+	})
+	s.bc.SealBlock(nil, []gonetwork.OrderTransaction{{Order: *found}}, nil)
 
-	fillQty := found.Quantity - found.Filled
+	writeJSON(w, http.StatusOK, map[string]any{
+		"order_id":   orderID,
+		"trade_id":   trade.ID,
+		"status":     "filled",
+		"filled_qty": trade.Quantity,
+		"buyer":      found.PlacedBy,
+		"asset_id":   found.AssetID,
+		"settled_at": time.Now().Unix(),
+	})
+}
 
-	// ---------------------------------------------------------------------------
-	// Part II compliance gate (G-06, G-07, G-08, G-09, G-11)
-	// ---------------------------------------------------------------------------
-
+// checkFillOrderCompliance runs the Part II compliance gate (G-06, G-07,
+// G-08, G-09, G-11) for a fill of fillQty units of asset from issuerKey to
+// found.PlacedBy. Must be called while s.bc.Mu is held (reads/writes
+// s.bc.Credentials, s.bc.SuitabilityAssessments, s.bc.ProspectusExemptions,
+// s.bc.JurisdictionRules, s.bc.Holdings, s.bc.AMLScreener, s.bc.PendingSARs).
+func (s *Server) checkFillOrderCompliance(orderID string, found *gonetwork.Order, asset *gonetwork.Asset, issuerKey string, fillQty float64, tradeID string) *apiError {
 	// Look up the buyer's credential (may be nil for uncredentialled wallets).
 	buyerCred := s.bc.Credentials[found.PlacedBy]
 
 	// G-08: reject transfers to wallets with an expired credential.
 	if buyerCred != nil && buyerCred.ExpiresAt > 0 && time.Now().Unix() > buyerCred.ExpiresAt {
-		writeError(w, http.StatusForbidden, fmt.Sprintf(
+		return newAPIError(http.StatusForbidden, fmt.Sprintf(
 			"buyer KYC credential has expired (expired at unix %d): re-KYC required",
 			buyerCred.ExpiresAt,
 		))
-		return
 	}
 
 	// G-07: MiFID II suitability check for complex instruments (warrants, convertibles).
 	if err := gonetwork.CheckSuitability(found.PlacedBy, asset, s.bc.SuitabilityAssessments); err != nil {
-		writeError(w, http.StatusForbidden, err.Error())
-		return
+		return newAPIError(http.StatusForbidden, err.Error())
 	}
 
 	// G-06: prospectus exemption cap — reject if the buyer would breach the
 	// per-jurisdiction retail holder limit.
 	if exemption, hasExemption := s.bc.ProspectusExemptions[found.AssetID]; hasExemption {
 		if err := gonetwork.CheckProspectusLimits(buyerCred, exemption); err != nil {
-			writeError(w, http.StatusForbidden, err.Error())
-			return
+			return newAPIError(http.StatusForbidden, err.Error())
 		}
 	}
 
@@ -2650,8 +2736,7 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 			// reached anywhere on the platform).
 			currentRetailCount := gonetwork.CountJurisdictionRetailHolders(found.AssetID, buyerCred.Jurisdiction, s.bc.Holdings, s.bc.Credentials)
 			if err := gonetwork.ApplyJurisdictionRule(rule, nil, buyerCred, asset, 0, currentRetailCount); err != nil {
-				writeError(w, http.StatusForbidden, err.Error())
-				return
+				return newAPIError(http.StatusForbidden, err.Error())
 			}
 		}
 	}
@@ -2660,11 +2745,9 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 	// registration records when EUR-equivalent value is >= TravelRuleThresholdEUR.
 	// This keeps the issuer fill API stateless and avoids trusting caller-supplied
 	// PII payloads for regulatory controls.
-	tradeID := fmt.Sprintf("trade-%s", orderID[:8])
 	tradeValue := fillQty * found.Price
 	if _, err := s.bc.AutoTravelRule(found.PlacedBy, issuerKey, tradeID, tradeValue, asset.Currency); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "FATF Travel Rule: "+err.Error())
-		return
+		return newAPIError(http.StatusUnprocessableEntity, "FATF Travel Rule: "+err.Error())
 	}
 
 	// G-09: AML screening via the configured screener.
@@ -2673,16 +2756,14 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 			issuerKey, found.PlacedBy, found.AssetID, fillQty, asset.Currency,
 		)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "AML screening failed: "+err.Error())
-			return
+			return newAPIError(http.StatusInternalServerError, "AML screening failed: "+err.Error())
 		}
 		if alert != nil && alert.Severity == gonetwork.AMLSeverityBlock {
-			writeError(w, http.StatusForbidden, "transfer blocked by AML screening: "+alert.Reason)
-			return
+			return newAPIError(http.StatusForbidden, "transfer blocked by AML screening: "+alert.Reason)
 		}
 		if alert != nil && alert.Severity == gonetwork.AMLSeverityFlag {
 			// Create a SAR draft for compliance review; transfer is permitted.
-			sarID := fmt.Sprintf("sar-%s-%d", orderID[:8], time.Now().UnixNano())
+			sarID := fmt.Sprintf("sar-%s-%d", orderIDPrefix(orderID), time.Now().UnixNano())
 			s.bc.PendingSARs[sarID] = &gonetwork.SARDraft{
 				ID:          sarID,
 				SenderKey:   issuerKey,
@@ -2705,10 +2786,14 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ---------------------------------------------------------------------------
-	// End compliance gate
-	// ---------------------------------------------------------------------------
+	return nil
+}
 
+// settleFillOrder credits the buyer, debits the issuer (if they hold a
+// balance), marks found filled, updates circulating supply, records and
+// returns the Trade. Must be called while s.bc.Mu is held (mutates
+// s.bc.Holdings and s.bc.Trades).
+func (s *Server) settleFillOrder(found *gonetwork.Order, asset *gonetwork.Asset, issuerKey string, fillQty float64, tradeID string) gonetwork.Trade {
 	// Credit the buyer's holding.
 	buyerKey := gonetwork.HoldingKey(found.PlacedBy, found.AssetID)
 	if h, exists := s.bc.Holdings[buyerKey]; exists {
@@ -2733,7 +2818,7 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 	asset.CirculatingSupply += fillQty
 
 	// Record the trade.
-	s.bc.Trades = append(s.bc.Trades, gonetwork.Trade{
+	trade := gonetwork.Trade{
 		ID:         tradeID,
 		AssetID:    found.AssetID,
 		BuyerID:    found.PlacedBy,
@@ -2742,27 +2827,9 @@ func (s *Server) handleFillOrder(w http.ResponseWriter, r *http.Request) {
 		Price:      found.Price,
 		ExecutedAt: time.Now().Unix(),
 		Status:     "settled",
-	})
-
-	s.bc.EmitEvent(gonetwork.EventTradeExecuted, map[string]any{
-		"trade_id":  tradeID,
-		"asset_id":  found.AssetID,
-		"buyer_id":  found.PlacedBy,
-		"seller_id": issuerKey,
-		"quantity":  fillQty,
-		"price":     found.Price,
-	})
-	s.bc.SealBlock(nil, []gonetwork.OrderTransaction{{Order: *found}}, nil)
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"order_id":   orderID,
-		"trade_id":   tradeID,
-		"status":     "filled",
-		"filled_qty": fillQty,
-		"buyer":      found.PlacedBy,
-		"asset_id":   found.AssetID,
-		"settled_at": time.Now().Unix(),
-	})
+	}
+	s.bc.Trades = append(s.bc.Trades, trade)
+	return trade
 }
 
 // handleRejectOrder marks an order as cancelled by the issuer.
@@ -2772,37 +2839,28 @@ func (s *Server) handleRejectOrder(w http.ResponseWriter, r *http.Request) {
 	issuerKey := walletFromCtx(r)
 
 	var found *gonetwork.Order
-	for _, book := range s.bc.OrderBooks {
-		for _, o := range append(book.Bids, book.Asks...) {
-			if o.ID == orderID {
-				found = o
-				break
-			}
-		}
-		if found != nil {
-			break
-		}
-	}
-	if found == nil {
-		writeError(w, http.StatusNotFound, "order not found")
-		return
-	}
+	apiErr := func() *apiError {
+		s.bc.Mu.Lock()
+		defer s.bc.Mu.Unlock()
 
-	asset, ok := s.bc.Assets[found.AssetID]
-	if !ok {
-		writeError(w, http.StatusNotFound, "asset not found")
+		o, asset, err := s.findOpenOrderAndAsset(orderID)
+		if err != nil {
+			return err
+		}
+		if asset.Issuer != issuerKey {
+			return newAPIError(http.StatusForbidden, "only the asset issuer may reject orders")
+		}
+		if o.Status != gonetwork.OrderStatusOpen {
+			return newAPIError(http.StatusConflict, "order is not open")
+		}
+		o.Status = gonetwork.OrderStatusCancelled
+		found = o
+		return nil
+	}()
+	if apiErr != nil {
+		writeError(w, apiErr.status, apiErr.msg)
 		return
 	}
-	if asset.Issuer != issuerKey {
-		writeError(w, http.StatusForbidden, "only the asset issuer may reject orders")
-		return
-	}
-	if found.Status != gonetwork.OrderStatusOpen {
-		writeError(w, http.StatusConflict, "order is not open")
-		return
-	}
-
-	found.Status = gonetwork.OrderStatusCancelled
 
 	s.bc.EmitEvent(gonetwork.EventOrderCancelled, map[string]any{
 		"order_id": orderID,
@@ -3519,20 +3577,6 @@ func (s *Server) handleCounterSignAsset(w http.ResponseWriter, r *http.Request) 
 	assetID := r.PathValue("id")
 	walletKey := walletFromCtx(r)
 
-	asset, ok := s.bc.Assets[assetID]
-	if !ok {
-		writeError(w, http.StatusNotFound, "asset not found")
-		return
-	}
-	if asset.AssetType != gonetwork.AssetTypeParticipationNote {
-		writeError(w, http.StatusBadRequest, "countersignature only applies to participation_note assets")
-		return
-	}
-	if asset.CirculatingSupply > 0 {
-		writeError(w, http.StatusConflict, "asset has already been countersigned")
-		return
-	}
-
 	var req struct {
 		SPVID          string `json:"spv_id"`
 		AdminSignature string `json:"admin_signature"` // base64
@@ -3550,45 +3594,66 @@ func (s *Server) handleCounterSignAsset(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	spv, ok := s.bc.SPVs[req.SPVID]
-	if !ok {
-		writeError(w, http.StatusNotFound, "SPV not found")
-		return
-	}
-	if spv.SPVAdminKey != walletKey {
-		writeError(w, http.StatusForbidden, "only the SPV administrator may countersign")
-		return
-	}
+	// Mutates s.bc.Holdings and asset fields, which are also read/written by
+	// the concurrent block-application engine (applyBlockState) and other
+	// handlers — must hold s.bc.Mu for the whole read-validate-mutate sequence.
+	var circulatingSupply float64
+	apiErr := func() *apiError {
+		s.bc.Mu.Lock()
+		defer s.bc.Mu.Unlock()
 
-	adminSig, err := base64.StdEncoding.DecodeString(req.AdminSignature)
-	if err != nil {
-		adminSig, err = base64.RawURLEncoding.DecodeString(req.AdminSignature)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "admin_signature is not valid base64")
-			return
+		asset, ok := s.bc.Assets[assetID]
+		if !ok {
+			return newAPIError(http.StatusNotFound, "asset not found")
 		}
-	}
+		if asset.AssetType != gonetwork.AssetTypeParticipationNote {
+			return newAPIError(http.StatusBadRequest, "countersignature only applies to participation_note assets")
+		}
+		if asset.CirculatingSupply > 0 {
+			return newAPIError(http.StatusConflict, "asset has already been countersigned")
+		}
 
-	// Verify the admin signature covers the asset ID (proving intentional countersign).
-	adminPub, err := gonetwork.PublicKeyFromString(spv.SPVAdminKey)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "SPV has an invalid admin key")
+		spv, ok := s.bc.SPVs[req.SPVID]
+		if !ok {
+			return newAPIError(http.StatusNotFound, "SPV not found")
+		}
+		if spv.SPVAdminKey != walletKey {
+			return newAPIError(http.StatusForbidden, "only the SPV administrator may countersign")
+		}
+
+		adminSig, err := base64.StdEncoding.DecodeString(req.AdminSignature)
+		if err != nil {
+			adminSig, err = base64.RawURLEncoding.DecodeString(req.AdminSignature)
+			if err != nil {
+				return newAPIError(http.StatusBadRequest, "admin_signature is not valid base64")
+			}
+		}
+
+		// Verify the admin signature covers the asset ID (proving intentional countersign).
+		adminPub, err := gonetwork.PublicKeyFromString(spv.SPVAdminKey)
+		if err != nil {
+			return newAPIError(http.StatusInternalServerError, "SPV has an invalid admin key")
+		}
+		if !gonetwork.VerifySignatureBytes(adminPub, []byte(assetID), adminSig) {
+			return newAPIError(http.StatusUnauthorized, "admin_signature is not valid over asset ID")
+		}
+
+		// Release supply: create issuer holding and set CirculatingSupply.
+		issuerHoldingKey := gonetwork.HoldingKey(asset.Issuer, assetID)
+		s.bc.Holdings[issuerHoldingKey] = &gonetwork.AssetHolding{
+			AssetID:  assetID,
+			HolderID: asset.Issuer,
+			Balance:  asset.TotalSupply,
+		}
+		asset.CirculatingSupply = asset.TotalSupply
+		asset.Metadata.ISIN = spv.ID // bind asset to the SPV
+		circulatingSupply = asset.CirculatingSupply
+		return nil
+	}()
+	if apiErr != nil {
+		writeError(w, apiErr.status, apiErr.msg)
 		return
 	}
-	if !gonetwork.VerifySignatureBytes(adminPub, []byte(assetID), adminSig) {
-		writeError(w, http.StatusUnauthorized, "admin_signature is not valid over asset ID")
-		return
-	}
-
-	// Release supply: create issuer holding and set CirculatingSupply.
-	issuerHoldingKey := gonetwork.HoldingKey(asset.Issuer, assetID)
-	s.bc.Holdings[issuerHoldingKey] = &gonetwork.AssetHolding{
-		AssetID:  assetID,
-		HolderID: asset.Issuer,
-		Balance:  asset.TotalSupply,
-	}
-	asset.CirculatingSupply = asset.TotalSupply
-	asset.Metadata.ISIN = spv.ID // bind asset to the SPV
 
 	s.bc.SealBlock(
 		[]gonetwork.AssetTransaction{{AssetID: assetID, TxType: gonetwork.AssetTxTypeIssue}},
@@ -3598,7 +3663,7 @@ func (s *Server) handleCounterSignAsset(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"asset_id":           assetID,
 		"spv_id":             req.SPVID,
-		"circulating_supply": asset.CirculatingSupply,
+		"circulating_supply": circulatingSupply,
 		"status":             "countersigned",
 	})
 }
